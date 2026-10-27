@@ -251,6 +251,12 @@ namespace Pulsar
                               value, cfg.hotkeyGravityFix);
                 }
             }
+            else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopDoorFollow = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopDoorFollow = {}"sv, cfg.coopDoorFollow);
+            }
             else if (keyLower == "coopbridgerestoreretry" || keyLower == "coop_bridge_restore_retry") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

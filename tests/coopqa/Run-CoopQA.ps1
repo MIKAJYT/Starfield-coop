@@ -41,7 +41,11 @@ param(
     [switch]$MeasureOnly,
     [int]   $MeasureSec   = 60,
     # Test copies run with memory-saving settings unless this is set (see LowMemoryIni).
-    [switch]$NoLowMemory
+    [switch]$NoLowMemory,
+    # follow: host moves, client's clone must follow. door: host uses a load door,
+    # client must stay (CoopDoorFollow=0). -DoorFollow sets CoopDoorFollow=1: twin.
+    [ValidateSet("follow", "door")][string]$Scenario = "follow",
+    [switch]$DoorFollow
 )
 
 # Memory-saving settings for test copies. Names are setting names found in
@@ -88,7 +92,7 @@ function Invoke-CoopScore {
                 dHostSeesClient = (Get-Dist $hs.clone $cs.player) })
         }
     }
-    $moveAt = 0; foreach ($hs in $hostList) { if ($hs.moved -and $hs.movedAtWallMs -gt 0) { $moveAt = [long]$hs.movedAtWallMs; break } }
+    $moveAt = 0; foreach ($hs in $hostList) { if ($hs.acted -and $hs.actedAtWallMs -gt 0) { $moveAt = [long]$hs.actedAtWallMs; break } }
     $before = @($pairs | Where-Object { $moveAt -eq 0 -or $_.clientSample.wallMs -lt $moveAt })
     $after  = @($pairs | Where-Object { $moveAt -gt 0 -and $_.clientSample.wallMs -ge $moveAt + 5000 })
 
@@ -121,9 +125,69 @@ function Invoke-CoopScore {
     return $r
 }
 
+# ---- door scenario ------------------------------------------------------------
+# The host bot goes through the nearest load door. With CoopDoorFollow=0 (the
+# spec: "doors only move the player who uses them") the host's cell must change
+# and the client's must not, for at least 20 s, while both stay in session.
+function Invoke-DoorScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never used a door (clone never settled?)") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch 'activate ok=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not use a door: $($act.actionInfo)"); return $r }
+    $t0 = [long]$act.actedAtWallMs
+    # Precondition: co-op worked before the door (both clones visible).
+    $hBefore = @($hostList | Where-Object { $_.wallMs -lt $t0 -and $_.cloneVisible })
+    $cBefore = @($clientList | Where-Object { $_.wallMs -lt $t0 -and $_.cloneVisible })
+    if ($hBefore.Count -lt 3 -or $cBefore.Count -lt 3) {
+        $r.Result = "FAIL"; $r.Reasons.Add("co-op was not working before the door (clone samples host $($hBefore.Count), client $($cBefore.Count))"); return $r
+    }
+    $hostCellBefore = $hBefore[-1].playerCell; $clientCellBefore = $cBefore[-1].playerCell
+    $hAfter = @($hostList   | Where-Object { $_.wallMs -ge $t0 + 15000 })
+    $cAfter = @($clientList | Where-Object { $_.wallMs -ge $t0 })
+    $cLate  = @($cAfter | Where-Object { $_.wallMs -ge $t0 + 15000 })
+    if ($hAfter.Count -lt 3 -or $cLate.Count -lt 20) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples after the door (host $($hAfter.Count), client $($cLate.Count) of 20)") }
+        return $r
+    }
+    $hostCellAfter = $hAfter[-1].playerCell
+    $clientCells = @($cAfter | ForEach-Object { $_.playerCell } | Sort-Object -Unique)
+    $r.Details = "door: $($act.actionInfo); host cell $hostCellBefore -> $hostCellAfter; client cells after the door: $($clientCells -join ', ') (before $clientCellBefore)"
+    if ($hostCellAfter -eq $hostCellBefore) { $r.Result = "FAIL"; $r.Reasons.Add("the host did not change cell through the door"); return $r }
+    if (@($clientCells | Where-Object { $_ -ne $clientCellBefore }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client was moved through the door with the host"); return $r }
+    if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the door"); return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
 # ---- scorer self-test (playbook: test the scorer, not only the test) -------
-function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$moved = $false, [long]$movedAt = 0) {
-    [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; moved = $moved; movedAtWallMs = $movedAt }
+function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$acted = $false, [long]$actedAt = 0) {
+    [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; acted = $acted; actedAtWallMs = $actedAt }
+}
+function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, [string]$info = "door 0001ABCD of 2 load doors within 60 m, activate ok=1", [bool]$acts = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $doorAt = $t0 + 10000
+    for ($i = 0; $i -lt 45; $i++) {
+        $t = $t0 + $i * 1000; $after = $acts -and $t -ge $doorAt
+        $hCell = if ($after -and $hostChanges) { "0000BEEF" } else { "032928FE" }
+        $cCell = if ($after -and $clientFollows) { "0000BEEF" } else { "032928FE" }
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true $after $(if ($acts) { $doorAt } else { 0 })
+        $hs | Add-Member playerCell $hCell; $hs | Add-Member actionInfo $(if ($acts) { $info } else { "" }); $hs | Add-Member connected $true
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member playerCell $cCell; $cs | Add-Member connected $true
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun }
 }
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
@@ -146,11 +210,17 @@ function Invoke-ScorerSelfTest {
         @{ Name = "host never moves";        Run = (New-Run -hostMoves $false);        Expect = "TIMEOUT" },
         @{ Name = "clones never visible";    Run = (New-Run -visible $false);          Expect = "TIMEOUT" },
         @{ Name = "no client state";         Run = @{ H = (New-Run).H; C = @() };      Expect = "ERROR" },
-        @{ Name = "roles swapped";           Run = @{ H = (New-Run).C; C = (New-Run).H }; Expect = "FAIL" }
+        @{ Name = "roles swapped";           Run = @{ H = (New-Run).C; C = (New-Run).H }; Expect = "FAIL" },
+        @{ Name = "door: client stays";      Run = (New-DoorRun);                      Expect = "PASS";    Door = $true },
+        @{ Name = "door: client follows";    Run = (New-DoorRun -clientFollows $true); Expect = "FAIL";    Door = $true },
+        @{ Name = "door: host stays";        Run = (New-DoorRun -hostChanges $false);  Expect = "FAIL";    Door = $true },
+        @{ Name = "door: no door found";     Run = (New-DoorRun -info "no load door found"); Expect = "ERROR"; Door = $true },
+        @{ Name = "door: never acted";       Run = (New-DoorRun -acts $false);         Expect = "TIMEOUT"; Door = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
-        $s = Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true
+        $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
         if (-not $ok) { $bad++ }
         Write-Host ("{0,-24} expected {1,-7} got {2,-7} {3}" -f $case.Name, $case.Expect, $s.Result, $(if ($ok) { "ok" } else { "MISMATCH" }))
@@ -208,8 +278,9 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     Remove-Item -LiteralPath $state -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $root "logs\bot-state.json") -ErrorAction SilentlyContinue
     $mode = if ($role -eq "host") { "host" } else { "client" }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`n"
-    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
+    $doorFollowValue = if ($DoorFollow) { 1 } else { 0 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`n"
+    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
     if (-not $NoLowMemory) {
@@ -347,12 +418,13 @@ try {
         if ($cs -and $now - [long]$cs.wallMs -gt 30000) { throw ("client bot state is stale ({0:N0} s old) while the game runs" -f (($now - [long]$cs.wallMs) / 1000)) }
         if (-not $cs -and $now - $clientStart -gt 120000) { throw "client bot wrote nothing within 120 s" }
         $final = (Get-Date) -gt $deadline
-        $score = Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final
+        $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
             $lastLog = Get-Date
-            W ("host: inWorld={0} connected={1} cloneVisible={2} moved={3} | client: inWorld={4} connected={5} cloneVisible={6} | free RAM {7} GB" -f `
-                $(if ($hs) { $hs.inWorld } else { "-" }), $(if ($hs) { $hs.connected } else { "-" }), $(if ($hs) { $hs.cloneVisible } else { "-" }), $(if ($hs) { $hs.moved } else { "-" }),
-                $(if ($cs) { $cs.inWorld } else { "-" }), $(if ($cs) { $cs.connected } else { "-" }), $(if ($cs) { $cs.cloneVisible } else { "-" }), (FreeGB))
+            W ("host: inWorld={0} connected={1} cloneVisible={2} acted={3} cell={4} | client: inWorld={5} connected={6} cloneVisible={7} cell={8} | free RAM {9} GB" -f `
+                $(if ($hs) { $hs.inWorld } else { "-" }), $(if ($hs) { $hs.connected } else { "-" }), $(if ($hs) { $hs.cloneVisible } else { "-" }), $(if ($hs) { $hs.acted } else { "-" }), $(if ($hs) { $hs.playerCell } else { "-" }),
+                $(if ($cs) { $cs.inWorld } else { "-" }), $(if ($cs) { $cs.connected } else { "-" }), $(if ($cs) { $cs.cloneVisible } else { "-" }), $(if ($cs) { $cs.playerCell } else { "-" }), (FreeGB))
         }
         if ($score.Result -ne "PENDING") { $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }; break }
     }

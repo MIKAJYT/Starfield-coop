@@ -485,6 +485,20 @@ void ToggleFollow()
     SetFollow(!g_followEnabled.load(std::memory_order_acquire));
 }
 
+RE::TESObjectREFR* GetDoorTeleportDestination(RE::TESObjectREFR* a_door)
+{
+    TeleportDestResult tdr;
+    return SafeGetTeleportDest(a_door, tdr);
+}
+
+RE::TESObjectREFR* GetDoorTeleportDestination(RE::TESObjectREFR* a_door, const char*& a_why)
+{
+    TeleportDestResult tdr;
+    auto* dest = SafeGetTeleportDest(a_door, tdr);
+    a_why = TeleportDestResultStr(tdr);
+    return dest;
+}
+
 void TickFollowHotkey(int a_vkey)
 {
     // Edge-detect the configured key (default 0x76 = VK_F7). Polled from
@@ -523,6 +537,17 @@ void TickFollowApply()
     float rZ  = g_pendingFollow.rotZ.load(std::memory_order_acquire);
     std::uint32_t dst       = g_pendingFollow.destCell.load(std::memory_order_acquire);
     std::uint32_t doorForm  = g_pendingFollow.sourceDoor.load(std::memory_order_acquire);
+
+    // Spec phase 1: a door moves only the player who uses it (CoopDoorFollow,
+    // default off). The host walking through a door, ship hatches included, no
+    // longer drags the client along; F8 still regroups on demand. Worldspace
+    // changes without a door (takeoff, landing) and fast travel are unchanged.
+    if (doorForm != 0 && !Pulsar::GetConfig().coopDoorFollow) {
+        PLOG_INFO("[PULSAR] AutoFollow: host used door 0x{:08X} to 0x{:08X} - staying here (CoopDoorFollow=0)"sv,
+                  doorForm, dst);
+        NASLOG("AutoFollow: door transit not followed door=0x%08X dst=0x%08X", doorForm, dst);
+        return;
+    }
 
     // K.2 V5 (2026-04-27) - preferred path: read door's ExtraTeleport,
     // extract destination door REFR (= door on the OTHER side), call

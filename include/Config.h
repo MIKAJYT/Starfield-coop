@@ -119,6 +119,13 @@ namespace Pulsar
         // bridged character). ini: CoopBridgeRestoreRetry = 0 (to disable).
         bool        coopBridgeRestoreRetry = true;
 
+        // Doors move only the player who uses them (owner's spec, phase 1). When
+        // 0 (default) the client does NOT follow the host through a door or ship
+        // hatch; each player stays where they are and F8 regroups. 1 = the old
+        // 0.3.0 behaviour (client teleported after the host). Takeoff/landing and
+        // fast travel are not doors and are unaffected. ini: CoopDoorFollow = 1
+        bool        coopDoorFollow        = false;
+
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
         // frame delta when it is set, so ALL NPCs/timers freeze the moment one player

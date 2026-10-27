@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace RE { class TESObjectREFR; }
+
 namespace Pulsar::TransitSync {
 
     // Phase K.1 - Universal Transit-Event Sync.
@@ -83,6 +85,13 @@ namespace Pulsar::TransitSync {
     bool IsFollowEnabled();
     void ToggleFollow();      // flips the bit + logs new state
     void SetFollow(bool a_on);
+
+    // Destination door of a load door (its ExtraTeleport), or nullptr if the
+    // reference is not a load door. SEH-safe. Used by the QA bot to find a door.
+    RE::TESObjectREFR* GetDoorTeleportDestination(RE::TESObjectREFR* a_door);
+    // Same, plus why it failed: "OK", "no-extraList", "no-extraTeleport",
+    // "no-innerBlock", "no-destRef" or "SEH".
+    RE::TESObjectREFR* GetDoorTeleportDestination(RE::TESObjectREFR* a_door, const char*& a_why);
 
     // Polled from Main.cpp permanent task - checks edge of the supplied VK.
     // Default 0x76 = VK_F7 to preserve historical behaviour; the binding is

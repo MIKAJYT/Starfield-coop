@@ -7,13 +7,16 @@
 #include "InventorySync/DirectRestore.h"
 #include "Network/NetworkHost.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "TransitSync/TransitSync.h"
 
 #include <RE/P/PlayerCharacter.h>
 #include <RE/T/TESObjectCELL.h>
+#include <RE/T/TESObjectREFR.h>
 
 #include <Windows.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <share.h>
 #include <fstream>
@@ -25,11 +28,17 @@ namespace Pulsar::TestBot
 {
     namespace
     {
+        // Scenarios (tests/coopqa/Run-CoopQA.ps1 -Scenario):
+        //   follow - the host moves itself; the client's clone must follow.
+        //   door   - the host goes through the nearest load door; with
+        //            CoopDoorFollow=0 the client must stay where it is.
         struct Settings {
             bool        enabled = false;
             std::string stateFile;          // state log, one JSON line per second (test slot logs)
-            std::uint64_t moveAfterMs = 45000;   // host: clone visible this long, then move
-            float       moveMetres = 5.0f;  // host: X offset of the test move (game units = metres)
+            std::string scenario = "follow";
+            std::uint64_t moveAfterMs = 45000;   // host: clone visible this long, then act
+            float       moveMetres = 5.0f;  // follow: X offset of the test move (game units = metres)
+            float       doorRadius = 60.0f; // door: search radius for a load door (metres)
         };
 
         struct State {
@@ -37,9 +46,9 @@ namespace Pulsar::TestBot
             Settings      cfg;
             std::uint64_t nextWriteMs = 0;
             std::uint64_t cloneSeenSinceMs = 0;
-            bool          moved = false;
-            std::uint64_t movedAtWallMs = 0;
-            float         moveTarget[3]{};
+            bool          acted = false;
+            std::uint64_t actedAtWallMs = 0;
+            std::string   actionInfo;
             int           writes = 0;
         };
         State s_state;
@@ -76,6 +85,8 @@ namespace Pulsar::TestBot
                 else if (key == "statefile")   s.stateFile = value;
                 else if (key == "moveafterms") s.moveAfterMs = std::stoull(value);
                 else if (key == "movemetres")  s.moveMetres = std::stof(value);
+                else if (key == "scenario")    s.scenario = value;
+                else if (key == "doorradius")  s.doorRadius = std::stof(value);
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -105,6 +116,114 @@ namespace Pulsar::TestBot
                 s.valid = true;
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             return s;
+        }
+
+        // Nearest load door (a DOOR reference with an ExtraTeleport destination)
+        // in the player's cell, within a_radius. Raw, SEH-wrapped walk of the
+        // cell's reference array, the layout VehicleSync's FURN scan uses
+        // (cell+0x80 size, +0x88 data; ref+0x98 base form, base+0x2E form type).
+        // Per-door evidence when no load door is found (PULSAR.log only).
+        struct DoorSeen {
+            RE::TESObjectREFR* ref;
+            std::uint32_t      baseID;
+            float              dist;
+        };
+
+        void LogDoorsInCell(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz)
+        {
+            DoorSeen seen[64];
+            int n = 0;
+            [&]() noexcept {
+                __try {
+                    if (!a_cell) return;
+                    auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+                    const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                    auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                    if (!data || size == 0 || size > 20000) return;
+                    for (std::uint32_t i = 0; i < size && n < 64; ++i) {
+                        auto* ref = data[i];
+                        if (!ref) continue;
+                        auto* base = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(ref) + 0x98);
+                        if (!base || *(base + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kDOOR)) continue;
+                        auto* loc = reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(ref) + 0x8C);
+                        const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;
+                        seen[n++] = { ref, *reinterpret_cast<std::uint32_t*>(base + 0x28), std::sqrt(dx * dx + dy * dy + dz * dz) };
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }();
+            for (int i = 0; i < n; ++i) {
+                const char* why = "?";
+                Pulsar::TransitSync::GetDoorTeleportDestination(seen[i].ref, why);
+                auto* baseForm = seen[i].ref->data.objectReference.get();
+                const char* edid = baseForm ? baseForm->GetFormEditorID() : nullptr;
+                char line[200];
+                std::snprintf(line, sizeof(line), "door ref %08X base %08X '%s' %.1f m teleport=%s",
+                              seen[i].ref->formID, seen[i].baseID, edid ? edid : "", seen[i].dist, why);
+                const std::string s(line);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s);
+            }
+        }
+
+        // What the door scan saw, for the state log when no door is used.
+        struct DoorScan {
+            std::uint32_t refs = 0;           // references in the cell array
+            int           doors = 0;          // DOOR references
+            int           loadDoors = 0;      // ... with a teleport destination
+            float         nearestLoadDoor = -1.0f;   // metres, any distance
+            bool          seh = false;
+        };
+
+        RE::TESObjectREFR* SafeFindNearestLoadDoor(RE::TESObjectCELL* a_cell, float a_px, float a_py,
+                                                   float a_pz, float a_radius, DoorScan& a_scan) noexcept
+        {
+            a_scan = {};
+            __try {
+                if (!a_cell) return nullptr;
+                auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+                const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                a_scan.refs = size;
+                if (!data || size == 0 || size > 20000) return nullptr;
+                RE::TESObjectREFR* best = nullptr;
+                float bestD2 = a_radius * a_radius;
+                float nearestD2 = -1.0f;
+                for (std::uint32_t i = 0; i < size; ++i) {
+                    auto* ref = data[i];
+                    if (!ref) continue;
+                    auto* base = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(ref) + 0x98);
+                    if (!base || *(base + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kDOOR)) continue;
+                    ++a_scan.doors;
+                    if (!Pulsar::TransitSync::GetDoorTeleportDestination(ref)) continue;
+                    ++a_scan.loadDoors;
+                    auto* loc = reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(ref) + 0x8C);
+                    const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;
+                    const float d2 = dx * dx + dy * dy + dz * dz;
+                    if (nearestD2 < 0 || d2 < nearestD2) nearestD2 = d2;
+                    if (d2 < bestD2) { bestD2 = d2; best = ref; }
+                }
+                if (nearestD2 >= 0) a_scan.nearestLoadDoor = std::sqrt(nearestD2);
+                return best;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                a_scan.seh = true;
+                return nullptr;
+            }
+        }
+
+        // Activate a door as the player would (E key). Deliberately NOT
+        // TransitSync's SafeActivateDoor: that marks the activation as an
+        // auto-follow, which hides it from the transit broadcast under test.
+        bool SafeActivateAsPlayer(RE::TESObjectREFR* a_door, RE::PlayerCharacter* a_player) noexcept
+        {
+            __try {
+                RE::OBJ_ACTIVATE_DATA data{};
+                data.activatedRef = a_door;
+                data.actionRef    = a_player;
+                data.objectToGet  = nullptr;
+                data.count        = 0;
+                return a_door->Activate(data);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
         }
 
         bool SafeMovePlayer(RE::PlayerCharacter* a_player, float a_x, float a_y, float a_z) noexcept
@@ -171,21 +290,36 @@ namespace Pulsar::TestBot
             s_state.cloneSeenSinceMs = 0;
         }
 
-        // The test action: the host moves itself once the partner is settled.
-        if (isHost && !s_state.moved && cloneVisible && me.valid &&
+        // The test action, once the partner is settled: host only.
+        if (isHost && !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
-            s_state.moveTarget[0] = me.x + s_state.cfg.moveMetres;
-            s_state.moveTarget[1] = me.y;
-            s_state.moveTarget[2] = me.z;
-            const bool ok = SafeMovePlayer(player, s_state.moveTarget[0], s_state.moveTarget[1], s_state.moveTarget[2]);
-            s_state.moved = true;
-            s_state.movedAtWallMs = WallMs();
-            char msg[160];
-            std::snprintf(msg, sizeof(msg), "host moved %.1f m on X -> (%.2f,%.2f,%.2f) ok=%d",
-                          s_state.cfg.moveMetres, s_state.moveTarget[0], s_state.moveTarget[1],
-                          s_state.moveTarget[2], ok ? 1 : 0);
-            const std::string line(msg);
-            PLOG_INFO("[PULSAR] TestBot: {}"sv, line);
+            char msg[200];
+            if (s_state.cfg.scenario == "door") {
+                DoorScan scan;
+                auto* door = SafeFindNearestLoadDoor(player->parentCell, me.x, me.y, me.z,
+                                                     s_state.cfg.doorRadius, scan);
+                const bool ok = door && SafeActivateAsPlayer(door, player);
+                if (door) {
+                    std::snprintf(msg, sizeof(msg), "door %08X of %d load doors (%.1f m away), activate ok=%d",
+                                  door->formID, scan.loadDoors, scan.nearestLoadDoor, ok ? 1 : 0);
+                } else {
+                    LogDoorsInCell(player->parentCell, me.x, me.y, me.z);
+                    std::snprintf(msg, sizeof(msg),
+                                  "no load door found: cell %08X refs=%u doors=%d loadDoors=%d nearestLoadDoor=%.1f m radius=%.0f seh=%d",
+                                  me.cellID, scan.refs, scan.doors, scan.loadDoors, scan.nearestLoadDoor,
+                                  s_state.cfg.doorRadius, scan.seh ? 1 : 0);
+                }
+                s_state.actionInfo = msg;
+            } else {
+                const float tx = me.x + s_state.cfg.moveMetres;
+                const bool ok = SafeMovePlayer(player, tx, me.y, me.z);
+                std::snprintf(msg, sizeof(msg), "moved %.1f m on X -> (%.2f,%.2f,%.2f) ok=%d",
+                              s_state.cfg.moveMetres, tx, me.y, me.z, ok ? 1 : 0);
+                s_state.actionInfo = msg;
+            }
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            PLOG_INFO("[PULSAR] TestBot: {} action: {}"sv, s_state.cfg.scenario, s_state.actionInfo);
         }
 
         char cellBuf[16], cloneCellBuf[16];
@@ -203,8 +337,10 @@ namespace Pulsar::TestBot
         j += std::string(",\"cloneVisible\":") + (cloneVisible ? "true" : "false");
         j += std::string(",\"cloneCell\":\"") + cloneCellBuf + "\"";
         j += ",\"clone\":[" + Num(cl.x) + "," + Num(cl.y) + "," + Num(cl.z) + "]";
-        j += std::string(",\"moved\":") + (s_state.moved ? "true" : "false");
-        j += ",\"movedAtWallMs\":" + std::to_string(s_state.movedAtWallMs);
+        j += ",\"scenario\":\"" + s_state.cfg.scenario + "\"";
+        j += std::string(",\"acted\":") + (s_state.acted ? "true" : "false");
+        j += ",\"actedAtWallMs\":" + std::to_string(s_state.actedAtWallMs);
+        j += ",\"actionInfo\":\"" + s_state.actionInfo + "\"";
         j += "}\n";
         WriteState(j);
     }

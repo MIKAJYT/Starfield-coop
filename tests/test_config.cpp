@@ -37,6 +37,14 @@ TEST(Config, EmptyFileGivesTheDefaults)
     CHECK(c.coopGravityAutoFix);
     CHECK_EQ(c.hotkeyGravityFix, 0x73);     // F4
     CHECK(c.coopBridgeRestoreRetry);
+    CHECK(!c.coopDoorFollow);               // spec: doors move only the user
+}
+
+TEST(Config, DoorFollowCanBeTurnedBackOn)
+{
+    CHECK(Parse("CoopDoorFollow = 1\n").coopDoorFollow);
+    CHECK(Parse("coop_door_follow=on\n").coopDoorFollow);
+    CHECK(!Parse("CoopDoorFollow = sometimes\n").coopDoorFollow);
 }
 
 TEST(Config, GravityAndBridgeRetrySettingsAreRead)
