@@ -45,6 +45,7 @@
 #include "NPCSync/NPCSync.h"
 #include "NPCSync/LocomotionApply.h"
 #include "Coop/CoopMortality.h"
+#include "Coop/GravityGuard.h"
 #include "Coop/KillXpSync.h"
 #include "Coop/CombatTaming.h"
 #include "VehicleSync/VehicleSync.h"
@@ -1263,6 +1264,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 }
 
                 Pulsar::CellDiag::Tick(g_config.isHost);
+                Pulsar::Coop::GravityGuard::Tick(g_config.isHost);
                 Pulsar::TransitSync::Tick();
                 Pulsar::Lobby::TickApplyProfile();   // Teil 2C: apply staged profile-in once
                 Pulsar::Lobby::TickAutoSave();        // auto-save: drain capture request (game thread)

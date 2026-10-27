@@ -235,6 +235,28 @@ namespace Pulsar
                 cfg.syncCloneWeapons = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: SyncCloneWeapons = {}"sv, cfg.syncCloneWeapons);
             }
+            else if (keyLower == "coopgravityautofix" || keyLower == "coop_gravity_auto_fix") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopGravityAutoFix = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopGravityAutoFix = {}"sv, cfg.coopGravityAutoFix);
+            }
+            else if (keyLower == "hotkeygravityfix" || keyLower == "hotkey_gravityfix") {
+                int vk = ParseVKey(value);
+                if (vk > 0) {
+                    cfg.hotkeyGravityFix = vk;
+                    PLOG_INFO("[PULSAR] Config: HotkeyGravityFix = {} (VK 0x{:02X})"sv, value, vk);
+                } else {
+                    PLOG_WARN("[PULSAR] Config: HotkeyGravityFix '{}' unparseable - keeping 0x{:02X}"sv,
+                              value, cfg.hotkeyGravityFix);
+                }
+            }
+            else if (keyLower == "coopbridgerestoreretry" || keyLower == "coop_bridge_restore_retry") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopBridgeRestoreRetry = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopBridgeRestoreRetry = {}"sv, cfg.coopBridgeRestoreRetry);
+            }
             else if (keyLower == "sharedvehicleride" || keyLower == "shared_vehicle_ride") {
                 const auto mode = Pulsar::VehicleSync::ParseRideMode(value);
                 cfg.sharedVehicleRide = static_cast<int>(mode);

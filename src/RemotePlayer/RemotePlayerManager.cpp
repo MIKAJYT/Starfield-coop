@@ -3,6 +3,7 @@
 #include "RemotePlayer/EquipSync.h"   // kSyncWeapons/kSyncArmor gates
 #include "Config.h"
 #include "Coop/CoopMortality.h"        // IsRemoteDowned() - gate equip-apply while downed
+#include "Coop/GravityGuard.h"         // OnLocalGravityAction() - engine gravity on/off trace
 #include "VehicleSync/VehicleSync.h"
 #include "FlashlightSync/FlashlightSync.h"
 #include "Network/NetworkHost.h"
@@ -703,9 +704,38 @@ namespace Pulsar::RemotePlayer
         }
     }
 
+    // SEH-wrapped raw read of (actor, action FormID) for the gravity trace.
+    // Runs BEFORE the HookGuard bail: gravity on/off fires mid-transition, which
+    // is exactly when HookGuard reports unsafe. Only compares the actor pointer
+    // (never dereferences it); AACT forms are static and never freed.
+    static uint32_t SafeReadLocalPlayerActionID(void* actionData) noexcept
+    {
+        __try {
+            auto* actor = *reinterpret_cast<RE::Actor**>(
+                reinterpret_cast<uintptr_t>(actionData) + 0x08);
+            if (!actor || actor != RE::PlayerCharacter::GetSingleton()) return 0;
+            auto* action = *reinterpret_cast<RE::BGSAction**>(
+                reinterpret_cast<uintptr_t>(actionData) + 0x18);
+            return action ? action->formID : 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 0;
+        }
+    }
+
     static uint8_t __fastcall HookedPerformAction(void* actionData)
     {
         if (!actionData) return 0;
+
+        // Gravity guard: record the engine's own gravity on/off on the LOCAL
+        // player so GravityGuard can tell whether a transition ran it.
+        {
+            const uint32_t id = SafeReadLocalPlayerActionID(actionData);
+            if (id == Pulsar::Coop::GravityGuard::kActionGravityOn ||
+                id == Pulsar::Coop::GravityGuard::kActionGravityOff) {
+                Pulsar::Coop::GravityGuard::OnLocalGravityAction(
+                    id == Pulsar::Coop::GravityGuard::kActionGravityOn);
+            }
+        }
 
         // HookGuard: bail to engine during save-load + cell-stream chaos.
         // SafeReadActor + IsRemoteOwnedActor walk pointers that engine

@@ -104,6 +104,21 @@ namespace Pulsar
         // they draw or swap weapons. ini: SyncCloneWeapons = 0
         bool        syncCloneWeapons      = true;
 
+        // client gravity guard (Coop/GravityGuard). After a zero-G -> gravity
+        // transition in which the engine never ran ActionGravityOn on the player
+        // (co-location teleports skip the door path), fire it once so the client
+        // stops floating. ini: CoopGravityAutoFix = 0 (to disable).
+        bool        coopGravityAutoFix    = true;
+        // Manual "fix my gravity" key - fires ActionGravityOn on the local player
+        // and logs the gravity state before/after. ini: HotkeyGravityFix = F4
+        int         hotkeyGravityFix      = 0x73;  // VK_F4
+
+        // Bridge restore (InventorySync::DoApply): when the player has no cell
+        // yet on the first post-load tick, retry for up to 30 s instead of
+        // dropping the restore (a dropped restore leaves the client on the host's
+        // bridged character). ini: CoopBridgeRestoreRetry = 0 (to disable).
+        bool        coopBridgeRestoreRetry = true;
+
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
         // frame delta when it is set, so ALL NPCs/timers freeze the moment one player

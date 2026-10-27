@@ -1428,12 +1428,28 @@ namespace Pulsar::InventorySync
         // Caller must guarantee player is loaded into a cell.
         void DoApply()
         {
+            // coopBridgeRestoreRetry: Tick() consumed the request before calling
+            // us, so a player with no cell yet on the first post-load tick used to
+            // drop the bridge restore for good. Re-arm and retry for up to 30 s.
+            constexpr std::uint64_t kApplyRetryMs = 30000;
+            static std::uint64_t s_applyRetryUntil = 0;
+
             auto* player = RE::PlayerCharacter::GetSingleton();
             if (!player || !player->parentCell) {
+                const std::uint64_t now = ::GetTickCount64();
+                if (Pulsar::GetConfig().coopBridgeRestoreRetry) {
+                    if (s_applyRetryUntil == 0) s_applyRetryUntil = now + kApplyRetryMs;
+                    if (now < s_applyRetryUntil) {
+                        s_pendingApply.store(true, std::memory_order_release);   // retry next tick
+                        return;
+                    }
+                }
+                s_applyRetryUntil = 0;
                 PLOG_INFO(
                     "[PULSAR] [InventorySync] apply: no player/cell, skip"sv);
                 return;
             }
+            s_applyRetryUntil = 0;
 
             std::vector<std::uint8_t> blob;
             std::string path;

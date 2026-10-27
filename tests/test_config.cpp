@@ -34,6 +34,26 @@ TEST(Config, EmptyFileGivesTheDefaults)
     CHECK(c.coopPartnerCountsAsFollower);
     CHECK(c.coopTraitNpcsForPartner);
     CHECK(!c.cloneUsePlayerStates);
+    CHECK(c.coopGravityAutoFix);
+    CHECK_EQ(c.hotkeyGravityFix, 0x73);     // F4
+    CHECK(c.coopBridgeRestoreRetry);
+}
+
+TEST(Config, GravityAndBridgeRetrySettingsAreRead)
+{
+    const auto c = Parse(
+        "CoopGravityAutoFix = 0\n"
+        "HotkeyGravityFix = F6\n"
+        "coop_bridge_restore_retry = off\n");
+    CHECK(!c.coopGravityAutoFix);
+    CHECK_EQ(c.hotkeyGravityFix, 0x75);
+    CHECK(!c.coopBridgeRestoreRetry);
+}
+
+TEST(Config, BadGravityHotkeyKeepsTheDefault)
+{
+    const auto c = Parse("HotkeyGravityFix = NotAKey\n");
+    CHECK_EQ(c.hotkeyGravityFix, 0x73);
 }
 
 TEST(Config, NewSettingsAreRead)

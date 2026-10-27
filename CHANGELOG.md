@@ -12,6 +12,23 @@ The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
 
+## Unreleased - gravity guard, bridge restore retry
+
+- **Client gravity after a station or space transition (known 0.3.0 bug).**
+  New `Coop/GravityGuard`: logs the local player's gravity state (`GRAV:`
+  lines) around every transition and every `ActionGravityOn`/`Off` the engine
+  runs on the local player. On the client, after a zero-G to gravity transition
+  in which the engine did not run `ActionGravityOn` (AACT `0x00024655`, read
+  from `Starfield.esm` 1.16.244), it fires it once. `HotkeyGravityFix` (F4)
+  fires it on demand. Settings: `CoopGravityAutoFix`, `HotkeyGravityFix`.
+  *Settings parsing tested; the gravity behaviour is not tested in game.* The
+  cause is a theory: co-location teleports skip the load-door path.
+- **Bridge restore retry.** If the player has no cell yet on the first tick
+  after a bridge load, `InventorySync::DoApply` now retries for up to 30 s
+  instead of dropping the restore (which left the client on the host's
+  character). Setting: `CoopBridgeRestoreRetry`. *Settings parsing tested; not
+  tested in game.*
+
 ## 0.7.4 - Toward 0.7.5: clone animations
 
 New milestone 0.7.5: the partner's clone should play strafe and backwards
