@@ -148,7 +148,9 @@ function Invoke-DoorScore {
         if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never used a door (clone never settled?)") }
         return $r
     }
-    if ($act.actionInfo -notmatch 'activate ok=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not use a door: $($act.actionInfo)"); return $r }
+    # The bot dispatches Papyrus Activate; whether the host really went through
+    # shows as a cell change below, not in the dispatch flag.
+    if ($act.actionInfo -notmatch 'activate dispatched=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not use a door: $($act.actionInfo)"); return $r }
     $t0 = [long]$act.actedAtWallMs
     # Precondition: co-op worked before the door (both clones visible).
     $hBefore = @($hostList | Where-Object { $_.wallMs -lt $t0 -and $_.cloneVisible })
@@ -178,7 +180,7 @@ function Invoke-DoorScore {
 function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$acted = $false, [long]$actedAt = 0) {
     [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; acted = $acted; actedAtWallMs = $actedAt }
 }
-function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, [string]$info = "door 0001ABCD of 2 load doors within 60 m, activate ok=1", [bool]$acts = $true) {
+function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, [string]$info = "door 0001ABCD of 2 load doors (2.8 m away), activate dispatched=1", [bool]$acts = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $doorAt = $t0 + 10000
     for ($i = 0; $i -lt 45; $i++) {
         $t = $t0 + $i * 1000; $after = $acts -and $t -ge $doorAt

@@ -9,6 +9,9 @@
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "TransitSync/TransitSync.h"
 
+#include <RE/B/BSFixedString.h>
+#include <RE/B/BSScriptUtil.h>
+#include <RE/G/GameVM.h>
 #include <RE/P/PlayerCharacter.h>
 #include <RE/T/TESObjectCELL.h>
 #include <RE/T/TESObjectREFR.h>
@@ -216,21 +219,33 @@ namespace Pulsar::TestBot
             }
         }
 
-        // Activate a door as the player would (E key). Deliberately NOT
-        // TransitSync's SafeActivateDoor: that marks the activation as an
-        // auto-follow, which hides it from the transit broadcast under test.
-        bool SafeActivateAsPlayer(RE::TESObjectREFR* a_door, RE::PlayerCharacter* a_player) noexcept
+        // Activate a door as the player would: Papyrus ObjectReference.Activate
+        // (akActivator = player, abDefaultProcessingOnly = false), dispatched on
+        // the script VM like Debug/Buddy's PlaceAtMe. The direct engine call
+        // TESObjectREFR::Activate(OBJ_ACTIVATE_DATA) returned false for every
+        // load door tried (ship hatch, Akila City door 00297D8D) and nobody
+        // moved. Deliberately NOT TransitSync's SafeActivateDoor either: that
+        // marks the activation as an auto-follow and hides the transit under test.
+        // Returns whether the call was queued; the result shows as a cell change.
+        bool DispatchActivateAsPlayer(RE::TESObjectREFR* a_door, RE::PlayerCharacter* a_player)
         {
-            __try {
-                RE::OBJ_ACTIVATE_DATA data{};
-                data.activatedRef = a_door;
-                data.actionRef    = a_player;
-                data.objectToGet  = nullptr;
-                data.count        = 0;
-                return a_door->Activate(data);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                return false;
-            }
+            auto* game = RE::GameVM::GetSingleton();
+            auto* vm = game ? game->GetVM() : nullptr;
+            if (!vm || !a_door || !a_player) return false;
+            RE::BSScript::Variable self, who, dflt;
+            RE::BSScript::PackVariable(self, a_door);
+            RE::BSScript::PackVariable(who, static_cast<RE::TESObjectREFR*>(a_player));
+            RE::BSScript::PackVariable(dflt, false);
+            if (!self.is<RE::BSScript::Object>()) return false;
+            auto obj = RE::BSScript::get<RE::BSScript::Object>(self);
+            auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
+                args.resize(2);
+                args[0] = who;
+                args[1] = dflt;
+                return true;
+            };
+            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
+            return vm->DispatchMethodCall(obj, RE::BSFixedString("Activate"), argFn, callback, 0);
         }
 
         bool SafeMovePlayer(RE::PlayerCharacter* a_player, float a_x, float a_y, float a_z) noexcept
@@ -305,9 +320,9 @@ namespace Pulsar::TestBot
                 DoorScan scan;
                 auto* door = SafeFindNearestLoadDoor(player->parentCell, me.x, me.y, me.z,
                                                      s_state.cfg.doorRadius, scan);
-                const bool ok = door && SafeActivateAsPlayer(door, player);
+                const bool ok = door && DispatchActivateAsPlayer(door, player);
                 if (door) {
-                    std::snprintf(msg, sizeof(msg), "door %08X of %d load doors (%.1f m away), activate ok=%d",
+                    std::snprintf(msg, sizeof(msg), "door %08X of %d load doors (%.1f m away), activate dispatched=%d",
                                   door->formID, scan.loadDoors, scan.nearestLoadDoor, ok ? 1 : 0);
                 } else {
                     LogDoorsInCell(player->parentCell, me.x, me.y, me.z);
