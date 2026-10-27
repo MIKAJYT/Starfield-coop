@@ -14,6 +14,7 @@
 #include "SpaceSync/TakeoffProbe.h"            // L.6 V1.2: dock-probe activate log
 #include "SpaceSync/DockSync.h"                // L.6 V3 Phase 3f: station-activate intercept
 #include "Coop/CoopMortality.h"                // Way-A: revive via clone-activate
+#include "Config.h"                            // coopInstancedEnemyLoot
 
 #include <windows.h>
 #include <MinHook.h>
@@ -293,6 +294,17 @@ namespace {
         if (!form) return 0;
         return *reinterpret_cast<const uint32_t*>(
             static_cast<const uint8_t*>(form) + 0x28);
+    }
+
+    // SEH-wrapped "is this ACHR reference a dead actor" (instanced enemy loot).
+    static bool SafeIsDeadActor(RE::TESObjectREFR* a_ref) noexcept
+    {
+        __try {
+            if (!a_ref || RawFormType(a_ref) != static_cast<uint8_t>(RE::FormType::kACHR)) return false;
+            return reinterpret_cast<RE::Actor*>(a_ref)->IsDead();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
     }
 
     // Container inventory snapshot - (base_formID, totalCount) per entry.
@@ -3855,6 +3867,19 @@ void DrainPendingPickups()
                 "[PULSAR] ContainerSync: no local {} matched base=0x{:08X} type=0x{:02X} @({:.0f},{:.0f},{:.0f})"sv,
                 isActor ? "actor" : "container",
                 t.resolvedContainerBase, t.refType, t.px, t.py, t.pz);
+            continue;
+        }
+
+        // Spec phase 1: enemy loot is instanced - every player can loot the same
+        // corpse (PKT_CORPSE_LOOT already gave both corpses the host's contents).
+        // A take from a DEAD actor therefore does not reach the other machine's
+        // corpse. Living actors (traders) and world containers stay shared:
+        // first to take removes it for everyone. CoopInstancedEnemyLoot = 0 is
+        // the 0.3.0 behaviour (corpse loot shared).
+        if (isActor && Pulsar::GetConfig().coopInstancedEnemyLoot && SafeIsDeadActor(container)) {
+            PLOG_INFO(
+                "[PULSAR] ContainerSync: instanced enemy loot - peer took item 0x{:08X} x{} from corpse 0x{:08X}; keeping our own copy"sv,
+                t.resolvedItemBase, t.count, RawFormID(container));
             continue;
         }
 

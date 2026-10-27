@@ -307,7 +307,12 @@ function Start-Slot([string]$slot) {
         Start-Sleep -Milliseconds 500
         $child = Get-CimInstance Win32_Process -Filter "Name='Starfield.exe' AND ParentProcessId=$($loader.Id)" | Select-Object -First 1
     }
-    if (-not $child) { throw "$slot : no Starfield.exe started by the loader within 60 s" }
+    if (-not $child) {
+        # The loader is ours: stop it, or it keeps sfse_loader.txt open in the
+        # owner's Documents and the owner check after the run cannot move it.
+        if (-not $loader.HasExited) { Stop-Process -Id $loader.Id -Force; [void]$loader.WaitForExit(10000) }
+        throw "$slot : no Starfield.exe started by the loader within 60 s (loader stopped)"
+    }
     $p = Get-Process -Id $child.ProcessId
     $owned[$slot] = @{ Pid = $p.Id; Start = $p.StartTime.ToFileTimeUtc(); Proc = $p }
     [void](W "$slot : Starfield.exe pid $($p.Id) from $($child.ExecutablePath)")
@@ -396,19 +401,36 @@ try {
         throw "measure-done"
     }
 
+    # Let the host's memory settle first: two copies in the world sit close to
+    # this PC's limit, and a client started during the host's streaming peak
+    # tripped the guard. Wait >= 60 s in world and free RAM stable within 0.5 GB
+    # over 15 s (max 3 min).
+    $settleStart = Get-Date; $samples = New-Object System.Collections.Generic.List[double]
+    while ($true) {
+        Start-Sleep -Seconds 5
+        if ($hp.HasExited) { throw "host copy exited (code $($hp.ExitCode))" }
+        $samples.Add((FreeGB)); if ($samples.Count -gt 3) { $samples.RemoveAt(0) }
+        $age = ((Get-Date) - $settleStart).TotalSeconds
+        $spread = ($samples | Measure-Object -Maximum).Maximum - ($samples | Measure-Object -Minimum).Minimum
+        if (($age -ge 60 -and $samples.Count -eq 3 -and $spread -le 0.5) -or $age -ge 180) { break }
+    }
     $free = FreeGB
+    W ("host settled after {0:N0} s, free RAM {1} GB" -f ((Get-Date) - $settleStart).TotalSeconds, $free)
     if ($free -lt 5) { throw "RAM guard: only $free GB free, not starting the client" }
     $cp = Start-Slot $ClientSlot
 
     $hostSeen = New-Object System.Collections.Generic.List[object]; $clientSeen = New-Object System.Collections.Generic.List[object]
     if ($s) { $hostSeen.Add($s) }
-    $lastLog = Get-Date; $clientStart = NowWallMs
+    $lastLog = Get-Date; $clientStart = NowWallMs; $lowRam = 0
     $hs = $s; $cs = $null
     while ($true) {
         Start-Sleep -Seconds 1
         if ($hp.HasExited) { throw "host copy exited during the test (code $($hp.ExitCode))" }
         if ($cp.HasExited) { throw "client copy exited during the test (code $($cp.ExitCode))" }
-        if ((FreeGB) -lt 1) { throw "RAM guard: free RAM below 1 GB" }
+        # RAM guard: a sustained shortage (two samples in a row below 0.7 GB)
+        # stops the run; a single short dip during a load does not.
+        if ((FreeGB) -lt 0.7) { $lowRam++ } else { $lowRam = 0 }
+        if ($lowRam -ge 2) { throw "RAM guard: free RAM below 0.7 GB for 2 s" }
         foreach ($x in (Read-NewSamples $hostState))   { $hostSeen.Add($x); $hs = $x }
         foreach ($x in (Read-NewSamples $clientState)) { $clientSeen.Add($x); $cs = $x }
         # Stale state is an error, never a pass (playbook: a crashed or frozen bot

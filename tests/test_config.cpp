@@ -38,6 +38,13 @@ TEST(Config, EmptyFileGivesTheDefaults)
     CHECK_EQ(c.hotkeyGravityFix, 0x73);     // F4
     CHECK(c.coopBridgeRestoreRetry);
     CHECK(!c.coopDoorFollow);               // spec: doors move only the user
+    CHECK(c.coopInstancedEnemyLoot);        // spec: each player loots their own copy
+}
+
+TEST(Config, InstancedEnemyLootCanBeTurnedOff)
+{
+    CHECK(!Parse("CoopInstancedEnemyLoot = 0\n").coopInstancedEnemyLoot);
+    CHECK(!Parse("coop_instanced_enemy_loot=off\n").coopInstancedEnemyLoot);
 }
 
 TEST(Config, DoorFollowCanBeTurnedBackOn)

@@ -251,6 +251,12 @@ namespace Pulsar
                               value, cfg.hotkeyGravityFix);
                 }
             }
+            else if (keyLower == "coopinstancedenemyloot" || keyLower == "coop_instanced_enemy_loot") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopInstancedEnemyLoot = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopInstancedEnemyLoot = {}"sv, cfg.coopInstancedEnemyLoot);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

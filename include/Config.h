@@ -126,6 +126,13 @@ namespace Pulsar
         // fast travel are not doors and are unaffected. ini: CoopDoorFollow = 1
         bool        coopDoorFollow        = false;
 
+        // Instanced enemy loot (owner's spec, phase 1): every player can loot the
+        // same corpse and gets their own copy. A take from a dead actor is not
+        // mirrored to the other machine's corpse. World containers and living
+        // actors stay shared. 0 = the 0.3.0 behaviour (corpse loot shared).
+        // ini: CoopInstancedEnemyLoot = 0
+        bool        coopInstancedEnemyLoot = true;
+
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
         // frame delta when it is set, so ALL NPCs/timers freeze the moment one player
