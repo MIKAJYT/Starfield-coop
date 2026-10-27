@@ -47,6 +47,8 @@ add_executable(
   test_trait_aliases.cpp
   test_key_exchange.cpp
   test_direction_map.cpp
+  test_harness_policy.cpp
+  test_harness_selftest.cpp
   fakepeer/FakePeer.cpp
   # Production sources under test (must stay free of game headers):
   ${PROJECT_SOURCE_DIR}/src/Profile/ProfileCodec.cpp
@@ -66,3 +68,29 @@ add_executable(
 pulsar_game_free_target(pulsar_fakepeer)
 
 add_test(NAME pulsar_tests COMMAND pulsar_tests)
+
+# PulsarTestHarness.dll: TEST-ONLY SFSE plugin for hard-linked test copies of the
+# game (folder redirect + single-instance workaround, tests/harness/Harness.cpp).
+# Never packaged: tools/package_release.ps1 ships Release\PULSAR.dll by name.
+add_library(pulsar_test_harness SHARED harness/Harness.cpp)
+set_target_properties(pulsar_test_harness PROPERTIES OUTPUT_NAME PulsarTestHarness)
+target_compile_features(pulsar_test_harness PRIVATE cxx_std_23)
+target_compile_options(pulsar_test_harness PRIVATE /W4 /utf-8 /EHsc /permissive- /Zc:__cplusplus)
+target_compile_definitions(pulsar_test_harness PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulsar_test_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pulsar_test_harness PRIVATE minhook::minhook shell32 ole32 user32)
+
+# Stand-in game for the harness self-test (Starfield.exe's single-instance checks).
+add_executable(pulsar_fakegame harness/FakeGame.cpp)
+target_compile_features(pulsar_fakegame PRIVATE cxx_std_23)
+target_compile_options(pulsar_fakegame PRIVATE /W4 /utf-8 /EHsc /permissive-)
+target_compile_definitions(pulsar_fakegame PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(pulsar_fakegame PRIVATE shell32 ole32 user32)
+
+add_dependencies(pulsar_tests pulsar_test_harness pulsar_fakegame)
+target_compile_definitions(
+  pulsar_tests
+  PRIVATE
+  "PULSAR_HARNESS_DLL=\"$<TARGET_FILE:pulsar_test_harness>\""
+  "PULSAR_FAKEGAME_EXE=\"$<TARGET_FILE:pulsar_fakegame>\""
+)

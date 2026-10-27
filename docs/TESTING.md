@@ -45,6 +45,45 @@ test name to run only those, e.g. `pulsar_tests.exe Crypto`. New tests go in
 `tests/`; code under test must not include game headers (the test build swaps
 `PCH.h` for `tests/stub/PCH.h`).
 
+## Test harness plugin (test copies only)
+
+`PulsarTestHarness.dll` (`tests/harness/`) is a test-only SFSE plugin for
+hard-linked test copies of the game. It is never part of a release
+(`tools/package_release.ps1` ships `Release\PULSAR.dll` by name). It does
+nothing unless `PulsarTestHarness.ini` next to it says `Enabled = 1` and names
+both folders:
+
+```
+Enabled = 1
+DocumentsDir = <slot>\profile\Documents
+LocalAppDataDir = <slot>\profile\LocalAppData
+LogFile = <slot>\logs\harness.log
+; RenameMutexes = 0       (test switch: keep Starfield's mutex names)
+; HideOtherWindows = 0    (test switch: let FindWindowA see the other copy)
+```
+
+In SFSE's preload phase (before the game's global initializers and WinMain) it:
+
+- redirects `SHGetKnownFolderPath`, `SHGetFolderPathW` and `SHGetFolderPathA`
+  for Documents and LocalAppData into the slot, process-wide, so the game's
+  `StarfieldPrefs.ini`, `StarfieldCustom.ini`, `Plugins.txt`, saves, SFSE's
+  co-saves and every plugin's log stay in the slot;
+- patches only `Starfield.exe`'s own imports of `CreateMutexA` (named mutexes
+  get a per-process suffix) and `FindWindowA` (another process's window is
+  reported missing), so a second copy can start;
+- logs `GetEnvironmentVariableA` names read by `Starfield.exe`, unchanged.
+
+If the folder hooks cannot be installed it stops the process, rather than let
+a test copy write the owner's real folders. Known leak: SFSE opens its own
+`sfse.txt` before any plugin loads, so `Documents\My Games\Starfield\SFSE\Logs`
+is still created in the real profile.
+
+`pulsar_tests.exe HarnessSelfTest` checks it with real processes against
+`pulsar_fakegame.exe`, a stand-in with Starfield.exe's two single-instance
+checks: with the harness a second copy runs and both folders are redirected;
+each twin (no harness, `Enabled = 0`, `RenameMutexes = 0`,
+`HideOtherWindows = 0`) must be blocked again.
+
 ## Solo buddy (one PC)
 
 Press **F9** in game (no co-op peer connected) to toggle an AI teammate that
