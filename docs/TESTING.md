@@ -97,6 +97,60 @@ against a test-only fake `steam_api64.dll` (`harness/FakeSteamApi.cpp`) that
 counts writes: with the harness 0 of 3 writes arrive; without it, or with
 `BlockCloudWrites = 0`, all 3 do; an unknown interface version stops the copy.
 
+## Automated co-op run: two copies, one PC (`tests/coopqa/Run-CoopQA.ps1`)
+
+One command runs a real host and a real client on one PC and prints one line:
+`RESULT: PASS`, `FAIL`, `TIMEOUT` or `ERROR`.
+
+```
+tests\coopqa\Run-CoopQA.ps1 -SaveFile <a copy of a save>.sfs
+tests\coopqa\Run-CoopQA.ps1 -SelfTest        # scorer self-test, no game
+```
+
+Needs two hard-linked test slots (`instances\sf-a`, `instances\sf-b`) with SFSE,
+the Address Library, PULSAR's data files, a development `PULSAR.dll` and
+`PulsarTestHarness.dll` + `.ini` (see "Test harness plugin"), and Steam running.
+
+What it does:
+
+1. Snapshots the owner's install (SHA-256 of the root files, name and size of
+   every data file), the Steam Cloud files of app 1716740, and the entries of
+   Documents, Documents\My Games, LocalAppData and AppData.
+2. Writes each slot's private `PULSAR.ini` (host / client on 127.0.0.1),
+   `PulsarTestBot.ini`, `StarfieldCustom.ini` with
+   `sStartingConsoleCommand=load PulsarQA_Start`, and copies `-SaveFile` to the
+   slot's own `Saves\PulsarQA_Start.sfs`. It refuses to write any file with more
+   than one hard link.
+3. Starts the host copy, waits for its bot to report "in world", checks free RAM
+   (>= 5 GB), starts the client copy. Closes the client if free RAM drops below 1 GB.
+4. Collects both bots' state samples and scores them (below), until a verdict or
+   the timeout.
+5. Closes only the processes it started (pid + start time), moves the known SFSE
+   log leak out of the owner's Documents, re-checks everything from step 1, and
+   fails the run if anything of the owner's changed.
+
+The bot (`src/Debug/TestBot.cpp`) is part of `PULSAR.dll` in development builds
+only (compiled out with `PULSAR_HARDENED`) and does nothing without
+`PulsarTestBot.ini` next to the DLL. Once a second it writes the copy's view to
+the state file: role, in world, connected, own cell and position, whether the
+partner clone exists with 3D and where. The host bot moves the host
+`MoveMetres` (5) on X once the clone has been visible for `MoveAfterMs` (15 s).
+
+Scoring (`Invoke-CoopScore`, pure function): client samples are paired with the
+nearest host sample (<= 600 ms). PASS needs at least 5 pairs before the move
+with the clone within `-Tolerance` (1.5 m) of the partner's real position in both
+directions (80 % of pairs), the host really moved by at least 80 % of
+`MoveMetres`, and at least 5 pairs from 5 s after the move with the client's clone
+within tolerance of the host's new position. Missing state is `ERROR`; a step
+that never happened is `TIMEOUT`, not `PASS`. `-SelfTest` feeds the scorer seven
+synthetic runs (good, clone off, clone does not follow, host never moves, clones
+never visible, no client state, roles swapped) and must get the expected verdict
+for each. `-ClientPort 7778` is a twin: the client cannot reach the host, so the
+run must not pass.
+
+Each run writes `instances\runs\<time>\`: `run.log`, `host.jsonl`, `client.jsonl`,
+both slots' `harness.log` and `PULSAR.log`.
+
 ## Solo buddy (one PC)
 
 Press **F9** in game (no co-op peer connected) to toggle an AI teammate that

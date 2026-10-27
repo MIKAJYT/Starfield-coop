@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <share.h>
 #include <string>
 
@@ -73,6 +74,14 @@ int main(int argc, char** argv)
         Report("documents", Narrow(docs));
         CoTaskMemFree(docs);
     }
+    // Like PULSAR's LobbyHandoff::LobbyDir: the CRT environment, not a shell API.
+    char*  env = nullptr;
+    size_t envLen = 0;
+    if (_dupenv_s(&env, &envLen, "LOCALAPPDATA") == 0 && env) {
+        Report("envlocalappdata", env);
+        std::free(env);
+    }
+
     char local[MAX_PATH]{};
     if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, nullptr, 0, local)))
         Report("localappdata", local);

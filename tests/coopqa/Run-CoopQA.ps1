@@ -1,0 +1,327 @@
+<#
+.SYNOPSIS
+  One-command co-op QA for PULSAR: two isolated Starfield test copies on one PC,
+  one hosts, one joins over loopback, the in-game TestBot on each side writes what
+  it sees, and this script scores it. Prints exactly one final line:
+  RESULT: PASS | RESULT: FAIL | RESULT: TIMEOUT | RESULT: ERROR
+
+.DESCRIPTION
+  coop-anything playbook/automated-qa.md and multi-instance-testing.md:
+  - test copies are hard-linked slots (instances\<slot>\game) with the test-only
+    PulsarTestHarness (folder redirect, single-instance fix, Steam Cloud block);
+  - the owner's install, Steam Cloud saves and profile folders are hashed or listed
+    before and after, and any change fails the run;
+  - only processes this script started are ever closed (pid + start time);
+  - RAM guard: the client starts only with >= 5 GB free; below 1 GB it is closed.
+
+  Test "host-join-follow": both copies load a copy of -SaveFile at the main menu
+  (sStartingConsoleCommand), the client connects to 127.0.0.1, PULSAR bridges it to
+  the host's save, both spawn the partner's clone. The host bot then moves the host
+  -MoveMetres on X. PASS needs, on both sides, the clone within -Tolerance metres
+  of the partner's real position before the move, and on the client after it.
+
+.EXAMPLE
+  .\Run-CoopQA.ps1 -SaveFile "<backup>\Save11_....sfs"
+  .\Run-CoopQA.ps1 -SelfTest     # scorer self-test only, no game
+#>
+param(
+    [string]$SaveFile,
+    [string]$Instances    = (Join-Path $PSScriptRoot "..\..\instances"),
+    [string]$HostSlot     = "sf-a",
+    [string]$ClientSlot   = "sf-b",
+    [int]   $Port         = 7777,
+    [int]   $ClientPort   = 0,        # twin: a different port must make the run fail
+    [int]   $TimeoutSec   = 600,
+    [double]$MoveMetres   = 5.0,
+    [double]$Tolerance    = 1.5,
+    [string]$GameDir      = "C:\Program Files (x86)\Steam\steamapps\common\Starfield",
+    [switch]$SelfTest
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version 2
+
+# ============================================================================
+# Scorer: a pure function of the two bots' samples (no game, no files).
+# ============================================================================
+function Get-Dist($a, $b) {
+    $dx = [double]$a[0] - [double]$b[0]; $dy = [double]$a[1] - [double]$b[1]; $dz = [double]$a[2] - [double]$b[2]
+    return [math]::Sqrt($dx * $dx + $dy * $dy + $dz * $dz)
+}
+
+function Invoke-CoopScore {
+    param($HostSamples, $ClientSamples, [double]$Tolerance, [double]$MoveMetres, [bool]$Final)
+    # NOTE: PowerShell variable names are case-insensitive ($H is $h), so the lists
+    # and their items need different names.
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    # Precondition: the mode we think we are in (playbook: no hollow passes).
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    # Pair each client sample with the nearest host sample (<= 600 ms apart).
+    $pairs = New-Object System.Collections.Generic.List[object]
+    $hi = 0
+    foreach ($cs in $clientList) {
+        while ($hi + 1 -lt $hostList.Count -and [math]::Abs($hostList[$hi + 1].wallMs - $cs.wallMs) -le [math]::Abs($hostList[$hi].wallMs - $cs.wallMs)) { $hi++ }
+        $hs = $hostList[$hi]
+        if ([math]::Abs($hs.wallMs - $cs.wallMs) -le 600 -and $hs.cloneVisible -and $cs.cloneVisible) {
+            $pairs.Add([pscustomobject]@{ hostSample = $hs; clientSample = $cs
+                dClientSeesHost = (Get-Dist $cs.clone $hs.player)
+                dHostSeesClient = (Get-Dist $hs.clone $cs.player) })
+        }
+    }
+    $moveAt = 0; foreach ($hs in $hostList) { if ($hs.moved -and $hs.movedAtWallMs -gt 0) { $moveAt = [long]$hs.movedAtWallMs; break } }
+    $before = @($pairs | Where-Object { $moveAt -eq 0 -or $_.clientSample.wallMs -lt $moveAt })
+    $after  = @($pairs | Where-Object { $moveAt -gt 0 -and $_.clientSample.wallMs -ge $moveAt + 5000 })
+
+    if ($before.Count -lt 5 -or $moveAt -eq 0 -or $after.Count -lt 5) {
+        if ($Final) {
+            $r.Result = "TIMEOUT"
+            if ($pairs.Count -eq 0) { $r.Reasons.Add("the clones were never visible on both sides at the same time") }
+            elseif ($moveAt -eq 0) { $r.Reasons.Add("the host bot never made the test move") }
+            else { $r.Reasons.Add("not enough samples (before move $($before.Count), after move $($after.Count), need 5 each)") }
+        }
+        return $r
+    }
+    # The step really happened: the host's own position moved by about MoveMetres.
+    $hBefore = @($hostList | Where-Object { $_.wallMs -lt $moveAt })[-1]
+    $hAfter  = @($hostList | Where-Object { $_.wallMs -ge $moveAt + 5000 })[0]
+    $hostMoved = Get-Dist $hBefore.player $hAfter.player
+    if ($hostMoved -lt $MoveMetres * 0.8) { $r.Result = "FAIL"; $r.Reasons.Add(("host did not really move: {0:N2} m" -f $hostMoved)); return $r }
+
+    $okBefore = @($before | Where-Object { $_.dClientSeesHost -le $Tolerance -and $_.dHostSeesClient -le $Tolerance }).Count
+    $okAfter  = @($after  | Where-Object { $_.dClientSeesHost -le $Tolerance }).Count
+    $r.Details = "before move: {0}/{1} pairs within {2} m both ways; after move: {3}/{4} client-clone within {2} m; host moved {5:N2} m" -f `
+        $okBefore, $before.Count, $Tolerance, $okAfter, $after.Count, $hostMoved
+    if ($okBefore -ge [math]::Ceiling($before.Count * 0.8) -and $okAfter -ge [math]::Ceiling($after.Count * 0.8)) { $r.Result = "PASS" }
+    else {
+        $r.Result = "FAIL"
+        $worstB = ($before | Measure-Object -Property dClientSeesHost -Maximum).Maximum
+        $worstA = ($after  | Measure-Object -Property dClientSeesHost -Maximum).Maximum
+        $r.Reasons.Add(("clone off by up to {0:N2} m before / {1:N2} m after the move" -f $worstB, $worstA))
+    }
+    return $r
+}
+
+# ---- scorer self-test (playbook: test the scorer, not only the test) -------
+function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$moved = $false, [long]$movedAt = 0) {
+    [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; moved = $moved; movedAtWallMs = $movedAt }
+}
+function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
+    for ($i = 0; $i -lt 30; $i++) {
+        $t = $t0 + $i * 1000
+        $hm = $hostMoves -and $t -ge $moveAt
+        $hx = if ($hm) { 5.0 } else { 0.0 }
+        $seen = if ($clientFollows -or -not $hm) { $hx } else { 0.0 }
+        # (PowerShell: the comma binds tighter than +, so parenthesise sums inside arrays.)
+        $hostRun   += New-Sample "host"   ($t + 50) @($hx, 0, 0) @((20.0 + $cloneErr), 0, 0) $visible $hm $(if ($hostMoves) { $moveAt } else { 0 })
+        $clientRun += New-Sample "client" $t        @(20.0, 0, 0) @(($seen + $cloneErr), 0, 0) $visible
+    }
+    return @{ H = $hostRun; C = $clientRun }
+}
+function Invoke-ScorerSelfTest {
+    $cases = @(
+        @{ Name = "good run";                Run = (New-Run);                          Expect = "PASS" },
+        @{ Name = "clone 10 m off";          Run = (New-Run -cloneErr 10);             Expect = "FAIL" },
+        @{ Name = "client clone stays put";  Run = (New-Run -clientFollows $false);    Expect = "FAIL" },
+        @{ Name = "host never moves";        Run = (New-Run -hostMoves $false);        Expect = "TIMEOUT" },
+        @{ Name = "clones never visible";    Run = (New-Run -visible $false);          Expect = "TIMEOUT" },
+        @{ Name = "no client state";         Run = @{ H = (New-Run).H; C = @() };      Expect = "ERROR" },
+        @{ Name = "roles swapped";           Run = @{ H = (New-Run).C; C = (New-Run).H }; Expect = "FAIL" }
+    )
+    $bad = 0
+    foreach ($case in $cases) {
+        $s = Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true
+        $ok = $s.Result -eq $case.Expect
+        if (-not $ok) { $bad++ }
+        Write-Host ("{0,-24} expected {1,-7} got {2,-7} {3}" -f $case.Name, $case.Expect, $s.Result, $(if ($ok) { "ok" } else { "MISMATCH" }))
+    }
+    # Only the count goes down the pipeline (anything else would be captured with it).
+    Write-Host $(if ($bad -eq 0) { "SELFTEST: OK ($($cases.Count) cases)" } else { "SELFTEST: FAILED ($bad of $($cases.Count))" })
+    return $bad
+}
+
+if ($SelfTest) { $bad = Invoke-ScorerSelfTest; exit $(if ($bad -eq 0) { 0 } else { 1 }) }
+
+# ============================================================================
+# The run.
+# ============================================================================
+if (-not $SaveFile -or -not (Test-Path -LiteralPath $SaveFile)) { "RESULT: ERROR (-SaveFile missing)"; exit 2 }
+$Instances = (Resolve-Path $Instances).Path
+$runDir = Join-Path $Instances ("runs\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Force $runDir | Out-Null
+$logFile = Join-Path $runDir "run.log"
+function W([string]$s) { $line = "[{0:HH:mm:ss}] {1}" -f (Get-Date), $s; Write-Host $line; Add-Content -LiteralPath $logFile $line -Encoding utf8 }
+function FreeGB { [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 1) }
+
+# ---- owner protection: snapshot -------------------------------------------
+$ownerDocs   = [Environment]::GetFolderPath("MyDocuments")
+$ownerLocal  = [Environment]::GetFolderPath("LocalApplicationData")
+$ownerRoam   = [Environment]::GetFolderPath("ApplicationData")
+$watchDirs   = @($ownerDocs, (Join-Path $ownerDocs "My Games"), $ownerLocal, $ownerRoam)
+function Get-CloudHashes { Get-ChildItem "C:\Program Files (x86)\Steam\userdata" -Directory -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName "1716740" } | Where-Object { Test-Path $_ } |
+    ForEach-Object { Get-ChildItem $_ -Recurse -File } | Get-FileHash | Select-Object Hash, Path }
+function Get-OwnerSnapshot {
+    @{
+        Root  = @(Get-ChildItem -LiteralPath $GameDir -File | Get-FileHash | Select-Object Hash, Path)
+        Data  = @(Get-ChildItem -LiteralPath (Join-Path $GameDir "Data") -Recurse -File | ForEach-Object { "{0}|{1}" -f $_.FullName, $_.Length })
+        Cloud = @(Get-CloudHashes)
+        Dirs  = @($watchDirs | Where-Object { Test-Path $_ } | ForEach-Object { Get-ChildItem -LiteralPath $_ -Force | ForEach-Object { $_.FullName } })
+    }
+}
+
+# ---- slot preparation (private files only) ---------------------------------
+function Write-PrivateFile([string]$path, [string]$content) {
+    if (Test-Path -LiteralPath $path) {
+        if (@(fsutil hardlink list $path).Count -ne 1) { throw "refusing to write $path : it has more than one hard link" }
+        Remove-Item -LiteralPath $path   # delete first, so an old link is never written through
+    }
+    New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+    [IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding $false))
+}
+function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
+    $root = Join-Path $Instances $slot
+    $plugins = Join-Path $root "game\Data\SFSE\Plugins"
+    $mg = Join-Path $root "profile\Documents\My Games\Starfield"
+    if (-not (Test-Path (Join-Path $plugins "PulsarTestHarness.ini"))) { throw "$slot has no PulsarTestHarness.ini" }
+    $state = Join-Path $root "logs\bot-state.json"
+    Remove-Item -LiteralPath $state -ErrorAction SilentlyContinue
+    $mode = if ($role -eq "host") { "host" } else { "client" }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`n"
+    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nMoveAfterMs = 15000`r`nMoveMetres = $MoveMetres`r`n"
+    Write-PrivateFile (Join-Path $mg "StarfieldCustom.ini") ("[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
+        "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n")
+    $saves = Join-Path $mg "Saves"
+    New-Item -ItemType Directory -Force $saves | Out-Null
+    $dst = Join-Path $saves "PulsarQA_Start.sfs"
+    if (Test-Path -LiteralPath $dst) { Remove-Item -LiteralPath $dst }
+    Copy-Item -LiteralPath $SaveFile $dst
+    return $state
+}
+
+# ---- processes this run owns ------------------------------------------------
+$owned = @{}
+function Start-Slot([string]$slot) {
+    $game = Join-Path $Instances "$slot\game"
+    $loader = Start-Process (Join-Path $game "sfse_loader.exe") -WorkingDirectory $game -PassThru
+    $t0 = Get-Date; $child = $null
+    while (-not $child -and ((Get-Date) - $t0).TotalSeconds -lt 60) {
+        Start-Sleep -Milliseconds 500
+        $child = Get-CimInstance Win32_Process -Filter "Name='Starfield.exe' AND ParentProcessId=$($loader.Id)" | Select-Object -First 1
+    }
+    if (-not $child) { throw "$slot : no Starfield.exe started by the loader within 60 s" }
+    $p = Get-Process -Id $child.ProcessId
+    $owned[$slot] = @{ Pid = $p.Id; Start = $p.StartTime.ToFileTimeUtc(); Proc = $p }
+    [void](W "$slot : Starfield.exe pid $($p.Id) from $($child.ExecutablePath)")
+    return $p
+}
+function Stop-Slot([string]$slot) {
+    if (-not $owned.ContainsKey($slot)) { return }
+    $o = $owned[$slot]
+    $p = Get-Process -Id $o.Pid -ErrorAction SilentlyContinue
+    if (-not $p -or $p.ProcessName -ne "Starfield" -or $p.StartTime.ToFileTimeUtc() -ne $o.Start) { W "$slot : pid $($o.Pid) gone or not ours - not touching"; return }
+    [void]$p.CloseMainWindow()
+    if (-not $p.WaitForExit(45000)) { W "$slot : no exit within 45 s - stopping pid $($p.Id)"; Stop-Process -Id $p.Id -Force; [void]$p.WaitForExit(15000) }
+    W "$slot : closed"
+}
+function Read-State([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try { return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json) } catch { return $null }
+}
+
+# ---- main --------------------------------------------------------------------
+$result = "ERROR"; $why = @(); $before = $null
+try {
+    if (Get-Process Starfield, sfse_loader -ErrorAction SilentlyContinue) { throw "a Starfield process is already running (maybe the owner's) - not starting" }
+    if (-not (Get-Process steam -ErrorAction SilentlyContinue)) { throw "Steam is not running" }
+    W "run dir $runDir"
+    $before = Get-OwnerSnapshot
+    W ("owner snapshot: {0} install files, {1} data files, {2} cloud files" -f $before.Root.Count, $before.Data.Count, $before.Cloud.Count)
+
+    $hostState   = Initialize-Slot $HostSlot "host" $Port
+    $clientState = Initialize-Slot $ClientSlot "client" $(if ($ClientPort -gt 0) { $ClientPort } else { $Port })
+    if ($ClientPort -gt 0) { W "TWIN: client port $ClientPort, host port $Port - this run must not pass" }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $hp = Start-Slot $HostSlot
+    W "waiting for the host bot to report in-world"
+    while ($true) {
+        Start-Sleep -Seconds 2
+        if ($hp.HasExited) { throw "host copy exited (code $($hp.ExitCode))" }
+        $s = Read-State $hostState
+        if ($s -and $s.inWorld) { W "host in world, cell $($s.playerCell)"; break }
+        if ((Get-Date) -gt $deadline) { $result = "TIMEOUT"; $why += "host never got into the world (sStartingConsoleCommand load?)"; throw "timeout" }
+    }
+    $free = FreeGB
+    if ($free -lt 5) { throw "RAM guard: only $free GB free, not starting the client" }
+    $cp = Start-Slot $ClientSlot
+
+    $hostSeen = New-Object System.Collections.Generic.List[object]; $clientSeen = New-Object System.Collections.Generic.List[object]
+    $lastH = 0; $lastC = 0; $lastLog = Get-Date
+    while ($true) {
+        Start-Sleep -Seconds 1
+        if ($hp.HasExited) { throw "host copy exited during the test (code $($hp.ExitCode))" }
+        if ($cp.HasExited) { throw "client copy exited during the test (code $($cp.ExitCode))" }
+        if ((FreeGB) -lt 1) { throw "RAM guard: free RAM below 1 GB" }
+        $hs = Read-State $hostState; $cs = Read-State $clientState
+        if ($hs -and $hs.seq -ne $lastH) { $hostSeen.Add($hs); $lastH = $hs.seq; Add-Content -LiteralPath (Join-Path $runDir "host.jsonl") ($hs | ConvertTo-Json -Compress) }
+        if ($cs -and $cs.seq -ne $lastC) { $clientSeen.Add($cs); $lastC = $cs.seq; Add-Content -LiteralPath (Join-Path $runDir "client.jsonl") ($cs | ConvertTo-Json -Compress) }
+        $final = (Get-Date) -gt $deadline
+        $score = Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final
+        if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
+            $lastLog = Get-Date
+            W ("host: inWorld={0} connected={1} cloneVisible={2} moved={3} | client: inWorld={4} connected={5} cloneVisible={6} | free RAM {7} GB" -f `
+                $(if ($hs) { $hs.inWorld } else { "-" }), $(if ($hs) { $hs.connected } else { "-" }), $(if ($hs) { $hs.cloneVisible } else { "-" }), $(if ($hs) { $hs.moved } else { "-" }),
+                $(if ($cs) { $cs.inWorld } else { "-" }), $(if ($cs) { $cs.connected } else { "-" }), $(if ($cs) { $cs.cloneVisible } else { "-" }), (FreeGB))
+        }
+        if ($score.Result -ne "PENDING") { $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }; break }
+    }
+} catch {
+    if ($_.Exception.Message -ne "timeout") { $why += $_.Exception.Message }
+} finally {
+    foreach ($slot in @($ClientSlot, $HostSlot)) { try { Stop-Slot $slot } catch { $why += "closing $slot : $($_.Exception.Message)" } }
+
+    # ---- owner protection: verify ------------------------------------------
+    try {
+        if ($before) {
+            # Known leak: SFSE writes sfse.txt / sfse_loader.txt before any plugin loads.
+            $leak = Join-Path $ownerDocs "My Games\Starfield"
+            if (Test-Path -LiteralPath $leak) {
+                $files = @(Get-ChildItem -LiteralPath $leak -Recurse -File)
+                $other = @($files | Where-Object { $_.FullName -notmatch '\\SFSE\\Logs\\sfse(_loader)?\.txt$' })
+                if ($other.Count -eq 0 -and -not (@($before.Dirs) -contains $leak)) {
+                    $dst = Join-Path $runDir "sfse-leak"; New-Item -ItemType Directory -Force $dst | Out-Null
+                    $files | Move-Item -Destination $dst
+                    foreach ($d in @((Join-Path $leak "SFSE\Logs"), (Join-Path $leak "SFSE"), $leak)) { if ((Test-Path -LiteralPath $d) -and -not (Get-ChildItem -LiteralPath $d -Force)) { Remove-Item -LiteralPath $d } }
+                    W "moved the known SFSE log leak ($($files.Count) files) into the run dir"
+                }
+            }
+            $after = Get-OwnerSnapshot
+            $dRoot  = @(Compare-Object $before.Root $after.Root -Property Path, Hash)
+            $dData  = @(Compare-Object $before.Data $after.Data)
+            $dCloud = @(Compare-Object @($before.Cloud) @($after.Cloud) -Property Path, Hash)
+            $newDirs = @(Compare-Object $before.Dirs $after.Dirs | Where-Object { $_.SideIndicator -eq "=>" } | ForEach-Object { $_.InputObject })
+            W ("owner check: install {0} / data {1} / cloud {2} differences; new entries in watched profile folders: {3}" -f $dRoot.Count, $dData.Count, $dCloud.Count, $(if ($newDirs.Count) { $newDirs -join ", " } else { "none" }))
+            if ($dRoot.Count -or $dData.Count -or $dCloud.Count) { $result = "FAIL"; $why += "OWNER FILES CHANGED (install/data/cloud)" }
+            $suspect = @($newDirs | Where-Object { $_ -match '(?i)starfield|pulsar' })
+            if ($suspect.Count) { $result = "FAIL"; $why += "new owner profile entries: $($suspect -join ', ')" }
+        }
+    } catch { $why += "owner check failed: $($_.Exception.Message)"; $result = "ERROR" }
+
+    foreach ($slot in @($HostSlot, $ClientSlot)) {
+        foreach ($f in @("logs\harness.log", "profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log")) {
+            $src = Join-Path $Instances "$slot\$f"
+            if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src (Join-Path $runDir ("$slot-" + (Split-Path $f -Leaf))) }
+        }
+    }
+    foreach ($w in $why) { W "reason: $w" }
+    Add-Content -LiteralPath $logFile "RESULT: $result" -Encoding utf8
+    Write-Output "RESULT: $result"
+}

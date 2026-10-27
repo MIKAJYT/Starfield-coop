@@ -33,6 +33,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
@@ -431,6 +432,15 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Preload(const void* /*sfse*/)
     Log("=== PulsarTestHarness preload, pid %lu", GetCurrentProcessId());
     Log("Documents -> %s", g_settings.documentsDir.c_str());
     Log("LocalAppData -> %s", g_settings.localAppDataDir.c_str());
+
+    // PULSAR.dll reads %LOCALAPPDATA% from the environment (_dupenv_s in
+    // LobbyHandoff::LobbyDir), not through the shell APIs: the first real launch
+    // created an empty %LOCALAPPDATA%\PULSAR in the owner's profile. Point the
+    // variable at the slot in both the Win32 block and the shared UCRT copy
+    // (PULSAR and this DLL both use the DLL CRT, /MD).
+    SetEnvironmentVariableW(L"LOCALAPPDATA", g_localAppDataW.c_str());
+    _wputenv_s(L"LOCALAPPDATA", g_localAppDataW.c_str());
+    Log("environment LOCALAPPDATA -> %s", g_settings.localAppDataDir.c_str());
 
     // Without the redirect the game would write the owner's real settings and
     // saves folders. In a test slot that is worse than not starting at all.

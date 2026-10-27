@@ -53,6 +53,7 @@
 #include "Profile/ClientProfile.h"
 #include "Lobby/LobbyHandoff.h"
 #include "Debug/Buddy.h"
+#include "Debug/TestBot.h"
 #include "Coop/PartnerFollower.h"
 #include "Coop/TraitAliasesGame.h"
 #include "Animation/DirectionMap.h"
@@ -1282,6 +1283,9 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
 
                 // Solo testing aid: F9 toggles an AI teammate (refused while connected).
                 Pulsar::Buddy::Tick(g_config.hotkeyBuddy, g_config.buddyBaseFormID);
+
+                // Automated co-op QA bot: inert without PulsarTestBot.ini, absent in Release.
+                Pulsar::TestBot::Tick();
 
                 // Teil 1 profile - F10 = save loadout snapshot, F11 = restore it.
                 // (edge-triggered). Demo: F10, drop/sell items, F11 -> items return.

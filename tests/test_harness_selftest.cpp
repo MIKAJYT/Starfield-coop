@@ -195,6 +195,7 @@ TEST(HarnessSelfTest, WithHarnessTwoCopiesRunAndFoldersAreRedirected)
     CHECK_EQ(SecondCopyExit(slot, Unique("on"), true, &report), DWORD(0));
     CHECK_EQ(report["documents"], (slot.dir / "Documents").string());
     CHECK_EQ(report["localappdata"], (slot.dir / "LocalAppData").string());
+    CHECK_EQ(report["envlocalappdata"], (slot.dir / "LocalAppData").string());   // CRT environment too
     CHECK(fs::exists(slot.dir / "Documents"));
     CHECK(fs::exists(slot.dir / "harness.log"));
 }
@@ -205,6 +206,7 @@ TEST(HarnessSelfTest, TwinWithoutHarnessTheSecondCopyIsBlocked)
     std::map<std::string, std::string> report;
     CHECK_EQ(SecondCopyExit(slot, Unique("off"), false, &report), DWORD(3));   // mutex check
     CHECK(report["documents"] != (slot.dir / "Documents").string());            // real folder
+    CHECK(report["envlocalappdata"] != (slot.dir / "LocalAppData").string());   // real environment
 }
 
 TEST(HarnessSelfTest, TwinDisabledSettingsMakeTheHarnessInert)
