@@ -6,6 +6,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cwctype>
 #include <istream>
 #include <string>
 
@@ -66,6 +67,21 @@ namespace Pulsar::TestHarness {
     {
         if (a_name.empty()) return a_name;
         return a_name + "-pulsartest-" + std::to_string(a_pid);
+    }
+
+    // PULSAR.dll's own guard (src/Main.cpp, issue #1): a session-wide mutex that
+    // turns co-op off in a second game. Two test copies on one PC must both run
+    // co-op, so the harness renames exactly this one name, per process. Every
+    // other CreateMutexW name (Steam's, the driver's) passes through unchanged.
+    inline constexpr const wchar_t* kPulsarCoopMutex = L"Local\\PULSAR_CoopSingleInstance";
+
+    inline bool IsPulsarCoopMutex(const std::wstring& a_name)
+    {
+        const std::wstring want = kPulsarCoopMutex;
+        if (a_name.size() != want.size()) return false;
+        for (std::size_t i = 0; i < want.size(); ++i)
+            if (std::towlower(a_name[i]) != std::towlower(want[i])) return false;
+        return true;
     }
 
     // FindWindowA from Starfield.exe: a window that belongs to ANOTHER process
@@ -146,6 +162,7 @@ namespace Pulsar::TestHarness {
         std::string logFile;
         bool        renameMutexes = true;
         bool        hideOtherWindows = true;
+        bool        renamePulsarMutex = true;     // let both test copies run co-op (PULSAR's issue #1 guard)
         bool        blockCloudWrites = true;      // never let a test copy write the owner's Steam Cloud
         bool        reportCloudDisabled = true;   // tell the game cloud is off for this account and app
     };
@@ -190,6 +207,7 @@ namespace Pulsar::TestHarness {
             else if (key == "logfile")          s.logFile = value;
             else if (key == "renamemutexes")    s.renameMutexes = ParseBool(value, true);
             else if (key == "hideotherwindows") s.hideOtherWindows = ParseBool(value, true);
+            else if (key == "renamepulsarmutex") s.renamePulsarMutex = ParseBool(value, true);
             else if (key == "blockcloudwrites") s.blockCloudWrites = ParseBool(value, true);
             else if (key == "reportclouddisabled") s.reportCloudDisabled = ParseBool(value, true);
         }

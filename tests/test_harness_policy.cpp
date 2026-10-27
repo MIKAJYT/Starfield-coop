@@ -53,6 +53,16 @@ TEST(HarnessPolicy, MutexNamesBecomePerProcess)
     CHECK_EQ(UniqueMutexName("", 7), std::string());               // unnamed stays unnamed
 }
 
+TEST(HarnessPolicy, OnlyPulsarsCoopMutexIsRecognised)
+{
+    CHECK(IsPulsarCoopMutex(L"Local\\PULSAR_CoopSingleInstance"));
+    CHECK(IsPulsarCoopMutex(L"local\\pulsar_coopsingleinstance"));
+    CHECK(!IsPulsarCoopMutex(L"Local\\PULSAR_CoopSingleInstanceX"));
+    CHECK(!IsPulsarCoopMutex(L"Global\\PULSAR_CoopSingleInstance"));
+    CHECK(!IsPulsarCoopMutex(L"Local\\SteamOverlayMutex"));
+    CHECK(!IsPulsarCoopMutex(L""));
+}
+
 TEST(HarnessPolicy, OnlyOtherProcessesWindowsAreHidden)
 {
     CHECK(ShouldHideWindow(200, 100));

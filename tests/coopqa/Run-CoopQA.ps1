@@ -35,8 +35,21 @@ param(
     [double]$MoveMetres   = 5.0,
     [double]$Tolerance    = 1.5,
     [string]$GameDir      = "C:\Program Files (x86)\Steam\steamapps\common\Starfield",
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    # Memory profile: start only the host slot, wait until in world, sample for
+    # -MeasureSec, print peak working set / private bytes / GPU memory, close.
+    [switch]$MeasureOnly,
+    [int]   $MeasureSec   = 60,
+    # Test copies run with memory-saving settings unless this is set (see LowMemoryIni).
+    [switch]$NoLowMemory
 )
+
+# Memory-saving settings for test copies. Names are setting names found in
+# Starfield.exe ("<name>:<section>" strings); values other than the defaults are
+# guesses checked by -MeasureOnly runs (docs/TESTING.md).
+$LowMemoryIni = "[Archive]`r`nsResourceArchiveMemoryCacheList=`r`nsResourceMiscArchiveMemoryCacheList=`r`n`r`n" +
+                "[BackgroundLoad]`r`nbMinimizeCachedExteriors=1`r`nbDelayOuterGridCells=1`r`n`r`n" +
+                "[Quality]`r`nuGlobalRendererQuality=0`r`n"
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2
@@ -191,13 +204,20 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $plugins = Join-Path $root "game\Data\SFSE\Plugins"
     $mg = Join-Path $root "profile\Documents\My Games\Starfield"
     if (-not (Test-Path (Join-Path $plugins "PulsarTestHarness.ini"))) { throw "$slot has no PulsarTestHarness.ini" }
-    $state = Join-Path $root "logs\bot-state.json"
+    $state = Join-Path $root "logs\bot-state.jsonl"
     Remove-Item -LiteralPath $state -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $root "logs\bot-state.json") -ErrorAction SilentlyContinue
     $mode = if ($role -eq "host") { "host" } else { "client" }
     Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`n"
-    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nMoveAfterMs = 15000`r`nMoveMetres = $MoveMetres`r`n"
-    Write-PrivateFile (Join-Path $mg "StarfieldCustom.ini") ("[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
-        "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n")
+    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
+    $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
+        "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
+    if (-not $NoLowMemory) {
+        # Merge the memory settings (the [Archive] keys join the section above).
+        $custom = $custom.Replace("sResourceDataDirsFinal=`r`n", "sResourceDataDirsFinal=`r`nsResourceArchiveMemoryCacheList=`r`nsResourceMiscArchiveMemoryCacheList=`r`n")
+        $custom += "`r`n" + ($LowMemoryIni -replace '(?s)^\[Archive\].*?\r\n\r\n', '')
+    }
+    Write-PrivateFile (Join-Path $mg "StarfieldCustom.ini") $custom
     $saves = Join-Path $mg "Saves"
     New-Item -ItemType Directory -Force $saves | Out-Null
     $dst = Join-Path $saves "PulsarQA_Start.sfs"
@@ -231,10 +251,30 @@ function Stop-Slot([string]$slot) {
     if (-not $p.WaitForExit(45000)) { W "$slot : no exit within 45 s - stopping pid $($p.Id)"; Stop-Process -Id $p.Id -Force; [void]$p.WaitForExit(15000) }
     W "$slot : closed"
 }
-function Read-State([string]$path) {
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-    try { return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json) } catch { return $null }
+# The bot appends one JSON line per second. Read only what is new since the last
+# call (shared read, so the bot's writes never fail), complete lines only.
+$readOffsets = @{}
+function Read-NewSamples([string]$path) {
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $path)) { return ,$out }
+    $fs = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try {
+        $start = if ($readOffsets.ContainsKey($path)) { $readOffsets[$path] } else { 0 }
+        if ($start -gt $fs.Length) { $start = 0 }
+        [void]$fs.Seek($start, [IO.SeekOrigin]::Begin)
+        $buf = New-Object byte[] ($fs.Length - $start)
+        $n = $fs.Read($buf, 0, $buf.Length)
+        $text = [Text.Encoding]::UTF8.GetString($buf, 0, $n)
+        $lastNl = $text.LastIndexOf("`n")
+        if ($lastNl -lt 0) { return ,$out }
+        $readOffsets[$path] = $start + [Text.Encoding]::UTF8.GetByteCount($text.Substring(0, $lastNl + 1))
+        foreach ($line in $text.Substring(0, $lastNl).Split("`n")) {
+            if ($line.Trim()) { try { $out.Add(($line | ConvertFrom-Json)) } catch { } }
+        }
+    } finally { $fs.Dispose() }
+    return ,$out
 }
+function NowWallMs { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
 
 # ---- main --------------------------------------------------------------------
 $result = "ERROR"; $why = @(); $before = $null
@@ -255,24 +295,57 @@ try {
     while ($true) {
         Start-Sleep -Seconds 2
         if ($hp.HasExited) { throw "host copy exited (code $($hp.ExitCode))" }
-        $s = Read-State $hostState
+        $new = Read-NewSamples $hostState
+        $s = if ($new.Count) { $new[$new.Count - 1] } else { $null }
         if ($s -and $s.inWorld) { W "host in world, cell $($s.playerCell)"; break }
         if ((Get-Date) -gt $deadline) { $result = "TIMEOUT"; $why += "host never got into the world (sStartingConsoleCommand load?)"; throw "timeout" }
     }
+    if ($MeasureOnly) {
+        # GPU memory per process: "Shared Usage" is system RAM the GPU borrows.
+        $peak = @{ WS = 0.0; Priv = 0.0; GpuDed = 0.0; GpuShared = 0.0 }; $freeMin = 999.0
+        $end = (Get-Date).AddSeconds($MeasureSec)
+        while ((Get-Date) -lt $end) {
+            Start-Sleep -Seconds 5
+            if ($hp.HasExited) { throw "host copy exited while measuring (code $($hp.ExitCode))" }
+            $hp.Refresh()
+            $peak.WS   = [math]::Max($peak.WS,   $hp.WorkingSet64 / 1GB)
+            $peak.Priv = [math]::Max($peak.Priv, $hp.PrivateMemorySize64 / 1GB)
+            try {
+                $c = Get-Counter -Counter "\GPU Process Memory(pid_$($hp.Id)*)\Dedicated Usage", "\GPU Process Memory(pid_$($hp.Id)*)\Shared Usage" -ErrorAction Stop
+                $ded = ($c.CounterSamples | Where-Object { $_.Path -match 'dedicated usage' } | Measure-Object CookedValue -Sum).Sum / 1GB
+                $sha = ($c.CounterSamples | Where-Object { $_.Path -match 'shared usage' } | Measure-Object CookedValue -Sum).Sum / 1GB
+                $peak.GpuDed = [math]::Max($peak.GpuDed, $ded); $peak.GpuShared = [math]::Max($peak.GpuShared, $sha)
+            } catch { }
+            $freeMin = [math]::Min($freeMin, (FreeGB))
+        }
+        $line = "MEASURE: peak working set {0:N2} GB, peak private {1:N2} GB, GPU dedicated {2:N2} GB, GPU shared {3:N2} GB, lowest free RAM {4:N1} GB" -f `
+            $peak.WS, $peak.Priv, $peak.GpuDed, $peak.GpuShared, $freeMin
+        W $line
+        $result = "MEASURED"
+        throw "measure-done"
+    }
+
     $free = FreeGB
     if ($free -lt 5) { throw "RAM guard: only $free GB free, not starting the client" }
     $cp = Start-Slot $ClientSlot
 
     $hostSeen = New-Object System.Collections.Generic.List[object]; $clientSeen = New-Object System.Collections.Generic.List[object]
-    $lastH = 0; $lastC = 0; $lastLog = Get-Date
+    if ($s) { $hostSeen.Add($s) }
+    $lastLog = Get-Date; $clientStart = NowWallMs
+    $hs = $s; $cs = $null
     while ($true) {
         Start-Sleep -Seconds 1
         if ($hp.HasExited) { throw "host copy exited during the test (code $($hp.ExitCode))" }
         if ($cp.HasExited) { throw "client copy exited during the test (code $($cp.ExitCode))" }
         if ((FreeGB) -lt 1) { throw "RAM guard: free RAM below 1 GB" }
-        $hs = Read-State $hostState; $cs = Read-State $clientState
-        if ($hs -and $hs.seq -ne $lastH) { $hostSeen.Add($hs); $lastH = $hs.seq; Add-Content -LiteralPath (Join-Path $runDir "host.jsonl") ($hs | ConvertTo-Json -Compress) }
-        if ($cs -and $cs.seq -ne $lastC) { $clientSeen.Add($cs); $lastC = $cs.seq; Add-Content -LiteralPath (Join-Path $runDir "client.jsonl") ($cs | ConvertTo-Json -Compress) }
+        foreach ($x in (Read-NewSamples $hostState))   { $hostSeen.Add($x); $hs = $x }
+        foreach ($x in (Read-NewSamples $clientState)) { $clientSeen.Add($x); $cs = $x }
+        # Stale state is an error, never a pass (playbook: a crashed or frozen bot
+        # must not look like a quiet one). 30 s of no new line while running.
+        $now = NowWallMs
+        if ($hs -and $now - [long]$hs.wallMs -gt 30000) { throw ("host bot state is stale ({0:N0} s old) while the game runs" -f (($now - [long]$hs.wallMs) / 1000)) }
+        if ($cs -and $now - [long]$cs.wallMs -gt 30000) { throw ("client bot state is stale ({0:N0} s old) while the game runs" -f (($now - [long]$cs.wallMs) / 1000)) }
+        if (-not $cs -and $now - $clientStart -gt 120000) { throw "client bot wrote nothing within 120 s" }
         $final = (Get-Date) -gt $deadline
         $score = Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
@@ -284,7 +357,7 @@ try {
         if ($score.Result -ne "PENDING") { $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }; break }
     }
 } catch {
-    if ($_.Exception.Message -ne "timeout") { $why += $_.Exception.Message }
+    if ($_.Exception.Message -notin @("timeout", "measure-done")) { $why += $_.Exception.Message }
 } finally {
     foreach ($slot in @($ClientSlot, $HostSlot)) { try { Stop-Slot $slot } catch { $why += "closing $slot : $($_.Exception.Message)" } }
 
@@ -316,7 +389,7 @@ try {
     } catch { $why += "owner check failed: $($_.Exception.Message)"; $result = "ERROR" }
 
     foreach ($slot in @($HostSlot, $ClientSlot)) {
-        foreach ($f in @("logs\harness.log", "profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log")) {
+        foreach ($f in @("logs\harness.log", "logs\bot-state.jsonl", "profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log")) {
             $src = Join-Path $Instances "$slot\$f"
             if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src (Join-Path $runDir ("$slot-" + (Split-Path $f -Leaf))) }
         }

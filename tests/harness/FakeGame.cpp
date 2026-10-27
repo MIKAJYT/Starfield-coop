@@ -50,6 +50,7 @@ int main(int argc, char** argv)
 {
     std::string name, report, plugin, cloud;
     DWORD hold = 0;
+    bool  pulsarMutex = false;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::string k = argv[i], v = argv[i + 1];
         if (k == "--name") name = v;
@@ -57,6 +58,7 @@ int main(int argc, char** argv)
         else if (k == "--plugin") plugin = v;
         else if (k == "--hold") hold = static_cast<DWORD>(std::stoul(v));
         else if (k == "--cloud") cloud = v;
+        else if (k == "--pulsarmutex") pulsarMutex = (v == "1");
     }
     if (name.empty() || report.empty()) return 6;
     // Shared for reading: the self-test polls this file while the copy runs.
@@ -106,6 +108,14 @@ int main(int argc, char** argv)
             Report("cloudappenabled", reinterpret_cast<Enabled_t>(vt[22])(rs) ? "1" : "0");
         }
         Report("cloudwritesreached", std::to_string(FakeSteam_CloudWriteCount()));
+    }
+
+    // PULSAR.dll's issue #1 guard: a session-wide mutex created with CreateMutexW
+    // AFTER the harness preload (as PULSAR.dll loads later). Reported, not fatal,
+    // like PULSAR: a second copy keeps running with co-op off.
+    if (pulsarMutex) {
+        HANDLE pm = CreateMutexW(nullptr, TRUE, L"Local\\PULSAR_CoopSingleInstance");
+        Report("pulsarcoop", (pm && GetLastError() == ERROR_ALREADY_EXISTS) ? "disabled" : "enabled");
     }
 
     // Single-instance check 1: named mutex.

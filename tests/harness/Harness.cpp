@@ -169,6 +169,22 @@ namespace {
         return S_OK;
     }
 
+    // ---- PULSAR's own single-instance mutex (process-wide, one name only) ----
+    using CreateMutexW_t = HANDLE(WINAPI*)(LPSECURITY_ATTRIBUTES, BOOL, LPCWSTR);
+    CreateMutexW_t g_origCreateMutexW = nullptr;
+
+    HANDLE WINAPI Hook_CreateMutexW(LPSECURITY_ATTRIBUTES a_sa, BOOL a_own, LPCWSTR a_name)
+    {
+        if (!a_name || !g_settings.renamePulsarMutex || !IsPulsarCoopMutex(a_name))
+            return g_origCreateMutexW(a_sa, a_own, a_name);
+        const std::wstring unique = std::wstring(a_name) + L"-pulsartest-" + std::to_wstring(GetCurrentProcessId());
+        HANDLE h = g_origCreateMutexW(a_sa, a_own, unique.c_str());
+        const DWORD err = GetLastError();
+        Log("CreateMutexW(PULSAR co-op guard) renamed for this test copy, lastError=%lu", err);
+        SetLastError(err);
+        return h;
+    }
+
     bool HookFolderApis()
     {
         if (!GetModuleHandleW(L"shell32.dll")) LoadLibraryW(L"shell32.dll");
@@ -180,6 +196,12 @@ namespace {
                                reinterpret_cast<LPVOID*>(&g_origFolderW)) == MH_OK;
         ok &= MH_CreateHookApi(L"shell32", "SHGetFolderPathA", reinterpret_cast<LPVOID>(&Hook_SHGetFolderPathA),
                                reinterpret_cast<LPVOID*>(&g_origFolderA)) == MH_OK;
+        // PULSAR.dll loads after this preload, so its CreateMutexW import cannot be
+        // patched yet; hook the API and act on its one mutex name only.
+        if (g_settings.renamePulsarMutex) {
+            ok &= MH_CreateHookApi(L"kernel32", "CreateMutexW", reinterpret_cast<LPVOID>(&Hook_CreateMutexW),
+                                   reinterpret_cast<LPVOID*>(&g_origCreateMutexW)) == MH_OK;
+        }
         ok &= MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
         Log("folder hooks %s", ok ? "installed" : "FAILED");
         return ok;

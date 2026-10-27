@@ -139,6 +139,43 @@ namespace {
     }
 }
 
+namespace {
+    // Two copies that both create PULSAR's issue #1 guard mutex; returns what the
+    // SECOND copy reported ("enabled" = co-op stays on).
+    std::string SecondCopyPulsarCoop(const Slot& a_slot, bool a_plugin)
+    {
+        const auto name = Unique("pm");
+        Run first = Start(a_slot, name, "pm1.txt", a_plugin, 8000, "--pulsarmutex 1");
+        if (!WaitReady(first, 10000)) { Stop(first); return "first-not-ready"; }
+        // Use a different --name so the stand-in's own mutex/window checks do not stop it.
+        Run second = Start(a_slot, name + "b", "pm2.txt", a_plugin, 200, "--pulsarmutex 1");
+        WaitExit(second, 10000);
+        const bool firstAlive = WaitForSingleObject(first.pi.hProcess, 0) == WAIT_TIMEOUT;
+        auto rep = ReadReport(second.report);
+        Stop(second);
+        Stop(first);
+        return firstAlive ? rep["pulsarcoop"] : "first-exited";
+    }
+}
+
+TEST(HarnessSelfTest, PulsarCoopGuardIsRenamedPerTestCopy)
+{
+    Slot slot("pm", "Enabled = 1\n");
+    CHECK_EQ(SecondCopyPulsarCoop(slot, true), std::string("enabled"));
+}
+
+TEST(HarnessSelfTest, TwinWithoutHarnessPulsarGuardDisablesSecondCopy)
+{
+    Slot slot("pmoff", "Enabled = 1\n");
+    CHECK_EQ(SecondCopyPulsarCoop(slot, false), std::string("disabled"));
+}
+
+TEST(HarnessSelfTest, TwinRenamePulsarMutexOffKeepsTheGuard)
+{
+    Slot slot("pmkeep", "Enabled = 1\nRenamePulsarMutex = 0\n");
+    CHECK_EQ(SecondCopyPulsarCoop(slot, true), std::string("disabled"));
+}
+
 TEST(HarnessSelfTest, CloudWritesAreBlockedAndCloudLooksDisabled)
 {
     Slot slot("cloud", "Enabled = 1\n");

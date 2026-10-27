@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <share.h>
 #include <fstream>
 #include <string>
 
@@ -26,8 +27,8 @@ namespace Pulsar::TestBot
     {
         struct Settings {
             bool        enabled = false;
-            std::string stateFile;          // where the state JSON goes (test slot logs)
-            std::uint64_t moveAfterMs = 15000;   // host: clone visible this long, then move
+            std::string stateFile;          // state log, one JSON line per second (test slot logs)
+            std::uint64_t moveAfterMs = 45000;   // host: clone visible this long, then move
             float       moveMetres = 5.0f;  // host: X offset of the test move (game units = metres)
         };
 
@@ -117,16 +118,20 @@ namespace Pulsar::TestBot
             }
         }
 
-        // Write to a temp file, then replace: the launcher never reads half a file.
+        // Append one JSON line per sample to a log opened for shared reading. The
+        // first version replaced the file each second (MoveFileEx); on the first
+        // two-copy run the launcher's once-a-second read fell into step with the
+        // host's write and every replace failed for six minutes, so the launcher
+        // saw a frozen host. An append-only log cannot collide and loses nothing.
         void WriteState(const std::string& a_json)
         {
-            const std::string tmp = s_state.cfg.stateFile + ".tmp";
-            {
-                std::ofstream out(tmp, std::ios::trunc);
-                if (!out) return;
-                out << a_json;
+            static std::FILE* s_file = nullptr;
+            if (!s_file) {
+                s_file = _fsopen(s_state.cfg.stateFile.c_str(), "a", _SH_DENYWR);
+                if (!s_file) return;
             }
-            MoveFileExA(tmp.c_str(), s_state.cfg.stateFile.c_str(), MOVEFILE_REPLACE_EXISTING);
+            std::fputs(a_json.c_str(), s_file);
+            std::fflush(s_file);
         }
 
         std::string Num(float a_v)
