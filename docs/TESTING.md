@@ -131,10 +131,25 @@ What it does:
 
 The bot (`src/Debug/TestBot.cpp`) is part of `PULSAR.dll` in development builds
 only (compiled out with `PULSAR_HARDENED`) and does nothing without
-`PulsarTestBot.ini` next to the DLL. Once a second it writes the copy's view to
-the state file: role, in world, connected, own cell and position, whether the
-partner clone exists with 3D and where. The host bot moves the host
-`MoveMetres` (5) on X once the clone has been visible for `MoveAfterMs` (15 s).
+`PulsarTestBot.ini` next to the DLL. Once a second it appends one JSON line with
+the copy's view to its state log (`logs\bot-state.jsonl`, shared read): role, in
+world, connected, own cell and position, whether the partner clone exists with
+3D and where. The host bot moves the host `MoveMetres` (5) on X once the clone has
+been visible for `MoveAfterMs` (45 s; the client sees its clone about 18 s after
+the host does). `connected` only means PULSAR has a peer object (a client with
+no host still reports true), so the scorer never relies on it.
+
+The launcher reads only new, complete lines, and a side whose newest line is
+more than 30 s old while its game runs is an `ERROR`. Two copies also need the
+harness's `RenamePulsarMutex` (default on): without it PULSAR's own issue #1
+guard turns co-op off in the second copy.
+
+Memory (31 GB PC, ~17 GB free before a run): one copy in the world peaks at
+about 8.2-8.6 GB working set / 10.7-10.9 GB private, 2.6 GB dedicated GPU
+memory; two copies left 3-4 GB free. `-MeasureOnly` profiles one copy.
+
+Last results (2026-10-27): `PASS` (31/31 pairs before the move, 5/5 after);
+twin `-ClientPort 7778`: `TIMEOUT` as it must.
 
 Scoring (`Invoke-CoopScore`, pure function): client samples are paired with the
 nearest host sample (<= 600 ms). PASS needs at least 5 pairs before the move
