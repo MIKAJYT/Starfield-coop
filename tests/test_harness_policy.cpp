@@ -60,6 +60,48 @@ TEST(HarnessPolicy, OnlyOtherProcessesWindowsAreHidden)
     CHECK(!ShouldHideWindow(0, 100));     // nothing found
 }
 
+TEST(HarnessPolicy, EveryCloudWriteSlotIsBlocked)
+{
+    // v016 slots that change the owner's cloud or Workshop state.
+    const int writes[] = { 0, 2, 5, 6, 7, 8, 9, 10, 11, 12, 23, 30, 31, 32, 33, 34, 35, 36, 37,
+                           38, 40, 42, 44, 45, 47, 50, 51 };
+    for (int slot : writes)
+        CHECK(CloudActionFor(slot, true) != CloudAction::kForward);
+    CHECK(CloudActionFor(0, true) == CloudAction::kFailBool);      // FileWrite
+    CHECK(CloudActionFor(2, true) == CloudAction::kFailCall);      // FileWriteAsync
+    CHECK(CloudActionFor(9, true) == CloudAction::kFailHandle);    // FileWriteStreamOpen
+}
+
+TEST(HarnessPolicy, CloudReadsAreForwarded)
+{
+    // FileRead, FileReadAsync(+Complete), FileExists, FilePersisted, GetFileSize,
+    // GetFileTimestamp, GetSyncPlatforms, GetFileCount, GetFileNameAndSize, GetQuota.
+    const int reads[] = { 1, 3, 4, 13, 14, 15, 16, 17, 18, 19, 20 };
+    for (int slot : reads)
+        CHECK(CloudActionFor(slot, true) == CloudAction::kForward);
+}
+
+TEST(HarnessPolicy, CloudEnabledReportingIsASwitch)
+{
+    CHECK(CloudActionFor(kRsIsCloudEnabledForAccount, true) == CloudAction::kReportDisabled);
+    CHECK(CloudActionFor(kRsIsCloudEnabledForApp, true) == CloudAction::kReportDisabled);
+    CHECK(CloudActionFor(kRsIsCloudEnabledForAccount, false) == CloudAction::kForward);
+    CHECK(CloudActionFor(kRsIsCloudEnabledForApp, false) == CloudAction::kForward);
+    // Writes stay blocked either way.
+    CHECK(CloudActionFor(kRsFileWrite, false) == CloudAction::kFailBool);
+}
+
+TEST(HarnessPolicy, CloudSettingsDefaultOnAndCanBeSwitchedOff)
+{
+    const auto d = Parse("Enabled = 1\nDocumentsDir = C:\\a\nLocalAppDataDir = C:\\b\n");
+    CHECK(d.blockCloudWrites);
+    CHECK(d.reportCloudDisabled);
+    const auto s = Parse("Enabled = 1\nDocumentsDir = C:\\a\nLocalAppDataDir = C:\\b\n"
+                         "BlockCloudWrites = 0\nReportCloudDisabled = off\n");
+    CHECK(!s.blockCloudWrites);
+    CHECK(!s.reportCloudDisabled);
+}
+
 TEST(HarnessPolicy, MissingOrDisabledSettingsAreInert)
 {
     CHECK(!Parse("").enabled);

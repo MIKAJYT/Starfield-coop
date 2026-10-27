@@ -76,6 +76,67 @@ namespace Pulsar::TestHarness {
         return a_windowPid != 0 && a_windowPid != a_selfPid;
     }
 
+    // ---- Steam Cloud (ISteamRemoteStorage) ---------------------------------
+    // Starfield.exe asks steam_api64 for this interface by name through
+    // SteamInternal_FindOrCreateUserInterface. Method order from Valve's
+    // isteamremotestorage.h (STEAMREMOTESTORAGE_INTERFACE_VERSION016), as
+    // mirrored in Steamworks.NET CodeGen/steam/isteamremotestorage.h.
+    inline constexpr const char* kRemoteStoragePrefix  = "STEAMREMOTESTORAGE_INTERFACE_VERSION";
+    inline constexpr const char* kRemoteStorageVersion = "STEAMREMOTESTORAGE_INTERFACE_VERSION016";
+    inline constexpr int         kRemoteStorageSlots   = 59;
+
+    // v016 slot numbers the harness uses by name.
+    inline constexpr int kRsFileWrite                = 0;
+    inline constexpr int kRsGetFileCount             = 18;
+    inline constexpr int kRsGetFileNameAndSize       = 19;
+    inline constexpr int kRsIsCloudEnabledForAccount = 21;
+    inline constexpr int kRsIsCloudEnabledForApp     = 22;
+
+    enum class CloudAction : std::uint8_t {
+        kForward,          // call Steam (reads, listings, quota, UGC downloads)
+        kFailBool,         // return false
+        kFailCall,         // return k_uAPICallInvalid (0)
+        kFailHandle,       // return an invalid 64-bit handle (~0)
+        kIgnore,           // void method: do nothing
+        kReportDisabled,   // IsCloudEnabledFor*: return false
+        kBatchOk,          // Begin/EndFileWriteBatch: return true, nothing to batch
+    };
+
+    // What the harness does with each v016 slot when blocking cloud writes.
+    inline CloudAction CloudActionFor(int a_slot, bool a_reportDisabled)
+    {
+        switch (a_slot) {
+            case 0:  return CloudAction::kFailBool;     // FileWrite
+            case 2:  return CloudAction::kFailCall;     // FileWriteAsync
+            case 5:  return CloudAction::kFailBool;     // FileForget
+            case 6:  return CloudAction::kFailBool;     // FileDelete
+            case 7:  return CloudAction::kFailCall;     // FileShare
+            case 8:  return CloudAction::kFailBool;     // SetSyncPlatforms
+            case 9:  return CloudAction::kFailHandle;   // FileWriteStreamOpen
+            case 10: return CloudAction::kFailBool;     // FileWriteStreamWriteChunk
+            case 11: return CloudAction::kFailBool;     // FileWriteStreamClose
+            case 12: return CloudAction::kFailBool;     // FileWriteStreamCancel
+            case 21: return a_reportDisabled ? CloudAction::kReportDisabled : CloudAction::kForward;  // IsCloudEnabledForAccount
+            case 22: return a_reportDisabled ? CloudAction::kReportDisabled : CloudAction::kForward;  // IsCloudEnabledForApp
+            case 23: return CloudAction::kIgnore;       // SetCloudEnabledForApp
+            case 30: return CloudAction::kFailCall;     // PublishWorkshopFile
+            case 31: return CloudAction::kFailHandle;   // CreatePublishedFileUpdateRequest
+            case 32: case 33: case 34: case 35: case 36: case 37:
+                     return CloudAction::kFailBool;     // UpdatePublishedFile*
+            case 38: return CloudAction::kFailCall;     // CommitPublishedFileUpdate
+            case 40: return CloudAction::kFailCall;     // DeletePublishedFile
+            case 42: return CloudAction::kFailCall;     // SubscribePublishedFile
+            case 44: return CloudAction::kFailCall;     // UnsubscribePublishedFile
+            case 45: return CloudAction::kFailBool;     // UpdatePublishedFileSetChangeDescription
+            case 47: return CloudAction::kFailCall;     // UpdateUserPublishedItemVote
+            case 50: return CloudAction::kFailCall;     // PublishVideo
+            case 51: return CloudAction::kFailCall;     // SetUserPublishedFileAction
+            case 57: case 58:
+                     return CloudAction::kBatchOk;      // Begin/EndFileWriteBatch
+            default: return CloudAction::kForward;
+        }
+    }
+
     // PulsarTestHarness.ini next to the DLL. The harness does nothing unless the
     // file exists AND says Enabled = 1, so a stray copy of the DLL is inert.
     struct Settings {
@@ -85,6 +146,8 @@ namespace Pulsar::TestHarness {
         std::string logFile;
         bool        renameMutexes = true;
         bool        hideOtherWindows = true;
+        bool        blockCloudWrites = true;      // never let a test copy write the owner's Steam Cloud
+        bool        reportCloudDisabled = true;   // tell the game cloud is off for this account and app
     };
 
     inline std::string Trim(std::string a_s)
@@ -127,6 +190,8 @@ namespace Pulsar::TestHarness {
             else if (key == "logfile")          s.logFile = value;
             else if (key == "renamemutexes")    s.renameMutexes = ParseBool(value, true);
             else if (key == "hideotherwindows") s.hideOtherWindows = ParseBool(value, true);
+            else if (key == "blockcloudwrites") s.blockCloudWrites = ParseBool(value, true);
+            else if (key == "reportclouddisabled") s.reportCloudDisabled = ParseBool(value, true);
         }
         // Redirecting needs both folders; refusing to run is safer than sending
         // one of them to the owner's real folder.

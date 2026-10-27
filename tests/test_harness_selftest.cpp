@@ -40,13 +40,15 @@ namespace {
         fs::path            report;
     };
 
-    Run Start(const Slot& a_slot, const std::string& a_name, const std::string& a_report, bool a_plugin, DWORD a_holdMs)
+    Run Start(const Slot& a_slot, const std::string& a_name, const std::string& a_report, bool a_plugin, DWORD a_holdMs,
+              const std::string& a_extraArgs = {})
     {
         Run r;
         r.report = a_slot.dir / a_report;
         std::string cmd = std::string("\"") + PULSAR_FAKEGAME_EXE + "\" --name " + a_name +
                           " --report \"" + r.report.string() + "\" --hold " + std::to_string(a_holdMs);
         if (a_plugin) cmd += " --plugin \"" + a_slot.dir.string() + "\"";
+        if (!a_extraArgs.empty()) cmd += " " + a_extraArgs;
         STARTUPINFOA si{ sizeof(si) };
         CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &r.pi);
         return r;
@@ -113,6 +115,77 @@ namespace {
     }
 
     std::string Unique(const char* a_tag) { return std::string(a_tag) + std::to_string(GetTickCount64()); }
+
+    // One copy that tries three cloud writes through the fake steam_api64.
+    struct CloudResult {
+        DWORD                              exitCode = 0xFFFFFFFF;
+        std::map<std::string, std::string> report;
+        std::string                        harnessLog;
+    };
+
+    CloudResult RunCloud(const Slot& a_slot, bool a_plugin,
+                         const char* a_version = "STEAMREMOTESTORAGE_INTERFACE_VERSION016")
+    {
+        CloudResult r;
+        Run run = Start(a_slot, Unique("cloud"), "cloud.txt", a_plugin, 0, std::string("--cloud ") + a_version);
+        r.exitCode = WaitExit(run, 10000);
+        Stop(run);
+        r.report = ReadReport(run.report);
+        std::ifstream log(a_slot.dir / "harness.log");
+        std::stringstream ss;
+        ss << log.rdbuf();
+        r.harnessLog = ss.str();
+        return r;
+    }
+}
+
+TEST(HarnessSelfTest, CloudWritesAreBlockedAndCloudLooksDisabled)
+{
+    Slot slot("cloud", "Enabled = 1\n");
+    const auto r = RunCloud(slot, true);
+    CHECK_EQ(r.exitCode, DWORD(0));
+    CHECK_EQ(r.report.at("cloudwritesreached"), std::string("0"));
+    CHECK_EQ(r.report.at("cloudwrite"), std::string("0"));
+    CHECK_EQ(r.report.at("cloudwriteasync"), std::string("0"));
+    CHECK_EQ(r.report.at("clouddelete"), std::string("0"));
+    CHECK_EQ(r.report.at("cloudappenabled"), std::string("0"));
+    CHECK(r.harnessLog.find("BLOCKED Steam Cloud FileWrite(\"Save1_test.sfs\"") != std::string::npos);
+    // The read-only probe went through the fake's own slots 18/19.
+    CHECK(r.harnessLog.find("GetFileCount=2") != std::string::npos);
+    CHECK(r.harnessLog.find("fake_save_a.sfs") != std::string::npos);
+}
+
+TEST(HarnessSelfTest, TwinWithoutHarnessCloudWritesGetThrough)
+{
+    Slot slot("cloudoff", "Enabled = 1\n");
+    const auto r = RunCloud(slot, false);
+    CHECK_EQ(r.exitCode, DWORD(0));
+    CHECK_EQ(r.report.at("cloudwritesreached"), std::string("3"));
+    CHECK_EQ(r.report.at("cloudappenabled"), std::string("1"));
+}
+
+TEST(HarnessSelfTest, TwinBlockCloudWritesOffLetsWritesThrough)
+{
+    Slot slot("cloudallowed", "Enabled = 1\nBlockCloudWrites = 0\n");
+    const auto r = RunCloud(slot, true);
+    CHECK_EQ(r.report.at("cloudwritesreached"), std::string("3"));
+}
+
+TEST(HarnessSelfTest, ReportCloudDisabledOffStillBlocksWrites)
+{
+    Slot slot("cloudreport", "Enabled = 1\nReportCloudDisabled = 0\n");
+    const auto r = RunCloud(slot, true);
+    CHECK_EQ(r.report.at("cloudwritesreached"), std::string("0"));
+    CHECK_EQ(r.report.at("cloudappenabled"), std::string("1"));
+}
+
+TEST(HarnessSelfTest, UnknownRemoteStorageVersionStopsTheCopy)
+{
+    Slot slot("cloudver", "Enabled = 1\n");
+    const auto r = RunCloud(slot, true, "STEAMREMOTESTORAGE_INTERFACE_VERSION015");
+    CHECK_EQ(r.exitCode, DWORD(0xC10D));
+    CHECK(r.report.find("cloudwritesreached") == r.report.end());   // never got to write
+    CHECK(r.harnessLog.find("unknown interface") != std::string::npos);
 }
 
 TEST(HarnessSelfTest, WithHarnessTwoCopiesRunAndFoldersAreRedirected)

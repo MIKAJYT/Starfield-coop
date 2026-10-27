@@ -13,6 +13,10 @@
 //     per-process suffix, and windows of another process are reported missing.
 //   * GetEnvironmentVariableA from Starfield.exe is logged (not changed), to
 //     learn whether the game reads profile paths from the environment.
+//   * Steam Cloud: the ISteamRemoteStorage object Starfield.exe gets from
+//     steam_api64 has every write-type method blocked and reports cloud as
+//     disabled (BlockCloudWrites, ReportCloudDisabled), so a test copy can
+//     never upload over or delete the owner's cloud saves.
 //
 // Runs in SFSE's preload phase (inside SFSE's _initterm_e hook, before the
 // game's global initializers and WinMain). SFSE's own sfse.txt is opened
@@ -256,6 +260,142 @@ namespace {
         return g_origGetEnvA(a_name, a_buf, a_size);
     }
 
+    // ---- Steam Cloud write block (ISteamRemoteStorage v016) -----------------
+    // Starfield.exe gets the interface from steam_api64's
+    // SteamInternal_FindOrCreateUserInterface. The harness gives that object a
+    // private copy of its vtable in which every write-type slot fails (see
+    // CloudActionFor) and every other slot is Steam's own function, so `this`
+    // stays the real object. Only this test process sees the change.
+    using FindOrCreateUserInterface_t = void*(__cdecl*)(int, const char*);
+    FindOrCreateUserInterface_t g_origFindIface = nullptr;
+    void*      g_cloudVtbl[kRemoteStorageSlots]{};
+    std::mutex g_cloudMutex;
+
+    // Blocked slots. Microsoft x64: the caller owns argument space, so a stub
+    // may ignore trailing arguments. Named stubs log the file a write targeted.
+    bool Cloud_FileWrite(void*, const char* a_file, const void*, std::int32_t a_size)
+    {
+        Log("BLOCKED Steam Cloud FileWrite(\"%s\", %d bytes)", a_file ? a_file : "?", a_size);
+        return false;
+    }
+    std::uint64_t Cloud_FileWriteAsync(void*, const char* a_file, const void*, std::uint32_t a_size)
+    {
+        Log("BLOCKED Steam Cloud FileWriteAsync(\"%s\", %u bytes)", a_file ? a_file : "?", a_size);
+        return 0;
+    }
+    bool Cloud_FileForget(void*, const char* a_file)
+    {
+        Log("BLOCKED Steam Cloud FileForget(\"%s\")", a_file ? a_file : "?");
+        return false;
+    }
+    bool Cloud_FileDelete(void*, const char* a_file)
+    {
+        Log("BLOCKED Steam Cloud FileDelete(\"%s\")", a_file ? a_file : "?");
+        return false;
+    }
+    std::uint64_t Cloud_FileWriteStreamOpen(void*, const char* a_file)
+    {
+        Log("BLOCKED Steam Cloud FileWriteStreamOpen(\"%s\")", a_file ? a_file : "?");
+        return ~0ull;
+    }
+    bool          Cloud_FailBool(void*)       { Log("BLOCKED Steam Cloud write-type call"); return false; }
+    std::uint64_t Cloud_FailCall(void*)       { Log("BLOCKED Steam Cloud write-type call"); return 0; }
+    std::uint64_t Cloud_FailHandle(void*)     { Log("BLOCKED Steam Cloud write-type call"); return ~0ull; }
+    void          Cloud_Ignore(void*)         { Log("IGNORED Steam Cloud SetCloudEnabledForApp"); }
+    bool          Cloud_ReportDisabled(void*) { return false; }
+    bool          Cloud_BatchOk(void*)        { return true; }
+
+    void* StubFor(int a_slot, CloudAction a_action)
+    {
+        switch (a_slot) {
+            case 0: return reinterpret_cast<void*>(&Cloud_FileWrite);
+            case 2: return reinterpret_cast<void*>(&Cloud_FileWriteAsync);
+            case 5: return reinterpret_cast<void*>(&Cloud_FileForget);
+            case 6: return reinterpret_cast<void*>(&Cloud_FileDelete);
+            case 9: return reinterpret_cast<void*>(&Cloud_FileWriteStreamOpen);
+            default: break;
+        }
+        switch (a_action) {
+            case CloudAction::kFailBool:       return reinterpret_cast<void*>(&Cloud_FailBool);
+            case CloudAction::kFailCall:       return reinterpret_cast<void*>(&Cloud_FailCall);
+            case CloudAction::kFailHandle:     return reinterpret_cast<void*>(&Cloud_FailHandle);
+            case CloudAction::kIgnore:         return reinterpret_cast<void*>(&Cloud_Ignore);
+            case CloudAction::kReportDisabled: return reinterpret_cast<void*>(&Cloud_ReportDisabled);
+            case CloudAction::kBatchOk:        return reinterpret_cast<void*>(&Cloud_BatchOk);
+            default:                           return nullptr;
+        }
+    }
+
+    // Read-only calls through Steam's OWN vtable. If the slot numbers did not
+    // match v016, these would return nonsense; the log shows the owner's real
+    // cloud file count and names, which proves the mapping on this Steam.
+    void ProbeRemoteStorage(void* a_iface, void** a_real)
+    {
+        using Count_t   = std::int32_t (*)(void*);
+        using Name_t    = const char* (*)(void*, int, std::int32_t*);
+        using Enabled_t = bool (*)(void*);
+        const auto count = reinterpret_cast<Count_t>(a_real[kRsGetFileCount])(a_iface);
+        Log("probe (Steam's own slots, read-only): GetFileCount=%d IsCloudEnabledForAccount=%d IsCloudEnabledForApp=%d",
+            count,
+            reinterpret_cast<Enabled_t>(a_real[kRsIsCloudEnabledForAccount])(a_iface) ? 1 : 0,
+            reinterpret_cast<Enabled_t>(a_real[kRsIsCloudEnabledForApp])(a_iface) ? 1 : 0);
+        for (int i = 0; i < count && i < 3; ++i) {
+            std::int32_t size = 0;
+            const char* name = reinterpret_cast<Name_t>(a_real[kRsGetFileNameAndSize])(a_iface, i, &size);
+            Log("probe: file %d = \"%s\" (%d bytes)", i, name ? name : "?", size);
+        }
+    }
+
+    void PatchRemoteStorage(void* a_iface)
+    {
+        std::lock_guard lk(g_cloudMutex);
+        auto** vptrSlot = reinterpret_cast<void***>(a_iface);
+        if (*vptrSlot == g_cloudVtbl) return;                       // already ours
+        void** real = *vptrSlot;
+        ProbeRemoteStorage(a_iface, real);
+        int blocked = 0;
+        for (int i = 0; i < kRemoteStorageSlots; ++i) {
+            const auto action = CloudActionFor(i, g_settings.reportCloudDisabled);
+            void* stub = action == CloudAction::kForward ? nullptr : StubFor(i, action);
+            g_cloudVtbl[i] = stub ? stub : real[i];
+            if (stub) ++blocked;
+        }
+        *vptrSlot = g_cloudVtbl;
+        using Enabled_t = bool (*)(void*);
+        const bool appEnabledNow =
+            reinterpret_cast<Enabled_t>((*vptrSlot)[kRsIsCloudEnabledForApp])(a_iface);
+        Log("Steam Cloud: remote storage %p patched, %d write-type slots blocked, game now sees IsCloudEnabledForApp=%d",
+            a_iface, blocked, appEnabledNow ? 1 : 0);
+    }
+
+    void* __cdecl Hook_FindOrCreateUserInterface(int a_user, const char* a_version)
+    {
+        void* iface = g_origFindIface(a_user, a_version);
+        const std::size_t prefixLen = std::strlen(kRemoteStoragePrefix);
+        if (!iface || !a_version || std::strncmp(a_version, kRemoteStoragePrefix, prefixLen) != 0)
+            return iface;
+        if (std::strcmp(a_version, kRemoteStorageVersion) != 0) {
+            // Unknown layout: the block cannot be trusted, and a test copy that
+            // can write the owner's cloud must not run.
+            Log("Steam Cloud: unknown interface %s - stopping this test copy to protect the owner's cloud", a_version);
+            if (g_log) std::fclose(g_log);
+            TerminateProcess(GetCurrentProcess(), 0xC10D);
+        }
+        PatchRemoteStorage(iface);
+        return iface;
+    }
+
+    bool ExeImportsDll(const char* a_dll)
+    {
+        auto* base = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
+        auto* nt   = reinterpret_cast<IMAGE_NT_HEADERS*>(base + reinterpret_cast<IMAGE_DOS_HEADER*>(base)->e_lfanew);
+        const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (!dir.VirtualAddress) return false;
+        for (auto* imp = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); imp->Name; ++imp)
+            if (_stricmp(reinterpret_cast<const char*>(base + imp->Name), a_dll) == 0) return true;
+        return false;
+    }
+
     std::string OwnDirectory()
     {
         HMODULE self = nullptr;
@@ -302,5 +442,16 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Preload(const void* /*sfse*/)
     PatchExeImport("KERNEL32.dll", "CreateMutexA", &Hook_CreateMutexA, g_origCreateMutexA);
     PatchExeImport("USER32.dll", "FindWindowA", &Hook_FindWindowA, g_origFindWindowA);
     PatchExeImport("KERNEL32.dll", "GetEnvironmentVariableA", &Hook_GetEnvironmentVariableA, g_origGetEnvA);
+
+    if (g_settings.blockCloudWrites) {
+        if (!ExeImportsDll("steam_api64.dll")) {
+            Log("Steam Cloud: the exe does not import steam_api64.dll - nothing to block");
+        } else if (!PatchExeImport("steam_api64.dll", "SteamInternal_FindOrCreateUserInterface",
+                                   &Hook_FindOrCreateUserInterface, g_origFindIface)) {
+            Log("Steam Cloud: could not install the write block - stopping this test copy to protect the owner's cloud");
+            if (g_log) std::fclose(g_log);
+            TerminateProcess(GetCurrentProcess(), 0xC10D);
+        }
+    }
     return true;
 }

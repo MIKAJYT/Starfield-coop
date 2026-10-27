@@ -80,12 +80,21 @@ target_compile_definitions(pulsar_test_harness PRIVATE NOMINMAX WIN32_LEAN_AND_M
 target_include_directories(pulsar_test_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pulsar_test_harness PRIVATE minhook::minhook shell32 ole32 user32)
 
-# Stand-in game for the harness self-test (Starfield.exe's single-instance checks).
+# Test-only stand-in for steam_api64.dll: a fake ISteamRemoteStorage v016 that
+# counts the cloud writes reaching it. Output name steam_api64.dll so the fake
+# game imports it the way Starfield.exe imports the real one.
+add_library(pulsar_fakesteamapi SHARED harness/FakeSteamApi.cpp)
+set_target_properties(pulsar_fakesteamapi PROPERTIES OUTPUT_NAME steam_api64)
+target_compile_features(pulsar_fakesteamapi PRIVATE cxx_std_23)
+target_compile_options(pulsar_fakesteamapi PRIVATE /W4 /utf-8 /EHsc /permissive-)
+
+# Stand-in game for the harness self-test (Starfield.exe's single-instance checks
+# and its Steam Cloud route).
 add_executable(pulsar_fakegame harness/FakeGame.cpp)
 target_compile_features(pulsar_fakegame PRIVATE cxx_std_23)
 target_compile_options(pulsar_fakegame PRIVATE /W4 /utf-8 /EHsc /permissive-)
 target_compile_definitions(pulsar_fakegame PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_link_libraries(pulsar_fakegame PRIVATE shell32 ole32 user32)
+target_link_libraries(pulsar_fakegame PRIVATE shell32 ole32 user32 pulsar_fakesteamapi)
 
 add_dependencies(pulsar_tests pulsar_test_harness pulsar_fakegame)
 target_compile_definitions(

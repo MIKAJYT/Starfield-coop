@@ -71,7 +71,17 @@ In SFSE's preload phase (before the game's global initializers and WinMain) it:
 - patches only `Starfield.exe`'s own imports of `CreateMutexA` (named mutexes
   get a per-process suffix) and `FindWindowA` (another process's window is
   reported missing), so a second copy can start;
-- logs `GetEnvironmentVariableA` names read by `Starfield.exe`, unchanged.
+- logs `GetEnvironmentVariableA` names read by `Starfield.exe`, unchanged;
+- blocks Steam Cloud writes: `Starfield.exe` gets `ISteamRemoteStorage`
+  (`STEAMREMOTESTORAGE_INTERFACE_VERSION016`) through steam_api64's
+  `SteamInternal_FindOrCreateUserInterface`. The harness gives that object a
+  private vtable copy in which every write-type method fails (write, async
+  write, delete, forget, share, write streams, sync platforms, Workshop
+  publishing) and `IsCloudEnabledForAccount/App` return false; reads are
+  Steam's own. Before patching it logs a read-only probe through Steam's own
+  slots (file count and names), which shows the slot order matches. Settings:
+  `BlockCloudWrites = 0`, `ReportCloudDisabled = 0` (test switches only). An
+  unknown interface version, or a missing import, stops the test copy.
 
 If the folder hooks cannot be installed it stops the process, rather than let
 a test copy write the owner's real folders. Known leak: SFSE opens its own
@@ -82,7 +92,10 @@ is still created in the real profile.
 `pulsar_fakegame.exe`, a stand-in with Starfield.exe's two single-instance
 checks: with the harness a second copy runs and both folders are redirected;
 each twin (no harness, `Enabled = 0`, `RenameMutexes = 0`,
-`HideOtherWindows = 0`) must be blocked again.
+`HideOtherWindows = 0`) must be blocked again. The cloud cases run the stand-in
+against a test-only fake `steam_api64.dll` (`harness/FakeSteamApi.cpp`) that
+counts writes: with the harness 0 of 3 writes arrive; without it, or with
+`BlockCloudWrites = 0`, all 3 do; an unknown interface version stops the copy.
 
 ## Solo buddy (one PC)
 
