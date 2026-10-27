@@ -164,6 +164,10 @@ namespace Pulsar::TestHarness {
         bool        hideOtherWindows = true;
         bool        renamePulsarMutex = true;     // let both test copies run co-op (PULSAR's issue #1 guard)
         bool        blockCloudWrites = true;      // never let a test copy write the owner's Steam Cloud
+        // Hard working-set cap in MB (0 = off). Two copies in the world do not fit
+        // in RAM next to the owner's programs; with a cap, Windows pages out the
+        // TEST game's memory instead of the owner's programs.
+        std::uint32_t maxWorkingSetMB = 0;
         bool        reportCloudDisabled = true;   // tell the game cloud is off for this account and app
     };
 
@@ -210,6 +214,10 @@ namespace Pulsar::TestHarness {
             else if (key == "renamepulsarmutex") s.renamePulsarMutex = ParseBool(value, true);
             else if (key == "blockcloudwrites") s.blockCloudWrites = ParseBool(value, true);
             else if (key == "reportclouddisabled") s.reportCloudDisabled = ParseBool(value, true);
+            else if (key == "maxworkingsetmb") {
+                try { s.maxWorkingSetMB = static_cast<std::uint32_t>(std::stoul(value)); } catch (...) { s.maxWorkingSetMB = 0; }
+                if (s.maxWorkingSetMB != 0 && s.maxWorkingSetMB < 1024) s.maxWorkingSetMB = 0;   // nonsense values: off
+            }
         }
         // Redirecting needs both folders; refusing to run is safer than sending
         // one of them to the owner's real folder.

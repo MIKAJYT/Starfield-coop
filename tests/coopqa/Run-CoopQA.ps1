@@ -45,7 +45,10 @@ param(
     # follow: host moves, client's clone must follow. door: host uses a load door,
     # client must stay (CoopDoorFollow=0). -DoorFollow sets CoopDoorFollow=1: twin.
     [ValidateSet("follow", "door")][string]$Scenario = "follow",
-    [switch]$DoorFollow
+    [switch]$DoorFollow,
+    # Hard working-set cap per test copy (MB, 0 = off): Windows pages out the
+    # test game's memory instead of the owner's programs (PulsarTestHarness).
+    [int]$MaxWorkingSetMB = 0
 )
 
 # Memory-saving settings for test copies. Names are setting names found in
@@ -273,7 +276,11 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $root = Join-Path $Instances $slot
     $plugins = Join-Path $root "game\Data\SFSE\Plugins"
     $mg = Join-Path $root "profile\Documents\My Games\Starfield"
-    if (-not (Test-Path (Join-Path $plugins "PulsarTestHarness.ini"))) { throw "$slot has no PulsarTestHarness.ini" }
+    $harnessIni = Join-Path $plugins "PulsarTestHarness.ini"
+    if (-not (Test-Path $harnessIni)) { throw "$slot has no PulsarTestHarness.ini" }
+    $hLines = @(Get-Content -LiteralPath $harnessIni | Where-Object { $_ -notmatch '^\s*MaxWorkingSetMB\s*=' })
+    if ($MaxWorkingSetMB -gt 0) { $hLines += "MaxWorkingSetMB = $MaxWorkingSetMB" }
+    Write-PrivateFile $harnessIni (($hLines -join "`r`n") + "`r`n")
     $state = Join-Path $root "logs\bot-state.jsonl"
     Remove-Item -LiteralPath $state -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $root "logs\bot-state.json") -ErrorAction SilentlyContinue
@@ -286,6 +293,9 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     if (-not $NoLowMemory) {
         # Merge the memory settings (the [Archive] keys join the section above).
         $custom = $custom.Replace("sResourceDataDirsFinal=`r`n", "sResourceDataDirsFinal=`r`nsResourceArchiveMemoryCacheList=`r`nsResourceMiscArchiveMemoryCacheList=`r`n")
+        # [General] memory keys go into the existing section: no master-file
+        # preload into RAM (Starfield.esm is 1.4 GB), no linked-area preloads.
+        $custom = $custom.Replace("sStartingConsoleCommand=load PulsarQA_Start`r`n", "sStartingConsoleCommand=load PulsarQA_Start`r`nfMasterFilePreLoadMB=0`r`nbPreloadLinkedAreas=0`r`n")
         $custom += "`r`n" + ($LowMemoryIni -replace '(?s)^\[Archive\].*?\r\n\r\n', '')
     }
     Write-PrivateFile (Join-Path $mg "StarfieldCustom.ini") $custom

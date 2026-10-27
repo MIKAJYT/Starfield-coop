@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <share.h>
 #include <fstream>
 #include <string>
@@ -193,7 +194,13 @@ namespace Pulsar::TestBot
                     auto* base = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(ref) + 0x98);
                     if (!base || *(base + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kDOOR)) continue;
                     ++a_scan.doors;
-                    if (!Pulsar::TransitSync::GetDoorTeleportDestination(ref)) continue;
+                    // A load door has teleport data. Its destination may be empty:
+                    // the ship hatch in the test save (base 001FCA00) reports
+                    // "no-destRef" - the destination is set at run time, where the
+                    // ship is. Only "no-extraTeleport" marks an ordinary door.
+                    const char* why = "";
+                    Pulsar::TransitSync::GetDoorTeleportDestination(ref, why);
+                    if (std::strcmp(why, "OK") != 0 && std::strcmp(why, "no-destRef") != 0) continue;
                     ++a_scan.loadDoors;
                     auto* loc = reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(ref) + 0x8C);
                     const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;

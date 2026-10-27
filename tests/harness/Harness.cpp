@@ -475,6 +475,14 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Preload(const void* /*sfse*/)
     PatchExeImport("USER32.dll", "FindWindowA", &Hook_FindWindowA, g_origFindWindowA);
     PatchExeImport("KERNEL32.dll", "GetEnvironmentVariableA", &Hook_GetEnvironmentVariableA, g_origGetEnvA);
 
+    if (g_settings.maxWorkingSetMB != 0) {
+        const SIZE_T maxBytes = static_cast<SIZE_T>(g_settings.maxWorkingSetMB) * 1024 * 1024;
+        const BOOL ok = SetProcessWorkingSetSizeEx(GetCurrentProcess(), 256ull * 1024 * 1024, maxBytes,
+                                                   QUOTA_LIMITS_HARDWS_MAX_ENABLE | QUOTA_LIMITS_HARDWS_MIN_DISABLE);
+        Log("working-set cap %u MB: %s (lastError=%lu)", g_settings.maxWorkingSetMB, ok ? "set" : "FAILED",
+            ok ? 0ul : GetLastError());
+    }
+
     if (g_settings.blockCloudWrites) {
         if (!ExeImportsDll("steam_api64.dll")) {
             Log("Steam Cloud: the exe does not import steam_api64.dll - nothing to block");

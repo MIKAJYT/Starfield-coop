@@ -112,6 +112,15 @@ TEST(HarnessPolicy, CloudSettingsDefaultOnAndCanBeSwitchedOff)
     CHECK(!s.reportCloudDisabled);
 }
 
+TEST(HarnessPolicy, WorkingSetCapIsOffUnlessSetSensibly)
+{
+    const std::string base = "Enabled = 1\nDocumentsDir = C:\\a\nLocalAppDataDir = C:\\b\n";
+    CHECK_EQ(Parse(base).maxWorkingSetMB, 0u);
+    CHECK_EQ(Parse(base + "MaxWorkingSetMB = 6144\n").maxWorkingSetMB, 6144u);
+    CHECK_EQ(Parse(base + "MaxWorkingSetMB = 12\n").maxWorkingSetMB, 0u);      // too small: off
+    CHECK_EQ(Parse(base + "MaxWorkingSetMB = lots\n").maxWorkingSetMB, 0u);    // junk: off
+}
+
 TEST(HarnessPolicy, MissingOrDisabledSettingsAreInert)
 {
     CHECK(!Parse("").enabled);
