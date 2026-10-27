@@ -35,6 +35,7 @@
 #include <fstream>
 #include <mutex>
 #include <set>
+#include <share.h>
 #include <string>
 
 using namespace Pulsar::TestHarness;
@@ -280,7 +281,9 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Preload(const void* /*sfse*/)
     std::filesystem::create_directories(g_settings.localAppDataDir, ec);
     if (!g_settings.logFile.empty()) {
         std::filesystem::create_directories(std::filesystem::path(g_settings.logFile).parent_path(), ec);
-        fopen_s(&g_log, g_settings.logFile.c_str(), "a");
+        // Shared for reading: the test runner watches this log while the game runs
+        // (an exclusive open hid it until exit on the first real launch).
+        g_log = _fsopen(g_settings.logFile.c_str(), "a", _SH_DENYWR);
     }
     g_documentsW    = Widen(g_settings.documentsDir);
     g_localAppDataW = Widen(g_settings.localAppDataDir);
