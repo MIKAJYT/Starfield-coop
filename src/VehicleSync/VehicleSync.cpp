@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "VehicleSync/VehicleSync.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "UI/HudMessage.h"
 #include "NASLog.h"
 
 #include <RE/A/Actor.h>
@@ -1995,21 +1996,11 @@ namespace Pulsar::VehicleSync
 
     // ── Shared vehicle entry guard (SharedVehicleRide, RidePolicy.h) ──
 
+    // On-screen message (UI/HudMessage; a Papyrus DispatchStaticCall of
+    // Debug.Notification faulted and ended the game, run 20261028-214018).
     static void NotifyHud(const char* a_msg)
     {
-        auto* game = RE::GameVM::GetSingleton();
-        auto* vm = game ? game->GetVM() : nullptr;
-        if (!vm) return;
-        RE::BSScript::Variable msg;
-        RE::BSScript::PackVariable(msg, RE::BSFixedString(a_msg));
-        auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
-            args.resize(1);
-            args[0] = msg;
-            return true;
-        };
-        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-        vm->DispatchStaticCall(RE::BSFixedString("Debug"), RE::BSFixedString("Notification"),
-                               argFn, callback, 0);
+        Pulsar::UI::HudMessage::Show(a_msg);
     }
 
     bool ShouldBlockClientEntry(RE::TESObjectREFR* a_ref)

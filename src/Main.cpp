@@ -22,6 +22,7 @@
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
 #include "Coop/TakeoffVote.h"
+#include "UI/HudMessage.h"
 #include "DialogSync/DialogSync.h"
 #include "EventTrace/EventTrace.h"
 #include "VoiceBridge/VoiceBridge.h"
@@ -1575,6 +1576,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 Pulsar::WorldSync::Loot::TickKeySync();   // key/keycard mirror
                 Pulsar::QuestSync::Reward::Tick();          // quest rewards for everyone
                 Pulsar::Coop::TakeoffVote::Tick();           // takeoff ready vote
+                Pulsar::UI::HudMessage::Tick();              // on-screen messages (worker thread)
                 Pulsar::WorldSync::Door::DrainPending();
                 Pulsar::WorldSync::Lock::DrainPending();
                 Pulsar::WorldSync::Grab::Tick();

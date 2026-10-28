@@ -27,6 +27,5 @@ namespace Pulsar::Coop::TakeoffVote {
     std::uint32_t PendingRequestForTest();   // partner: open request id, 0 if none
     void          AnswerReadyForTest();
     const char*   StateForTest();            // "idle" / "waiting" / "boarding"
-    void          ShowMessageForTest(const char* a_msg);   // queue an on-screen message
 
 }  // namespace Pulsar::Coop::TakeoffVote

@@ -11,6 +11,7 @@
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/SpaceSync.h"
 #include "Coop/TakeoffVote.h"
+#include "UI/HudMessage.h"
 #include "TransitSync/TransitSync.h"
 #include "WorldSync/LootSync.h"
 
@@ -734,7 +735,7 @@ namespace Pulsar::TestBot
             if (since >= static_cast<std::uint64_t>(s_state.notifySent) * 6000) {
                 ++s_state.notifySent;
                 const std::string text = s_state.cfg.notifyTest + " " + std::to_string(s_state.notifySent);
-                Pulsar::Coop::TakeoffVote::ShowMessageForTest(text.c_str());
+                Pulsar::UI::HudMessage::Show(text.c_str());
             }
         }
 

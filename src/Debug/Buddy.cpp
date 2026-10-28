@@ -3,6 +3,7 @@
 
 #include "Network/NetworkHost.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "UI/HudMessage.h"
 
 #include <RE/P/ProcessLists.h>
 
@@ -77,19 +78,11 @@ namespace Pulsar::Buddy {
             return v;
         }
 
+        // On-screen message (UI/HudMessage; a Papyrus DispatchStaticCall of
+        // Debug.Notification faulted and ended the game, run 20261028-214018).
         void Notify(const char* a_msg)
         {
-            auto* vm = VM();
-            if (!vm) return;
-            RE::BSScript::Variable msg = Arg(RE::BSFixedString(a_msg));
-            auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
-                args.resize(1);
-                args[0] = msg;
-                return true;
-            };
-            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-            vm->DispatchStaticCall(RE::BSFixedString("Debug"), RE::BSFixedString("Notification"),
-                                   argFn, callback, 0);
+            Pulsar::UI::HudMessage::Show(a_msg);
         }
 
         RE::Actor* ResolveBuddy()
