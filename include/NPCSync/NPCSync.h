@@ -96,7 +96,9 @@ namespace Pulsar::NPCSync {
     std::vector<RE::TESObjectCELL*> GetActiveCellsSnapshot();
 
     // The engine kill (Papyrus Actor.Kill core) used for host-authoritative
-    // deaths. False if it raised. Used by the co-op test bot (Debug/TestBot).
+    // deaths. False if it raised. a_killer must not be null (a null killer took
+    // the game down); pass the victim itself for a kill nobody is blamed for.
+    // Used by the death watch and the co-op test bot (Debug/TestBot).
     bool KillActor(RE::Actor* a_actor, RE::Actor* a_killer);
 
 }  // namespace Pulsar::NPCSync

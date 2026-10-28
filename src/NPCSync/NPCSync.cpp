@@ -502,6 +502,8 @@ namespace Pulsar::NPCSync {
     static std::unordered_set<uint32_t>           g_corpseLootSent;
     // Client: received loot waiting for the matched local corpse.
     static std::unordered_map<uint32_t, std::vector<CorpseItemResolved>> g_corpseLootPending;
+    static std::unordered_map<uint32_t, uint64_t> g_corpseLootRxMs;      // hostRef → received tick
+    static std::unordered_map<uint32_t, uint64_t> g_clientDeathKillMs;   // hostRef → our kill tick (game thread)
     static std::mutex g_corpseLootMutex;
 
     // Plain-C SEH inventory walk: {formID, total count} per entry. Offsets
@@ -557,16 +559,19 @@ namespace Pulsar::NPCSync {
         }
         const bool prev = Pulsar::WorldSync::Loot::SetReplayingFromPacket(true);
 
-        // Wipe the local roll - negative AddObjectToContainer is the proven
-        // DirectRestore removal primitive.
+        // Wipe the local roll with the raw inventory-list removal. The negative
+        // AddObjectToContainer used before (DirectRestore's primitive, fine on
+        // the player) hung the client's game thread on a fresh NPC corpse
+        // (run 20261028-093251: "wiping 7 local entries", never "applied"), and
+        // LootSync already logs it failing on actors (V9-NEG-FAILED).
         CorpseInvEntry cur[48]{};
         const int n = SafeCollectInventory(a_corpse, cur, 48);
+        PLOG_INFO("[CORPSE-LOOT] apply 0x{:08X}: wiping {} local entries, adding {}"sv,
+                  a_corpse->formID, n, static_cast<uint32_t>(items.size()));
         for (int i = 0; i < n; ++i) {
-            auto* f = RE::TESForm::LookupByID(cur[i].formID);
-            if (!f) continue;
-            a_corpse->AddObjectToContainer(reinterpret_cast<RE::TESBoundObject*>(f),
-                nullptr, -cur[i].count, nullptr, RE::ITEM_TRANSFER_REASON::kNone);
+            Pulsar::WorldSync::Loot::RawRemoveItems(a_corpse, cur[i].formID, cur[i].count);
         }
+        PLOG_INFO("[CORPSE-LOOT] apply 0x{:08X}: wiped, adding the host list"sv, a_corpse->formID);
 
         // Apply the host's authoritative list incl. mod arrays + sentinels.
         int applied = 0;
@@ -1813,13 +1818,155 @@ namespace Pulsar::NPCSync {
         }
     }
 
+    // ===================================================================
+    // Death watch (2026-10-28). The host's death edge lives in the per-actor
+    // capture inside HookedActorUpdate, and the engine never calls that for
+    // some NPCs: the co-op test bot's victim 0037C634 (Akila City, spawner
+    // NPC with a dynamic base) got no RE_NPC line, no isDead broadcast and no
+    // corpse loot, so the client's copy stayed alive (runs 20261028-012531
+    // and -014605). The host now also scans its cell for dead NPCs and gives
+    // each the same one-shot PKT_CORPSE_LOOT; the client treats that packet
+    // as the death signal when its own copy is still alive.
+    // ===================================================================
+    static bool SafeActorIsDead(RE::Actor* a_actor) noexcept
+    {
+        __try {
+            return a_actor && a_actor->IsDead();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
+    // Dead NPC actors in a cell (raw reference array: cell+0x80 size, +0x88
+    // data; form type at +0x2E). Player and the partner clone excluded.
+    static int SafeCollectDeadActors(RE::TESObjectCELL* a_cell, uint32_t a_skipID,
+                                     uint32_t* a_out, int a_max) noexcept
+    {
+        int n = 0;
+        __try {
+            if (!a_cell) return 0;
+            auto* cb = reinterpret_cast<uint8_t*>(a_cell);
+            const uint32_t size = *reinterpret_cast<uint32_t*>(cb + 0x80);
+            auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+            if (!data || size == 0 || size > 20000) return 0;
+            for (uint32_t i = 0; i < size && n < a_max; ++i) {
+                auto* ref = data[i];
+                if (!ref) continue;
+                auto* rb = reinterpret_cast<uint8_t*>(ref);
+                if (*(rb + 0x2E) != static_cast<uint8_t>(RE::FormType::kACHR)) continue;
+                const uint32_t id = ref->formID;
+                if (id == 0x14 || id == a_skipID) continue;
+                if (SafeActorIsDead(static_cast<RE::Actor*>(ref))) a_out[n++] = id;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return n;
+    }
+
+    static void HostDeathWatchTick()
+    {
+        static uint64_t s_next = 0;
+        const uint64_t now = GetTickCount64();
+        if (now < s_next) return;
+        s_next = now + 250;
+        if (!Pulsar::Network::GetSingleton().IsConnected()) return;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !player->parentCell) return;
+        auto* clone = Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteActor();
+        uint32_t dead[256];
+        const int n = SafeCollectDeadActors(player->parentCell, clone ? clone->formID : 0, dead, 256);
+        std::lock_guard clk(g_corpseLootMutex);
+        for (int i = 0; i < n; ++i) {
+            if (!g_corpseLootSent.insert(dead[i]).second) continue;   // already handled
+            g_corpseLootDueMs[dead[i]] = now + 1000;
+            PLOG_INFO("[DEATH-WATCH] host death not seen by the capture ref=0x{:08X} - corpse loot in 1s"sv, dead[i]);
+        }
+    }
+
+    static RE::Actor* LocalActorForHostRef(uint32_t a_hostRef)
+    {
+        uint32_t local = a_hostRef;
+        if ((a_hostRef & 0xFF000000u) == 0xFF000000u) {
+            std::lock_guard lk(g_npcRemapMutex);
+            auto it = g_npcRemap.find(a_hostRef);
+            local = it != g_npcRemap.end() ? it->second : 0;
+        }
+        if (!local) return nullptr;
+        auto* form = RE::TESForm::LookupByID(local);
+        if (!form) return nullptr;
+        RE::Actor* actor = form->As<RE::Actor>();
+        if (!actor && form->Is(RE::FormType::kACHR)) actor = reinterpret_cast<RE::Actor*>(form);
+        return actor;
+    }
+
+    static void ClientCorpseDeathTick()
+    {
+        static uint64_t s_next = 0;
+        const uint64_t now = GetTickCount64();
+        if (now < s_next) return;
+        s_next = now + 250;
+
+        std::vector<std::pair<uint32_t, uint64_t>> pending;
+        {
+            std::lock_guard clk(g_corpseLootMutex);
+            for (const auto& [hostRef, items] : g_corpseLootPending) {
+                auto rx = g_corpseLootRxMs.find(hostRef);
+                pending.emplace_back(hostRef, rx != g_corpseLootRxMs.end() ? rx->second : now);
+            }
+        }
+        for (const auto& [hostRef, rxMs] : pending) {
+            auto* actor = LocalActorForHostRef(hostRef);
+            const auto fired = g_clientDeathKillMs.find(hostRef);
+            const bool dead = actor && SafeActorIsDead(actor);
+            if (!dead) {
+                const bool giveUp = !actor ? now - rxMs > 30000
+                                           : (fired != g_clientDeathKillMs.end() && now - fired->second > 10000);
+                if (giveUp) {
+                    PLOG_INFO("[DEATH-SYNC] giving up on hostRef=0x{:08X} ({})"sv, hostRef,
+                              actor ? "kill did not take" : "no local match");
+                    std::lock_guard clk(g_corpseLootMutex);
+                    g_corpseLootPending.erase(hostRef);
+                    g_corpseLootRxMs.erase(hostRef);
+                    g_clientDeathKillMs.erase(hostRef);
+                    continue;
+                }
+                if (actor && fired == g_clientDeathKillMs.end()) {
+                    // Same order as the mirrored host kill: free the puppet, kill,
+                    // hold the body free through the async death gap.
+                    // Killer = the victim: the death happened on the host, and
+                    // crediting our player would be a crime against a city NPC on
+                    // this side. (A null killer crashed the game, run 20261028-092756.)
+                    ReleaseNpcDirectControl(static_cast<uint32_t>(actor->formID));
+                    const bool ok = KillActor(actor, actor);
+                    MarkNpcKillPending(static_cast<uint32_t>(actor->formID), 1500);
+                    g_clientDeathKillMs[hostRef] = now;
+                    PLOG_INFO("[DEATH-SYNC] host corpse 0x{:08X}: local 0x{:08X} still alive - kill fired={}"sv,
+                              hostRef, static_cast<uint32_t>(actor->formID), ok);
+                }
+                continue;
+            }
+            // Dead: let the engine finish the death (death items, inventory
+            // drop) before the host list replaces the contents.
+            if (fired != g_clientDeathKillMs.end() && now - fired->second < 2000) continue;
+            g_clientDeathKillMs.erase(hostRef);
+            PLOG_INFO("[DEATH-SYNC] applying host corpse loot 0x{:08X} to local 0x{:08X}"sv,
+                      hostRef, static_cast<uint32_t>(actor->formID));
+            ApplyCorpseLootIfPending(hostRef, actor);
+            std::lock_guard clk(g_corpseLootMutex);
+            g_corpseLootRxMs.erase(hostRef);
+        }
+    }
+
     void OnGameThreadTick()
     {
         // T40: PROCDUMP tick fires on BOTH host and client. Has3D-check
         // not needed - we just want raw positions of cell-native actors.
         ProcDumpTick(IsHostMode());
 
-        if (!IsHostMode()) return;
+        if (!IsHostMode()) {
+            ClientCorpseDeathTick();
+            return;
+        }
+        HostDeathWatchTick();
 
         // Combat Sync V2 Step 1 - apply client-forwarded damage to the host's
         // authoritative enemies. The host's own per-tick capture then broadcasts
@@ -1915,12 +2062,11 @@ namespace Pulsar::NPCSync {
                 }
 
                 CorpseInvEntry inv[Pulsar::Network::kCorpseLootMaxItems]{};
-                const int n = SafeCollectInventory(
+                int n = SafeCollectInventory(
                     corpse, inv, Pulsar::Network::kCorpseLootMaxItems);
-                if (n <= 0) {
-                    PLOG_INFO("[CORPSE-LOOT] drain ref=0x{:08X} - inventory empty (n=0)"sv, refID);
-                    continue;
-                }
+                // An empty corpse is still sent: the packet is also the client's
+                // death signal (ClientCorpseDeathTick) for NPCs the capture misses.
+                if (n < 0) n = 0;
 
                 std::vector<uint8_t> buf;
                 buf.reserve(1 + sizeof(Pulsar::Network::CorpseLootHeader)
@@ -2282,6 +2428,7 @@ namespace Pulsar::NPCSync {
                   hdr.hostRefFormID, static_cast<uint32_t>(items.size()));
         std::lock_guard clk(g_corpseLootMutex);
         g_corpseLootPending[hdr.hostRefFormID] = std::move(items);
+        g_corpseLootRxMs[hdr.hostRefFormID] = GetTickCount64();
     }
 
     // V5 receive periodic civilian position resync from host.
@@ -3200,7 +3347,7 @@ namespace Pulsar::NPCSync {
 
     bool KillActor(RE::Actor* a_actor, RE::Actor* a_killer)
     {
-        if (!a_actor) return false;
+        if (!a_actor || !a_killer) return false;
         // As the host's damage path above: the engine kill alone left full-health
         // NPCs alive (test bot, run 20261028-011048, 5 of 5), so drain Health
         // through the kDamage modifier first, then kill.

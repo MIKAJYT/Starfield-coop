@@ -50,6 +50,13 @@ namespace Pulsar::WorldSync::Loot {
     // header to avoid leaking the internal struct definition.
     void CallOrigActivateAsReplay(RE::TESObjectREFR* refr, void* args);
 
+    // Remove up to a_count units of a_base straight from a reference's
+    // inventory list (the take receiver's raw fallback). For actors, where a
+    // negative AddObjectToContainer fails (V9-NEG-FAILED) or, on a fresh
+    // corpse, hung the client (NPCSync corpse-loot wipe, run 20261028-093251).
+    // Returns the units removed.
+    std::int32_t RawRemoveItems(RE::TESObjectREFR* a_ref, std::uint32_t a_base, std::int32_t a_count);
+
     // Co-op test bot (Debug/TestBot). Total item count in a reference's
     // inventory (-1 if it has none readable).
     std::int32_t CountInventoryItems(RE::TESObjectREFR* a_ref);

@@ -408,7 +408,11 @@ namespace Pulsar::TestBot
                 s_tried[s_state.lootTries++] = pick->id;
                 std::snprintf(msg, sizeof(msg), "loot: killing %08X (%.1f m)", pick->id, pick->dist);
                 Trace(msg);
-                const bool fired = Pulsar::NPCSync::KillActor(pick->actor, a_player);
+                // Killer = the victim itself. A kill by the player is a crime in
+                // a city: the guards downed the host in run 20261028-091213 and
+                // the client reloaded mid-test. A null killer took the host down
+                // (run 20261028-092756).
+                const bool fired = Pulsar::NPCSync::KillActor(pick->actor, pick->actor);
                 std::snprintf(msg, sizeof(msg), "loot: kill %08X fired=%d", pick->id, fired ? 1 : 0);
                 Trace(msg);
                 s_state.lootTarget = pick->id;

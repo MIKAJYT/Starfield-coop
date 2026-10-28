@@ -191,8 +191,9 @@ function Invoke-DoorScore {
 # waits a few seconds, then takes everything from the corpse. With
 # CoopInstancedEnemyLoot=1 (the spec: "every player gets their own loot") the
 # client's copy of that NPC must keep its items for at least 15 s afterwards, and
-# the client must log that it kept them. Whether the death reached the client is
-# reported, not scored (death sync is a separate feature).
+# the client must log that it kept them. The death must also reach the client:
+# its copy has to be dead by the end of the 15 s window (death sync; before the
+# 2026-10-28 death watch it never was, runs 20261028-012531 to -015140).
 function Invoke-LootScore {
     param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
     $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
@@ -234,6 +235,7 @@ function Invoke-LootScore {
     if (@($counts | Where-Object { $null -eq $_ }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client's corpse $id disappeared after the host looted it"); return $r }
     if ($least -lt $before) { $r.Result = "FAIL"; $r.Reasons.Add("the client's corpse lost items when the host looted ($before -> $least)"); return $r }
     if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the take"); return $r }
+    if (-not $diedOnClient) { $r.Result = "FAIL"; $r.Reasons.Add("the host's kill of $id never reached the client (its copy is still alive)"); return $r }
     # Unchanged counts alone could also mean the take never arrived; require the
     # client's own decision for this corpse.
     if (-not ($ClientDecisions | Where-Object { $_ -match "from corpse 0x$id; keeping our own copy" })) {
@@ -309,7 +311,7 @@ function Invoke-ScorerSelfTest {
         @{ Name = "loot: client keeps";      Run = (New-LootRun);                      Expect = "PASS";    Loot = $true },
         @{ Name = "loot: client loses";      Run = (New-LootRun -clientAfter 0);       Expect = "FAIL";    Loot = $true },
         @{ Name = "loot: keeps, no decision"; Run = (New-LootRun -decides $false);     Expect = "FAIL";    Loot = $true },
-        @{ Name = "loot: alive on client, kept"; Run = (New-LootRun -diesOnClient $false); Expect = "PASS"; Loot = $true },
+        @{ Name = "loot: alive on client, kept"; Run = (New-LootRun -diesOnClient $false); Expect = "FAIL"; Loot = $true },
         @{ Name = "loot: no copy on client"; Run = (New-LootRun -hasCopy $false); Expect = "ERROR";   Loot = $true },
         @{ Name = "loot: took nothing";      Run = (New-LootRun -moved 0);             Expect = "ERROR";   Loot = $true },
         @{ Name = "loot: never acted";       Run = (New-LootRun -acts $false);         Expect = "TIMEOUT"; Loot = $true }

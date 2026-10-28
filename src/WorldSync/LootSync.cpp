@@ -4226,6 +4226,11 @@ void CallOrigActivateAsReplay(RE::TESObjectREFR* refr, void* args)
     t_replayingFromPacket   = prevFlag;
 }
 
+std::int32_t RawRemoveItems(RE::TESObjectREFR* a_ref, std::uint32_t a_base, std::int32_t a_count)
+{
+    return RawRemoveFromContainer(a_ref, a_base, a_count);
+}
+
 std::int32_t CountInventoryItems(RE::TESObjectREFR* a_ref)
 {
     static SnapshotEntry s_buf[kMaxSnapshotEntries];   // game thread only
