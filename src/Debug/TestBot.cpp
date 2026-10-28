@@ -7,6 +7,7 @@
 #include "InventorySync/DirectRestore.h"
 #include "NPCSync/NPCSync.h"
 #include "Network/NetworkHost.h"
+#include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "TransitSync/TransitSync.h"
 #include "WorldSync/LootSync.h"
@@ -39,6 +40,11 @@ namespace Pulsar::TestBot
         //            corpse; with CoopInstancedEnemyLoot=1 the client's copy of
         //            the corpse must keep its items. Both roles report the dead
         //            NPCs around them with their item counts.
+        //   reward - the host gets credits and a weapon as quest rewards
+        //            (reason kQuestReward, no source); with CoopQuestRewards=1
+        //            the client must get both too. The client's own copy of the
+        //            quest also gives the weapon (as a replicated stage script
+        //            would), so it must end up with one weapon, not two.
         struct Settings {
             bool        enabled = false;
             std::string stateFile;          // state log, one JSON line per second (test slot logs)
@@ -48,6 +54,7 @@ namespace Pulsar::TestBot
             float       doorRadius = 60.0f; // door: search radius for a load door (metres)
             float       lootRadius = 30.0f; // loot: search radius for the NPC to kill (metres)
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
+            int         rewardCredits = 500;          // reward: credits given as the quest reward
         };
 
         // Loot scenario progress (host). The kill happens at the usual act time;
@@ -69,6 +76,8 @@ namespace Pulsar::TestBot
             std::uint64_t lootDeadAtMs = 0;
             std::uint64_t lootKilledAtMs = 0;
             int           lootTries = 0;
+            std::uint32_t rewardItem = 0;        // reward: both roles pick it from the same save
+            bool          rewardOwnCopy = false; // client: its own quest copy gave the weapon
         };
         State s_state;
 
@@ -108,6 +117,7 @@ namespace Pulsar::TestBot
                 else if (key == "doorradius")  s.doorRadius = std::stof(value);
                 else if (key == "lootradius")  s.lootRadius = std::stof(value);
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
+                else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -368,6 +378,19 @@ namespace Pulsar::TestBot
             std::fflush(s_file);
         }
 
+        constexpr std::uint32_t kCredits = 0x0000000Fu;
+
+        // Give the player an item the way a quest script does: no source
+        // container, reason kQuestReward. Returns false if the form is unusable.
+        bool GiveAsQuestReward(RE::PlayerCharacter* a_player, std::uint32_t a_base, std::int32_t a_count)
+        {
+            auto* form = RE::TESForm::LookupByID(a_base);
+            if (!form || !form->IsBoundObject()) return false;
+            a_player->AddObjectToContainer(reinterpret_cast<RE::TESBoundObject*>(form), nullptr, a_count,
+                                           nullptr, RE::ITEM_TRANSFER_REASON::kQuestReward);
+            return true;
+        }
+
         void FinishLoot(const char* a_info)
         {
             s_state.actionInfo = a_info;
@@ -519,6 +542,27 @@ namespace Pulsar::TestBot
             s_state.cloneSeenSinceMs = 0;
         }
 
+        // Reward: both roles pick the same weapon from the shared save.
+        if (s_state.cfg.scenario == "reward" && !s_state.rewardItem && me.valid && inWorld)
+            s_state.rewardItem = Pulsar::WorldSync::Loot::LowestItemOfTypeForTest(
+                player, static_cast<std::uint8_t>(RE::FormType::kWEAP));
+
+        // Reward, client: the host's reward arrived; the client's own copy of the
+        // quest gives the weapon too, inside the hold, as a replicated stage
+        // script would. The mirror must not make it two.
+        if (!isHost && s_state.cfg.scenario == "reward" && !s_state.rewardOwnCopy && s_state.rewardItem &&
+            Pulsar::QuestSync::Reward::PeerRewardsReceived() > 0) {
+            s_state.rewardOwnCopy = true;
+            const bool ok = GiveAsQuestReward(player, s_state.rewardItem, 1);
+            char msg[120];
+            std::snprintf(msg, sizeof(msg), "reward: own quest copy gave item %08X x1 given=%d",
+                          s_state.rewardItem, ok ? 1 : 0);
+            s_state.actionInfo = msg;
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
         // Loot: kill, wait for the death to reach the client, then take all.
         if (isHost && s_state.cfg.scenario == "loot" && !s_state.acted && me.valid &&
             (s_state.lootPhase != LootPhase::kIdle ||
@@ -558,6 +602,12 @@ namespace Pulsar::TestBot
                                   me.cellID, scan.refs, scan.doors, scan.loadDoors, scan.nearestLoadDoor,
                                   s_state.cfg.doorRadius, scan.seh ? 1 : 0);
                 }
+                s_state.actionInfo = msg;
+            } else if (s_state.cfg.scenario == "reward") {
+                const bool credits = GiveAsQuestReward(player, kCredits, s_state.cfg.rewardCredits);
+                const bool item = s_state.rewardItem && GiveAsQuestReward(player, s_state.rewardItem, 1);
+                std::snprintf(msg, sizeof(msg), "reward: credits x%d given=%d, item %08X x1 given=%d",
+                              s_state.cfg.rewardCredits, credits ? 1 : 0, s_state.rewardItem, item ? 1 : 0);
                 s_state.actionInfo = msg;
             } else {
                 const float tx = me.x + s_state.cfg.moveMetres;
@@ -604,6 +654,17 @@ namespace Pulsar::TestBot
                 j += c;
             }
             j += "]";
+        }
+        if (s_state.cfg.scenario == "reward") {
+            char c[200];
+            std::snprintf(c, sizeof(c),
+                          ",\"reward\":{\"item\":\"%08X\",\"items\":%d,\"credits\":%d,\"peerRewards\":%u,\"ownCopy\":%s}",
+                          s_state.rewardItem,
+                          me.valid && s_state.rewardItem ? Pulsar::WorldSync::Loot::CountItemForTest(player, s_state.rewardItem) : -1,
+                          me.valid ? Pulsar::WorldSync::Loot::CountItemForTest(player, kCredits) : -1,
+                          Pulsar::QuestSync::Reward::PeerRewardsReceived(),
+                          s_state.rewardOwnCopy ? "true" : "false");
+            j += c;
         }
         j += "}\n";
         WriteState(j);

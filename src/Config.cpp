@@ -257,6 +257,12 @@ namespace Pulsar
                 cfg.coopInstancedEnemyLoot = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopInstancedEnemyLoot = {}"sv, cfg.coopInstancedEnemyLoot);
             }
+            else if (keyLower == "coopquestrewards" || keyLower == "coop_quest_rewards") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopQuestRewards = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopQuestRewards = {}"sv, cfg.coopQuestRewards);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

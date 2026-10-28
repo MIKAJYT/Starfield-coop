@@ -20,6 +20,7 @@
 #include "WorldSync/ActiSync.h"
 #include "WorldSync/StateProbe.h"
 #include "QuestSync/QuestSync.h"
+#include "QuestSync/RewardShare.h"
 #include "DialogSync/DialogSync.h"
 #include "EventTrace/EventTrace.h"
 #include "VoiceBridge/VoiceBridge.h"
@@ -1571,6 +1572,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 Pulsar::WorldSync::Loot::DrainPendingPickups();
                 Pulsar::WorldSync::Loot::TickContainerPolling();
                 Pulsar::WorldSync::Loot::TickKeySync();   // key/keycard mirror
+                Pulsar::QuestSync::Reward::Tick();          // quest rewards for everyone
                 Pulsar::WorldSync::Door::DrainPending();
                 Pulsar::WorldSync::Lock::DrainPending();
                 Pulsar::WorldSync::Grab::Tick();

@@ -133,6 +133,12 @@ namespace Pulsar
         // ini: CoopInstancedEnemyLoot = 0
         bool        coopInstancedEnemyLoot = true;
 
+        // Quest rewards for everyone (owner's spec, phase 1): an item or credits a
+        // quest gives one player (stage script or dialogue AddItem) is given to the
+        // partner too, unless the partner's own copy of the quest already gave it.
+        // 0 = rewards stay with the player who got them. ini: CoopQuestRewards = 0
+        bool        coopQuestRewards = true;
+
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
         // frame delta when it is set, so ALL NPCs/timers freeze the moment one player

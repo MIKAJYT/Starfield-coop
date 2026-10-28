@@ -34,6 +34,7 @@
 #include "SpaceSync/FastTravelSync.h"
 #include "CellContentSync/CellContentSync.h"
 #include "QuestSync/QuestSync.h"
+#include "QuestSync/RewardShare.h"
 #include "DialogSync/DialogSync.h"
 #include "SpawnSync/SpawnSync.h"
 #include "Coop/CoopMortality.h"
@@ -1184,6 +1185,7 @@ namespace Pulsar::Network
                     (pktType == PKT_HANDSHAKE) ||
                     (pktType == PKT_CLIENT_LOAD_COMPLETE) ||
                     (pktType == PKT_BRIDGE_REQUEST) ||
+                    (pktType == PKT_QUEST_REWARD) ||   // queued; granted after the load
                     (pktType == PKT_HOST_REQUEST_RECONNECT);
                 if (!whitelisted) {
                     static std::atomic<uint64_t> s_dropCount{ 0 };
@@ -1346,6 +1348,14 @@ namespace Pulsar::Network
         if (a_packet->dataLength >= 1 + sizeof(LootDropData)
             && a_packet->data[0] == PKT_LOOT_DROP) {
             Pulsar::WorldSync::Loot::OnPacketReceived(a_packet->data, a_packet->dataLength);
+            return;
+        }
+
+        // PKT_QUEST_REWARD - the peer got a quest reward; give it to our player
+        // too unless our own copy of the quest already did. Bidirectional.
+        if (a_packet->dataLength >= 1 + sizeof(QuestRewardData)
+            && a_packet->data[0] == PKT_QUEST_REWARD) {
+            Pulsar::QuestSync::Reward::OnPacketReceived(a_packet->data, a_packet->dataLength);
             return;
         }
 

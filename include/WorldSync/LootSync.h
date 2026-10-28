@@ -60,6 +60,11 @@ namespace Pulsar::WorldSync::Loot {
     // Co-op test bot (Debug/TestBot). Total item count in a reference's
     // inventory (-1 if it has none readable).
     std::int32_t CountInventoryItems(RE::TESObjectREFR* a_ref);
+    // Units of one base item a reference holds (-1 if unreadable).
+    std::int32_t CountItemForTest(RE::TESObjectREFR* a_ref, std::uint32_t a_base);
+    // The lowest save-file base FormID of the given type in a reference's
+    // inventory (0 if none): both players pick the same item from one save.
+    std::uint32_t LowestItemOfTypeForTest(RE::TESObjectREFR* a_ref, std::uint8_t a_type);
     // Move every item from a_from to a_to through the engine's inner
     // AddObjectToContainer as hooked here - the funnel a player's Take All
     // goes through - so the take is broadcast like a real one, then remove it

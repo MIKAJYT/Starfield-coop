@@ -46,9 +46,12 @@ param(
     # client must stay (CoopDoorFollow=0). -DoorFollow sets CoopDoorFollow=1: twin.
     # loot: host kills an NPC and takes all; the client's corpse must keep its
     # items (CoopInstancedEnemyLoot=1). -SharedLoot sets it to 0: twin.
-    [ValidateSet("follow", "door", "loot")][string]$Scenario = "follow",
+    # reward: host gets credits + a weapon as quest rewards; the client must get
+    # both, once (CoopQuestRewards=1). -NoQuestRewards sets it to 0: twin.
+    [ValidateSet("follow", "door", "loot", "reward")][string]$Scenario = "follow",
     [switch]$DoorFollow,
     [switch]$SharedLoot,
+    [switch]$NoQuestRewards,
     # Hard working-set cap per test copy (MB, 0 = off): Windows pages out the
     # test game's memory instead of the owner's programs (PulsarTestHarness).
     [int]$MaxWorkingSetMB = 0
@@ -245,6 +248,63 @@ function Invoke-LootScore {
     return $r
 }
 
+# ---- reward scenario ----------------------------------------------------------
+# The host bot gives itself N credits and one weapon the way a quest script does
+# (no source container, reason kQuestReward). The client bot answers the first
+# reward that reaches it by giving itself the same weapon, as its own copy of the
+# quest would through a replicated stage script. With CoopQuestRewards=1 both
+# players must end with +N credits and exactly +1 weapon: the mirror must not
+# double the weapon on the client, nor the client's copy echo back to the host.
+function Invoke-RewardScore {
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never got its reward (clone never settled?)") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^reward: credits x(\d+) given=1, item ([0-9A-F]{8}) x1 given=1') {
+        $r.Result = "ERROR"; $r.Reasons.Add("host bot could not give the reward: $($act.actionInfo)"); return $r
+    }
+    $n = [int]$Matches[1]; $item = $Matches[2]
+    if ($item -eq "00000000") { $r.Result = "ERROR"; $r.Reasons.Add("no weapon in the host's inventory to give"); return $r }
+    $t0 = [long]$act.actedAtWallMs
+    $hBefore = @($hostList | Where-Object { $_.wallMs -lt $t0 -and $_.reward.item -eq $item -and $_.reward.credits -ge 0 })
+    $cBefore = @($clientList | Where-Object { $_.wallMs -lt $t0 -and $_.reward.item -eq $item -and $_.reward.credits -ge 0 })
+    if ($hBefore.Count -eq 0 -or $cBefore.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("no inventory count for weapon $item before the reward"); return $r }
+    $cLate = @($clientList | Where-Object { $_.wallMs -ge $t0 + 20000 })
+    $hLate = @($hostList | Where-Object { $_.wallMs -ge $t0 + 20000 })
+    if ($cLate.Count -lt 3 -or $hLate.Count -lt 3) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples 20 s after the reward (client $($cLate.Count), host $($hLate.Count) of 3)") }
+        return $r
+    }
+    $hb = $hBefore[-1].reward; $cb = $cBefore[-1].reward; $ha = $hLate[-1].reward; $ca = $cLate[-1].reward
+    $dhc = $ha.credits - $hb.credits; $dhi = $ha.items - $hb.items
+    $dcc = $ca.credits - $cb.credits; $dci = $ca.items - $cb.items
+    $r.Details = "reward: $($act.actionInfo); host credits +$dhc weapon +$dhi; client credits +$dcc weapon +$dci; client's own copy: $($ca.ownCopy); peer rewards received: host $($ha.peerRewards), client $($ca.peerRewards)"
+    if ($dhc -ne $n -or $dhi -ne 1) { $r.Result = "FAIL"; $r.Reasons.Add("the host should have +$n credits and +1 weapon, has +$dhc and +$dhi"); return $r }
+    if ($dcc -ne $n) { $r.Result = "FAIL"; $r.Reasons.Add("the client should have +$n credits from the host's reward, has +$dcc"); return $r }
+    if (-not $ca.ownCopy) { $r.Result = "ERROR"; $r.Reasons.Add("the client bot never gave itself its own copy of the weapon"); return $r }
+    if ($dci -ne 1) { $r.Result = "FAIL"; $r.Reasons.Add("the client should have exactly +1 weapon (own quest copy, mirror cancelled), has +$dci"); return $r }
+    if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the reward"); return $r }
+    if (-not ($ClientDecisions | Where-Object { $_ -match "\+0x0000000F x$n \(partner's quest reward\)" })) {
+        $r.Result = "FAIL"; $r.Reasons.Add("the client never logged granting the host's credits"); return $r
+    }
+    if (-not ($ClientDecisions | Where-Object { $_ -match "partner's reward 0x$item`: x1 already given by our own quest" })) {
+        $r.Result = "FAIL"; $r.Reasons.Add("the client never logged cancelling the mirror of weapon $item against its own copy"); return $r
+    }
+    $r.Result = "PASS"
+    return $r
+}
+
 # "host->local" for every client match of a host save-file NPC (FormID below
 # 0xFF000000, the same reference on both machines) to a different local NPC.
 function Find-WrongNpcMatches([string[]]$Lines) {
@@ -289,6 +349,22 @@ function New-LootRun([int]$clientAfter = 5, [bool]$diesOnClient = $true, [int]$m
     $d = if ($decides) { @("[PULSAR] ContainerSync: instanced enemy loot - peer took item 0x0000000F x5 from corpse 0x0001ABCD; keeping our own copy") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-RewardRun([int]$clientCredits = 500, [int]$clientItems = 1, [int]$hostItems = 1, [bool]$ownCopy = $true, [bool]$decides = $true, [bool]$acts = $true, [string]$item = "0001ABCD") {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000
+    $info = "reward: credits x500 given=1, item $item x1 given=1"
+    for ($i = 0; $i -lt 40; $i++) {
+        $t = $t0 + $i * 1000; $after = $acts -and $t -ge $actAt + 6000
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $t -ge $actAt) $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { $info } else { "" }); $hs | Add-Member connected $true
+        $hs | Add-Member reward ([pscustomobject]@{ item = $item; items = $(if ($after) { 2 + $hostItems } else { 2 }); credits = $(if ($after) { 1500 } else { 1000 }); peerRewards = 0; ownCopy = $false })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cs | Add-Member reward ([pscustomobject]@{ item = $item; items = $(if ($after) { 2 + $clientItems } else { 2 }); credits = $(if ($after) { 1000 + $clientCredits } else { 1000 }); peerRewards = $(if ($after) { 2 } else { 0 }); ownCopy = ($ownCopy -and $after) })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    $d = if ($decides) { @("[PULSAR] [REWARD] +0x0000000F x500 (partner's quest reward)", "[PULSAR] [REWARD] partner's reward 0x$($item): x1 already given by our own quest") } else { @() }
+    return @{ H = $hostRun; C = $clientRun; D = $d }
+}
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
     for ($i = 0; $i -lt 30; $i++) {
@@ -324,12 +400,21 @@ function Invoke-ScorerSelfTest {
         @{ Name = "loot: alive on client, kept"; Run = (New-LootRun -diesOnClient $false); Expect = "FAIL"; Loot = $true },
         @{ Name = "loot: no copy on client"; Run = (New-LootRun -hasCopy $false); Expect = "ERROR";   Loot = $true },
         @{ Name = "loot: took nothing";      Run = (New-LootRun -moved 0);             Expect = "ERROR";   Loot = $true },
-        @{ Name = "loot: never acted";       Run = (New-LootRun -acts $false);         Expect = "TIMEOUT"; Loot = $true }
+        @{ Name = "loot: never acted";       Run = (New-LootRun -acts $false);         Expect = "TIMEOUT"; Loot = $true },
+        @{ Name = "reward: both get it once"; Run = (New-RewardRun);                   Expect = "PASS";    Reward = $true },
+        @{ Name = "reward: client gets none"; Run = (New-RewardRun -clientCredits 0);  Expect = "FAIL";    Reward = $true },
+        @{ Name = "reward: client weapon x2"; Run = (New-RewardRun -clientItems 2);    Expect = "FAIL";    Reward = $true },
+        @{ Name = "reward: echo doubles host"; Run = (New-RewardRun -hostItems 2);     Expect = "FAIL";    Reward = $true },
+        @{ Name = "reward: no decision lines"; Run = (New-RewardRun -decides $false);  Expect = "FAIL";    Reward = $true },
+        @{ Name = "reward: no own copy";     Run = (New-RewardRun -ownCopy $false);    Expect = "ERROR";   Reward = $true },
+        @{ Name = "reward: no weapon";       Run = (New-RewardRun -item "00000000");   Expect = "ERROR";   Reward = $true },
+        @{ Name = "reward: never acted";     Run = (New-RewardRun -acts $false);       Expect = "TIMEOUT"; Reward = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Reward")) { Invoke-RewardScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
         if (-not $ok) { $bad++ }
@@ -406,7 +491,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $mode = if ($role -eq "host") { "host" } else { "client" }
     $doorFollowValue = if ($DoorFollow) { 1 } else { 0 }
     $instancedLootValue = if ($SharedLoot) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`n"
+    $questRewardsValue = if ($NoQuestRewards) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`n"
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -583,9 +669,11 @@ try {
         $final = (Get-Date) -gt $deadline
         $clientLog = Join-Path $Instances "$ClientSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log"
         $decisions = if ($Scenario -eq "door") { @(Read-SharedLines $clientLog 'AutoFollow: host used door') }
-                     elseif ($Scenario -eq "loot") { @(Read-SharedLines $clientLog 'instanced enemy loot') } else { @() }
+                     elseif ($Scenario -eq "loot") { @(Read-SharedLines $clientLog 'instanced enemy loot') }
+                     elseif ($Scenario -eq "reward") { @(Read-SharedLines $clientLog '[REWARD]') } else { @() }
         $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
             $lastLog = Get-Date

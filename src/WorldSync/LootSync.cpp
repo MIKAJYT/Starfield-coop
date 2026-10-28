@@ -15,6 +15,7 @@
 #include "SpaceSync/DockSync.h"                // L.6 V3 Phase 3f: station-activate intercept
 #include "Coop/CoopMortality.h"                // Way-A: revive via clone-activate
 #include "Config.h"                            // coopInstancedEnemyLoot
+#include "QuestSync/RewardShare.h"             // quest rewards for everyone
 
 #include <windows.h>
 #include <MinHook.h>
@@ -3284,6 +3285,13 @@ namespace {
         if (!playerIsDest && !playerIsSrc) return;
         if (count == 0 || !item) return;
 
+        // No source container: the game itself gave the player something
+        // (stage script, dialogue, ...). Quest rewards are shared from here.
+        if (playerIsDest && !src && !t_replayingFromPacket) {
+            Pulsar::QuestSync::Reward::OnLocalPlayerAdd(item, count, reason);
+            return;
+        }
+
         // Resolve the "container side" - the non-player party.
         RE::TESObjectREFR* container = playerIsDest ? src : dest;
         uint32_t containerID         = playerIsDest ? srcID : destID;
@@ -4239,6 +4247,31 @@ std::int32_t CountInventoryItems(RE::TESObjectREFR* a_ref)
     int32_t total = 0;
     for (int32_t i = 0; i < n; ++i) total += s_buf[i].count;
     return total;
+}
+
+std::int32_t CountItemForTest(RE::TESObjectREFR* a_ref, std::uint32_t a_base)
+{
+    static SnapshotEntry s_buf[kMaxSnapshotEntries];   // game thread only
+    const int32_t n = SafeSnapshotRefrInventory(a_ref, s_buf, static_cast<int32_t>(kMaxSnapshotEntries));
+    if (n < 0) return -1;
+    int32_t total = 0;
+    for (int32_t i = 0; i < n; ++i)
+        if (s_buf[i].base == a_base) total += s_buf[i].count;
+    return total;
+}
+
+std::uint32_t LowestItemOfTypeForTest(RE::TESObjectREFR* a_ref, std::uint8_t a_type)
+{
+    static SnapshotEntry s_buf[kMaxSnapshotEntries];   // game thread only
+    const int32_t n = SafeSnapshotRefrInventory(a_ref, s_buf, static_cast<int32_t>(kMaxSnapshotEntries));
+    std::uint32_t best = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        const std::uint32_t b = s_buf[i].base;
+        if (!b || b >= 0xFF000000u || (best && b >= best)) continue;
+        auto* form = RE::TESForm::LookupByID(b);
+        if (form && static_cast<std::uint8_t>(form->GetFormType()) == a_type) best = b;
+    }
+    return best;
 }
 
 namespace {

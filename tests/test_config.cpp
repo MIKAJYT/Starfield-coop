@@ -39,12 +39,19 @@ TEST(Config, EmptyFileGivesTheDefaults)
     CHECK(c.coopBridgeRestoreRetry);
     CHECK(!c.coopDoorFollow);               // spec: doors move only the user
     CHECK(c.coopInstancedEnemyLoot);        // spec: each player loots their own copy
+    CHECK(c.coopQuestRewards);              // spec: quest rewards for everyone
 }
 
 TEST(Config, InstancedEnemyLootCanBeTurnedOff)
 {
     CHECK(!Parse("CoopInstancedEnemyLoot = 0\n").coopInstancedEnemyLoot);
     CHECK(!Parse("coop_instanced_enemy_loot=off\n").coopInstancedEnemyLoot);
+}
+
+TEST(Config, QuestRewardsCanBeTurnedOff)
+{
+    CHECK(!Parse("CoopQuestRewards = 0\n").coopQuestRewards);
+    CHECK(Parse("coop_quest_rewards=on\n").coopQuestRewards);
 }
 
 TEST(Config, DoorFollowCanBeTurnedBackOn)
