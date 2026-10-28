@@ -5,9 +5,11 @@
 
 #include "Config.h"
 #include "InventorySync/DirectRestore.h"
+#include "NPCSync/NPCSync.h"
 #include "Network/NetworkHost.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "TransitSync/TransitSync.h"
+#include "WorldSync/LootSync.h"
 
 #include <RE/P/PlayerCharacter.h>
 #include <RE/T/TESObjectCELL.h>
@@ -33,6 +35,10 @@ namespace Pulsar::TestBot
         //   follow - the host moves itself; the client's clone must follow.
         //   door   - the host goes through the nearest load door; with
         //            CoopDoorFollow=0 the client must stay where it is.
+        //   loot   - the host kills a nearby NPC and takes everything from the
+        //            corpse; with CoopInstancedEnemyLoot=1 the client's copy of
+        //            the corpse must keep its items. Both roles report the dead
+        //            NPCs around them with their item counts.
         struct Settings {
             bool        enabled = false;
             std::string stateFile;          // state log, one JSON line per second (test slot logs)
@@ -40,7 +46,14 @@ namespace Pulsar::TestBot
             std::uint64_t moveAfterMs = 45000;   // host: clone visible this long, then act
             float       moveMetres = 5.0f;  // follow: X offset of the test move (game units = metres)
             float       doorRadius = 60.0f; // door: search radius for a load door (metres)
+            float       lootRadius = 30.0f; // loot: search radius for the NPC to kill (metres)
+            std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
         };
+
+        // Loot scenario progress (host). The kill happens at the usual act time;
+        // the take - the action under test, stamped as actedAtWallMs - follows
+        // once the corpse has had time to die on the client too.
+        enum class LootPhase { kIdle, kKilled, kDone };
 
         struct State {
             bool          loaded = false;
@@ -51,6 +64,11 @@ namespace Pulsar::TestBot
             std::uint64_t actedAtWallMs = 0;
             std::string   actionInfo;
             int           writes = 0;
+            LootPhase     lootPhase = LootPhase::kIdle;
+            std::uint32_t lootTarget = 0;
+            std::uint64_t lootDeadAtMs = 0;
+            std::uint64_t lootKilledAtMs = 0;
+            int           lootTries = 0;
         };
         State s_state;
 
@@ -88,6 +106,8 @@ namespace Pulsar::TestBot
                 else if (key == "movemetres")  s.moveMetres = std::stof(value);
                 else if (key == "scenario")    s.scenario = value;
                 else if (key == "doorradius")  s.doorRadius = std::stof(value);
+                else if (key == "lootradius")  s.lootRadius = std::stof(value);
+                else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -231,6 +251,59 @@ namespace Pulsar::TestBot
             }
         }
 
+        // NPC actors in a cell (raw cell array, as the door scan). Only save-file
+        // references (formID below 0xFF000000): those are the same reference on
+        // both machines, so the client can report the host's victim by its ID.
+        struct NpcSeen {
+            RE::Actor*    actor;
+            std::uint32_t id;
+            float         dist;
+            bool          dead;
+            bool          guarded;   // Essential or Protected (Actor::boolFlags +0x378): the player cannot kill it
+        };
+
+        bool SafeIsDead(RE::Actor* a_actor) noexcept
+        {
+            __try {
+                return a_actor && a_actor->IsDead();
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+        }
+
+        int SafeListNpcs(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz, float a_radius,
+                         NpcSeen* a_out, int a_max) noexcept
+        {
+            int n = 0;
+            __try {
+                if (!a_cell) return 0;
+                auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+                const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                if (!data || size == 0 || size > 20000) return 0;
+                const float maxD2 = a_radius * a_radius;
+                for (std::uint32_t i = 0; i < size && n < a_max; ++i) {
+                    auto* ref = data[i];
+                    if (!ref) continue;
+                    auto* rb = reinterpret_cast<std::uint8_t*>(ref);
+                    if (*(rb + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kACHR)) continue;
+                    auto* base = *reinterpret_cast<std::uint8_t**>(rb + 0x98);
+                    if (!base || *(base + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kNPC_)) continue;
+                    const std::uint32_t id = ref->formID;
+                    if (id == 0x14 || id >= 0xFF000000u) continue;
+                    auto* loc = reinterpret_cast<float*>(rb + 0x8C);
+                    const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;
+                    const float d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 >= maxD2) continue;
+                    auto* actor = static_cast<RE::Actor*>(ref);
+                    const std::uint32_t flags = *reinterpret_cast<std::uint32_t*>(rb + 0x378);
+                    const bool guarded = (flags & ((1u << 18) | (1u << 19))) != 0;   // kEssential, kProtected
+                    a_out[n++] = { actor, id, std::sqrt(d2), SafeIsDead(actor), guarded };
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return n;
+        }
+
         // Activate a door as the player would, through the engine's Activate
         // core (REL::ID 63380): the function the Papyrus ObjectReference.Activate
         // native calls and LootSync hooks, so every hook sees a real player
@@ -293,6 +366,89 @@ namespace Pulsar::TestBot
             }
             std::fprintf(s_file, "%llu %s\n", static_cast<unsigned long long>(WallMs()), a_line);
             std::fflush(s_file);
+        }
+
+        void FinishLoot(const char* a_info)
+        {
+            s_state.actionInfo = a_info;
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            s_state.lootPhase = LootPhase::kDone;
+            Trace(a_info);
+            PLOG_INFO("[PULSAR] TestBot: loot action: {}"sv, s_state.actionInfo);
+        }
+
+        void TickLoot(RE::PlayerCharacter* a_player, const ActorSnap& a_me, std::uint64_t a_now)
+        {
+            constexpr int kMaxTries = 10;   // essential NPCs (companions) never die
+            static std::uint32_t s_tried[kMaxTries] = {};
+            char msg[200];
+
+            if (s_state.lootPhase == LootPhase::kIdle) {
+                NpcSeen npcs[64];
+                const int n = SafeListNpcs(a_player->parentCell, a_me.x, a_me.y, a_me.z,
+                                           s_state.cfg.lootRadius, npcs, 64);
+                const NpcSeen* pick = nullptr;
+                int alive = 0, guarded = 0;
+                for (int i = 0; i < n; ++i) {
+                    if (npcs[i].dead) continue;
+                    ++alive;
+                    if (npcs[i].guarded) { ++guarded; continue; }
+                    bool tried = false;
+                    for (int t = 0; t < s_state.lootTries; ++t) tried = tried || s_tried[t] == npcs[i].id;
+                    if (tried || Pulsar::WorldSync::Loot::CountInventoryItems(npcs[i].actor) <= 0) continue;
+                    if (!pick || npcs[i].dist < pick->dist) pick = &npcs[i];
+                }
+                if (!pick || s_state.lootTries >= kMaxTries) {
+                    std::snprintf(msg, sizeof(msg), "loot: no NPC to kill within %.0f m (npcs=%d alive=%d essential/protected=%d tries=%d)",
+                                  s_state.cfg.lootRadius, n, alive, guarded, s_state.lootTries);
+                    FinishLoot(msg);
+                    return;
+                }
+                s_tried[s_state.lootTries++] = pick->id;
+                std::snprintf(msg, sizeof(msg), "loot: killing %08X (%.1f m)", pick->id, pick->dist);
+                Trace(msg);
+                const bool fired = Pulsar::NPCSync::KillActor(pick->actor, a_player);
+                std::snprintf(msg, sizeof(msg), "loot: kill %08X fired=%d", pick->id, fired ? 1 : 0);
+                Trace(msg);
+                s_state.lootTarget = pick->id;
+                s_state.lootKilledAtMs = a_now;
+                s_state.lootDeadAtMs = 0;
+                s_state.lootPhase = LootPhase::kKilled;
+                return;
+            }
+
+            if (s_state.lootPhase != LootPhase::kKilled) return;
+            auto* form = RE::TESForm::LookupByID(s_state.lootTarget);
+            auto* corpse = form ? form->As<RE::Actor>() : nullptr;
+            if (!corpse || !SafeIsDead(corpse)) {
+                // The engine refuses to kill essential NPCs; try the next one.
+                if (s_state.lootDeadAtMs != 0 || a_now - s_state.lootKilledAtMs > 6000) {
+                    // Seen dead, then alive or gone: run 20261028-011644's spawner
+                    // NPC 0037C634 (dynamic base) died and was back within 7 s.
+                    std::snprintf(msg, sizeof(msg), s_state.lootDeadAtMs ? "loot: %08X was dead, now alive or gone, next"
+                                                                         : "loot: %08X did not die, next",
+                                  s_state.lootTarget);
+                    Trace(msg);
+                    s_state.lootPhase = LootPhase::kIdle;
+                }
+                return;
+            }
+            if (s_state.lootDeadAtMs == 0) {
+                s_state.lootDeadAtMs = a_now;
+                std::snprintf(msg, sizeof(msg), "loot: %08X dead, items=%d", s_state.lootTarget,
+                              Pulsar::WorldSync::Loot::CountInventoryItems(corpse));
+                Trace(msg);
+            }
+            if (a_now - s_state.lootDeadAtMs < s_state.cfg.lootAfterDeathMs) return;
+
+            const int before = Pulsar::WorldSync::Loot::CountInventoryItems(corpse);
+            Trace("loot: taking all");
+            const int moved = Pulsar::WorldSync::Loot::TakeAllForTest(corpse, a_player);
+            const int after = Pulsar::WorldSync::Loot::CountInventoryItems(corpse);
+            std::snprintf(msg, sizeof(msg), "loot: corpse %08X killed, items before=%d after=%d moved=%d",
+                          s_state.lootTarget, before, after, moved);
+            FinishLoot(msg);
         }
 
         bool SafeMovePlayer(RE::PlayerCharacter* a_player, float a_x, float a_y, float a_z) noexcept
@@ -359,8 +515,15 @@ namespace Pulsar::TestBot
             s_state.cloneSeenSinceMs = 0;
         }
 
+        // Loot: kill, wait for the death to reach the client, then take all.
+        if (isHost && s_state.cfg.scenario == "loot" && !s_state.acted && me.valid &&
+            (s_state.lootPhase != LootPhase::kIdle ||
+             (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
+            TickLoot(player, me, now);
+        }
+
         // The test action, once the partner is settled: host only.
-        if (isHost && !s_state.acted && cloneVisible && me.valid &&
+        if (isHost && s_state.cfg.scenario != "loot" && !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
             if (s_state.cfg.scenario == "door") {
@@ -423,6 +586,21 @@ namespace Pulsar::TestBot
         j += std::string(",\"acted\":") + (s_state.acted ? "true" : "false");
         j += ",\"actedAtWallMs\":" + std::to_string(s_state.actedAtWallMs);
         j += ",\"actionInfo\":\"" + s_state.actionInfo + "\"";
+        if (s_state.cfg.scenario == "loot") {
+            NpcSeen npcs[64];
+            const int n = me.valid ? SafeListNpcs(player->parentCell, me.x, me.y, me.z, 60.0f, npcs, 64) : 0;
+            // Every save-file NPC nearby, alive or dead: the client's copy of the
+            // host's victim is followed even when the death does not reach it.
+            j += ",\"npcs\":[";
+            for (int i = 0; i < n; ++i) {
+                char c[80];
+                std::snprintf(c, sizeof(c), "%s{\"id\":\"%08X\",\"dead\":%s,\"items\":%d}", i ? "," : "",
+                              npcs[i].id, npcs[i].dead ? "true" : "false",
+                              Pulsar::WorldSync::Loot::CountInventoryItems(npcs[i].actor));
+                j += c;
+            }
+            j += "]";
+        }
         j += "}\n";
         WriteState(j);
     }

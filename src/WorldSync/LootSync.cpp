@@ -296,6 +296,10 @@ namespace {
             static_cast<const uint8_t*>(form) + 0x28);
     }
 
+    // PKT_CONTAINER_TAKE containerRefType bit 7: the sender took the item from
+    // a dead actor (instanced enemy loot). Form types never use this bit.
+    static constexpr uint8_t kTakeFromCorpseFlag = 0x80;
+
     // SEH-wrapped "is this ACHR reference a dead actor" (instanced enemy loot).
     static bool SafeIsDeadActor(RE::TESObjectREFR* a_ref) noexcept
     {
@@ -765,6 +769,18 @@ namespace {
         d.itemLocalID      = NPCSync::PluginLookup::FormIDToLocalID(itemBase);
         d.count            = count;
         d.containerRefType = refType;
+        // Spec phase 1 (instanced enemy loot): tell the receiver this was a
+        // corpse on OUR side. Its own copy may not have died (death sync lost
+        // or late - test bot run 20261028-012531: the client's copy of
+        // 0037C634 was alive, so its dead-actor check missed and it emptied
+        // its corpse). Form types are < 0x80, so bit 7 is free.
+        if (refType == static_cast<uint8_t>(RE::FormType::kACHR)) {
+            // Untyped lookup: the typed LookupByID<TESObjectREFR> missed the
+            // ACHR in run 20261028-013314 (flag never set). SafeIsDeadActor
+            // checks the form type itself.
+            auto* senderRef = reinterpret_cast<RE::TESObjectREFR*>(RE::TESForm::LookupByID(containerRefID));
+            if (SafeIsDeadActor(senderRef)) d.containerRefType |= kTakeFromCorpseFlag;
+        }
         d.transferReason   = transferReason;
         d.modCount = static_cast<uint8_t>(mods
             ? std::min<size_t>(mods->size(), kMaxModsPerDrop) : 0);
@@ -2077,6 +2093,7 @@ namespace {
         float    px, py, pz;
         int32_t  count;
         uint8_t  refType;          // kREFR or kACHR - selects matcher path
+        bool     fromPeerCorpse;   // the sender took it from a dead actor (kTakeFromCorpseFlag)
         uint8_t  transferReason;   // M.2 V5: forwarded ITEM_TRANSFER_REASON
         uint16_t modSentinel;      // M.2 V16: kObjectInstance +0x28 sentinel
         std::vector<uint32_t> resolvedMods;  // M.2 V7: cross-plugin-resolved
@@ -3675,7 +3692,8 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
             p.resolvedItemBase      = resolvedItemBase;
             p.px = t.posX; p.py = t.posY; p.pz = t.posZ;
             p.count = t.count;
-            p.refType = t.containerRefType;
+            p.refType = t.containerRefType & ~kTakeFromCorpseFlag;
+            p.fromPeerCorpse = (t.containerRefType & kTakeFromCorpseFlag) != 0;
             p.transferReason = reason;
             p.modSentinel = t.modSentinel;
             p.resolvedMods = std::move(resolvedMods);
@@ -3875,8 +3893,10 @@ void DrainPendingPickups()
         // A take from a DEAD actor therefore does not reach the other machine's
         // corpse. Living actors (traders) and world containers stay shared:
         // first to take removes it for everyone. CoopInstancedEnemyLoot = 0 is
-        // the 0.3.0 behaviour (corpse loot shared).
-        if (isActor && Pulsar::GetConfig().coopInstancedEnemyLoot && SafeIsDeadActor(container)) {
+        // the 0.3.0 behaviour (corpse loot shared). The sender's view counts:
+        // our own copy may still be alive if its death has not reached us.
+        if (isActor && Pulsar::GetConfig().coopInstancedEnemyLoot &&
+            (t.fromPeerCorpse || SafeIsDeadActor(container))) {
             PLOG_INFO(
                 "[PULSAR] ContainerSync: instanced enemy loot - peer took item 0x{:08X} x{} from corpse 0x{:08X}; keeping our own copy"sv,
                 t.resolvedItemBase, t.count, RawFormID(container));
@@ -4204,6 +4224,51 @@ void CallOrigActivateAsReplay(RE::TESObjectREFR* refr, void* args)
                           RawFormID(refr));
     t_currentReplayingRefr  = prevRefr;
     t_replayingFromPacket   = prevFlag;
+}
+
+std::int32_t CountInventoryItems(RE::TESObjectREFR* a_ref)
+{
+    static SnapshotEntry s_buf[kMaxSnapshotEntries];   // game thread only
+    const int32_t n = SafeSnapshotRefrInventory(a_ref, s_buf, static_cast<int32_t>(kMaxSnapshotEntries));
+    if (n <= 0) return n == 0 && a_ref ? 0 : -1;
+    int32_t total = 0;
+    for (int32_t i = 0; i < n; ++i) total += s_buf[i].count;
+    return total;
+}
+
+namespace {
+    bool SafeHookedTake(RE::TESObjectREFR* a_to, RE::TESForm* a_item, int32_t a_count,
+                        RE::TESObjectREFR* a_from) noexcept
+    {
+        __try {
+            void* nullSmart = nullptr;
+            HookedAddObjInner(a_to, a_item, &nullSmart,
+                              static_cast<uint32_t>(RE::ITEM_TRANSFER_REASON::kNone), a_count, a_from);
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+}
+
+std::int32_t TakeAllForTest(RE::TESObjectREFR* a_from, RE::TESObjectREFR* a_to)
+{
+    if (!a_from || !a_to || !g_origAddObjInner) return 0;
+    static SnapshotEntry s_buf[kMaxSnapshotEntries];   // game thread only
+    const int32_t n = SafeSnapshotRefrInventory(a_from, s_buf, static_cast<int32_t>(kMaxSnapshotEntries));
+    int32_t moved = 0;
+    for (int32_t i = 0; i < n; ++i) {
+        auto* item = RE::TESForm::LookupByID(s_buf[i].base);
+        if (!item || s_buf[i].count <= 0) continue;
+        // The inner add only adds to the destination (run 20261028-012531: the
+        // host corpse still held 46 of 46), so remove from the source the way
+        // the take receiver does.
+        if (SafeHookedTake(a_to, item, s_buf[i].count, a_from))
+            moved += RawRemoveFromContainer(a_from, s_buf[i].base, s_buf[i].count);
+    }
+    PLOG_INFO("[PULSAR] TestBot take-all: from=0x{:08X} to=0x{:08X} entries={} moved={}"sv,
+              RawFormID(a_from), RawFormID(a_to), n, moved);
+    return moved;
 }
 
 bool SetReplayingFromPacket(bool value)

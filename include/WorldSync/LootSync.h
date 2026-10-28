@@ -50,6 +50,15 @@ namespace Pulsar::WorldSync::Loot {
     // header to avoid leaking the internal struct definition.
     void CallOrigActivateAsReplay(RE::TESObjectREFR* refr, void* args);
 
+    // Co-op test bot (Debug/TestBot). Total item count in a reference's
+    // inventory (-1 if it has none readable).
+    std::int32_t CountInventoryItems(RE::TESObjectREFR* a_ref);
+    // Move every item from a_from to a_to through the engine's inner
+    // AddObjectToContainer as hooked here - the funnel a player's Take All
+    // goes through - so the take is broadcast like a real one, then remove it
+    // from a_from. Returns the number of items removed from a_from.
+    std::int32_t TakeAllForTest(RE::TESObjectREFR* a_from, RE::TESObjectREFR* a_to);
+
     // L.7 Plan B - suppress M.2 inventory broadcast hook (and the V24
     // mod-snapshot / V25 grow-skip paths) for the duration of a synthetic
     // engine call. Caller pattern (RAII or manual restore):

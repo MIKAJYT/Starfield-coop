@@ -3198,6 +3198,24 @@ namespace Pulsar::NPCSync {
         return g_npcCombatLive.find(formID) != g_npcCombatLive.end();
     }
 
+    bool KillActor(RE::Actor* a_actor, RE::Actor* a_killer)
+    {
+        if (!a_actor) return false;
+        // As the host's damage path above: the engine kill alone left full-health
+        // NPCs alive (test bot, run 20261028-011048, 5 of 5), so drain Health
+        // through the kDamage modifier first, then kill.
+        auto* healthAV = g_healthAV.load(std::memory_order_acquire);
+        if (!healthAV) {
+            healthAV = RE::TESForm::LookupByEditorID<RE::ActorValueInfo>("Health");
+            if (healthAV) g_healthAV.store(healthAV, std::memory_order_release);
+        }
+        if (healthAV) {
+            const float health = a_actor->GetActorValue(*healthAV);
+            a_actor->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, *healthAV, -(health + 10.0f), a_killer);
+        }
+        return SafeKillActor(a_actor, a_killer) != 0;
+    }
+
 }  // namespace Pulsar::NPCSync
 
 

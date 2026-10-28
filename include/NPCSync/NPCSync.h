@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace RE { class TESObjectCELL; }
+namespace RE { class Actor; class TESObjectCELL; }
 
 namespace Pulsar::NPCSync {
 
@@ -94,5 +94,9 @@ namespace Pulsar::NPCSync {
     // TESDataHandler.formArrays[kCELL] iteration path. Callers filter stale
     // pointers defensively (SEH-wrap ref-iteration).
     std::vector<RE::TESObjectCELL*> GetActiveCellsSnapshot();
+
+    // The engine kill (Papyrus Actor.Kill core) used for host-authoritative
+    // deaths. False if it raised. Used by the co-op test bot (Debug/TestBot).
+    bool KillActor(RE::Actor* a_actor, RE::Actor* a_killer);
 
 }  // namespace Pulsar::NPCSync

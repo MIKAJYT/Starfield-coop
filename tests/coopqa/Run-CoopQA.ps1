@@ -44,8 +44,11 @@ param(
     [switch]$NoLowMemory,
     # follow: host moves, client's clone must follow. door: host uses a load door,
     # client must stay (CoopDoorFollow=0). -DoorFollow sets CoopDoorFollow=1: twin.
-    [ValidateSet("follow", "door")][string]$Scenario = "follow",
+    # loot: host kills an NPC and takes all; the client's corpse must keep its
+    # items (CoopInstancedEnemyLoot=1). -SharedLoot sets it to 0: twin.
+    [ValidateSet("follow", "door", "loot")][string]$Scenario = "follow",
     [switch]$DoorFollow,
+    [switch]$SharedLoot,
     # Hard working-set cap per test copy (MB, 0 = off): Windows pages out the
     # test game's memory instead of the owner's programs (PulsarTestHarness).
     [int]$MaxWorkingSetMB = 0
@@ -183,6 +186,63 @@ function Invoke-DoorScore {
     return $r
 }
 
+# ---- loot scenario ------------------------------------------------------------
+# The host bot kills an NPC (a save-file reference: same ID on both machines),
+# waits a few seconds, then takes everything from the corpse. With
+# CoopInstancedEnemyLoot=1 (the spec: "every player gets their own loot") the
+# client's copy of that NPC must keep its items for at least 15 s afterwards, and
+# the client must log that it kept them. Whether the death reached the client is
+# reported, not scored (death sync is a separate feature).
+function Invoke-LootScore {
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never looted a corpse (clone never settled?)") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^loot: corpse ([0-9A-F]{8}) killed, items before=(-?\d+) after=(-?\d+) moved=(-?\d+)') {
+        $r.Result = "ERROR"; $r.Reasons.Add("host bot could not loot: $($act.actionInfo)"); return $r
+    }
+    $id = $Matches[1]; $moved = [int]$Matches[4]
+    if ($moved -le 0) { $r.Result = "ERROR"; $r.Reasons.Add("host took nothing from the corpse: $($act.actionInfo)"); return $r }
+    $t0 = [long]$act.actedAtWallMs
+    $itemsOn = { param($s) $c = @($s.npcs | Where-Object { $_.id -eq $id }); if ($c.Count -gt 0) { [int]$c[0].items } else { $null } }
+    # Precondition: the client has its own copy of the NPC before the take.
+    $cBefore = @($clientList | Where-Object { $_.wallMs -lt $t0 -and $null -ne (& $itemsOn $_) })
+    if ($cBefore.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("the client has no copy of NPC $id before the host looted it"); return $r }
+    $before = & $itemsOn $cBefore[-1]
+    if ($before -le 0) { $r.Result = "ERROR"; $r.Reasons.Add("the client's corpse $id was already empty before the take ($before items)"); return $r }
+    $cAfter = @($clientList | Where-Object { $_.wallMs -ge $t0 })
+    $cLate  = @($cAfter | Where-Object { $_.wallMs -ge $t0 + 15000 })
+    if ($cLate.Count -lt 5) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough client samples after the take ($($cLate.Count) of 5)") }
+        return $r
+    }
+    $counts = @($cAfter | ForEach-Object { & $itemsOn $_ })
+    $least = ($counts | Where-Object { $null -ne $_ } | Measure-Object -Minimum).Minimum
+    $diedOnClient = @($clientList | Where-Object { @($_.npcs | Where-Object { $_.id -eq $id -and $_.dead }).Count -gt 0 }).Count -gt 0
+    $r.Details = "loot: $($act.actionInfo); client copy of $id items before the take $before, lowest after $least; died on the client: $(if ($diedOnClient) { 'yes' } else { 'NO (death sync)' })"
+    if (@($counts | Where-Object { $null -eq $_ }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client's corpse $id disappeared after the host looted it"); return $r }
+    if ($least -lt $before) { $r.Result = "FAIL"; $r.Reasons.Add("the client's corpse lost items when the host looted ($before -> $least)"); return $r }
+    if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the take"); return $r }
+    # Unchanged counts alone could also mean the take never arrived; require the
+    # client's own decision for this corpse.
+    if (-not ($ClientDecisions | Where-Object { $_ -match "from corpse 0x$id; keeping our own copy" })) {
+        $r.Result = "FAIL"; $r.Reasons.Add("the client never logged keeping its own copy of corpse $id (take not received or not instanced)"); return $r
+    }
+    $r.Result = "PASS"
+    return $r
+}
+
 # ---- scorer self-test (playbook: test the scorer, not only the test) -------
 function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$acted = $false, [long]$actedAt = 0) {
     [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; acted = $acted; actedAtWallMs = $actedAt }
@@ -200,6 +260,22 @@ function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, 
         $hostRun += $hs; $clientRun += $cs
     }
     return @{ H = $hostRun; C = $clientRun; D = $(if ($decides) { @("[PULSAR] AutoFollow: host used door 0x0001ABCD to 0x0000BEEF - staying here (CoopDoorFollow=0)") } else { @() }) }
+}
+function New-LootRun([int]$clientAfter = 5, [bool]$diesOnClient = $true, [int]$moved = 5, [bool]$decides = $true, [bool]$acts = $true, [bool]$hasCopy = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $deathAt = $t0 + 5000; $takeAt = $t0 + 15000
+    $info = "loot: corpse 0001ABCD killed, items before=5 after=$(5 - $moved) moved=$moved"
+    for ($i = 0; $i -lt 40; $i++) {
+        $t = $t0 + $i * 1000; $taken = $acts -and $t -ge $takeAt
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true $taken $(if ($acts) { $takeAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { $info } else { "" }); $hs | Add-Member connected $true
+        $hs | Add-Member npcs @([pscustomobject]@{ id = "0001ABCD"; dead = ($t -ge $deathAt); items = $(if ($taken) { 5 - $moved } else { 5 }) })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cs | Add-Member npcs @($(if ($hasCopy) { [pscustomobject]@{ id = "0001ABCD"; dead = ($diesOnClient -and $t -ge $deathAt + 2000); items = $(if ($taken) { $clientAfter } else { 5 }) } }) | Where-Object { $_ })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    $d = if ($decides) { @("[PULSAR] ContainerSync: instanced enemy loot - peer took item 0x0000000F x5 from corpse 0x0001ABCD; keeping our own copy") } else { @() }
+    return @{ H = $hostRun; C = $clientRun; D = $d }
 }
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
@@ -229,15 +305,23 @@ function Invoke-ScorerSelfTest {
         @{ Name = "door: host stays";        Run = (New-DoorRun -hostChanges $false);  Expect = "FAIL";    Door = $true },
         @{ Name = "door: no door found";     Run = (New-DoorRun -info "no load door found"); Expect = "ERROR"; Door = $true },
         @{ Name = "door: engine refused";    Run = (New-DoorRun -info "door 0001ABCD of 2 load doors (2.8 m away), activate=0"); Expect = "ERROR"; Door = $true },
-        @{ Name = "door: never acted";       Run = (New-DoorRun -acts $false);         Expect = "TIMEOUT"; Door = $true }
+        @{ Name = "door: never acted";       Run = (New-DoorRun -acts $false);         Expect = "TIMEOUT"; Door = $true },
+        @{ Name = "loot: client keeps";      Run = (New-LootRun);                      Expect = "PASS";    Loot = $true },
+        @{ Name = "loot: client loses";      Run = (New-LootRun -clientAfter 0);       Expect = "FAIL";    Loot = $true },
+        @{ Name = "loot: keeps, no decision"; Run = (New-LootRun -decides $false);     Expect = "FAIL";    Loot = $true },
+        @{ Name = "loot: alive on client, kept"; Run = (New-LootRun -diesOnClient $false); Expect = "PASS"; Loot = $true },
+        @{ Name = "loot: no copy on client"; Run = (New-LootRun -hasCopy $false); Expect = "ERROR";   Loot = $true },
+        @{ Name = "loot: took nothing";      Run = (New-LootRun -moved 0);             Expect = "ERROR";   Loot = $true },
+        @{ Name = "loot: never acted";       Run = (New-LootRun -acts $false);         Expect = "TIMEOUT"; Loot = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
         if (-not $ok) { $bad++ }
-        Write-Host ("{0,-24} expected {1,-7} got {2,-7} {3}" -f $case.Name, $case.Expect, $s.Result, $(if ($ok) { "ok" } else { "MISMATCH" }))
+        Write-Host ("{0,-28} expected {1,-7} got {2,-7} {3}" -f $case.Name, $case.Expect, $s.Result, $(if ($ok) { "ok" } else { "MISMATCH" }))
     }
     # Only the count goes down the pipeline (anything else would be captured with it).
     Write-Host $(if ($bad -eq 0) { "SELFTEST: OK ($($cases.Count) cases)" } else { "SELFTEST: FAILED ($bad of $($cases.Count))" })
@@ -298,7 +382,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     Remove-Item -LiteralPath (Join-Path $root "logs\bot-trace.log") -ErrorAction SilentlyContinue
     $mode = if ($role -eq "host") { "host" } else { "client" }
     $doorFollowValue = if ($DoorFollow) { 1 } else { 0 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`n"
+    $instancedLootValue = if ($SharedLoot) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`n"
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -473,8 +558,11 @@ try {
         if ($cs -and $now - [long]$cs.wallMs -gt 30000) { throw ("client bot state is stale ({0:N0} s old) while the game runs" -f (($now - [long]$cs.wallMs) / 1000)) }
         if (-not $cs -and $now - $clientStart -gt 120000) { throw "client bot wrote nothing within 120 s" }
         $final = (Get-Date) -gt $deadline
-        $decisions = if ($Scenario -eq "door") { @(Read-SharedLines (Join-Path $Instances "$ClientSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log") 'AutoFollow: host used door') } else { @() }
+        $clientLog = Join-Path $Instances "$ClientSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log"
+        $decisions = if ($Scenario -eq "door") { @(Read-SharedLines $clientLog 'AutoFollow: host used door') }
+                     elseif ($Scenario -eq "loot") { @(Read-SharedLines $clientLog 'instanced enemy loot') } else { @() }
         $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
             $lastLog = Get-Date
