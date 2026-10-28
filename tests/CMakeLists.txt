@@ -41,6 +41,7 @@ add_executable(
   test_divergence_watch.cpp
   test_profile_merge.cpp
   test_ride_policy.cpp
+  test_match_policy.cpp
   test_stage_journal.cpp
   test_config.cpp
   test_follower_bonus.cpp

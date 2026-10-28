@@ -17,6 +17,7 @@
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
 #include "NPCSync/LocomotionApply.h"
+#include "NPCSync/MatchPolicy.h"
 #include "NPCSync/PluginLookup.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "WorldSync/LootSync.h"   // corpse-loot sync: ReadItemMods/ApplyItemMods + replay guard
@@ -1180,26 +1181,22 @@ namespace Pulsar::NPCSync {
     // Prevents two host-NPCs from remoting to the same local actor (which
     // would cause tele-jitter as each tick re-sets position between two
     // different host-targets).
-    static uint32_t FindLocalMatch(uint32_t hostEffectiveID,
+    // Rules in NPCSync/MatchPolicy.h: a save-file ref matches only itself;
+    // runtime refs by template + nearest position within 50 m, exclusively.
+    static uint32_t FindLocalMatch(uint32_t hostRef, uint32_t hostEffectiveID,
                                    float hostX, float hostY, float hostZ,
                                    const std::unordered_set<uint32_t>& claimed)
     {
         if (hostEffectiveID == 0) return 0;
-        constexpr float kMatchRadius2 = 50.0f * 50.0f;
-        uint32_t bestRef = 0;
-        float bestDist2 = kMatchRadius2;
-        std::lock_guard lk(g_procDumpMutex);
-        for (auto& [ref, e] : g_procDumpTableV3) {
-            if (e.effectiveBaseID != hostEffectiveID) continue;
-            if (claimed.count(ref)) continue;  // exclusivity: already matched
-            float dx = e.pos[0] - hostX, dy = e.pos[1] - hostY, dz = e.pos[2] - hostZ;
-            float d2 = dx*dx + dy*dy + dz*dz;
-            if (d2 < bestDist2) {
-                bestDist2 = d2;
-                bestRef = ref;
-            }
+        std::vector<MatchCandidate> cands;
+        {
+            std::lock_guard lk(g_procDumpMutex);
+            cands.reserve(g_procDumpTableV3.size());
+            for (auto& [ref, e] : g_procDumpTableV3)
+                cands.push_back({ ref, e.effectiveBaseID, e.pos[0], e.pos[1], e.pos[2] });
         }
-        return bestRef;
+        return ChooseLocalMatch(hostRef, hostEffectiveID, hostX, hostY, hostZ,
+                                cands.data(), cands.size(), claimed);
     }
 
     // Phase E Task 0 probe helper: walk actor->aiProcess->middleHigh->charController
@@ -2645,7 +2642,7 @@ namespace Pulsar::NPCSync {
                     claimed.reserve(g_npcRemap.size());
                     for (auto& [hr, lr] : g_npcRemap) claimed.insert(lr);
                 }
-                uint32_t matchRef = FindLocalMatch(hostEffective, u.posX, u.posY, u.posZ, claimed);
+                uint32_t matchRef = FindLocalMatch(u.refFormID, hostEffective, u.posX, u.posY, u.posZ, claimed);
                 if (matchRef == 0) {
                     // Engine hasn't proc-gen'd this NPC yet, or it's out of
                     // our 400m collection range. Skip - retry when it

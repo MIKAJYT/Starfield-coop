@@ -245,6 +245,16 @@ function Invoke-LootScore {
     return $r
 }
 
+# "host->local" for every client match of a host save-file NPC (FormID below
+# 0xFF000000, the same reference on both machines) to a different local NPC.
+function Find-WrongNpcMatches([string[]]$Lines) {
+    foreach ($l in $Lines) {
+        if ($l -match 'MATCHED hostRef=0x([0-9A-F]{8}) .*-> localRef=0x([0-9A-F]{8})') {
+            if (-not $Matches[1].StartsWith("FF") -and $Matches[1] -ne $Matches[2]) { "$($Matches[1])->$($Matches[2])" }
+        }
+    }
+}
+
 # ---- scorer self-test (playbook: test the scorer, not only the test) -------
 function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$acted = $false, [long]$actedAt = 0) {
     [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; acted = $acted; actedAtWallMs = $actedAt }
@@ -325,6 +335,17 @@ function Invoke-ScorerSelfTest {
         if (-not $ok) { $bad++ }
         Write-Host ("{0,-28} expected {1,-7} got {2,-7} {3}" -f $case.Name, $case.Expect, $s.Result, $(if ($ok) { "ok" } else { "MISMATCH" }))
     }
+    # NPC matching check: the rotated guards of run 20261028-091213 are caught,
+    # identity and runtime (0xFF) rematches are not.
+    $matchLines = @(
+        "[09:15:29.276] [6536 ] [I] [PULSAR] NPCSync: MATCHED hostRef=0x002146E0 base=0xFF00D13C src=0x0026FB62 hostPos=(-1935,-647,32) -> localRef=0x002146EA",
+        "[09:15:29.276] [6536 ] [I] [PULSAR] NPCSync: MATCHED hostRef=0x0029D488 base=0x00005999 src=0x00000000 hostPos=(1,2,3) -> localRef=0x0029D488",
+        "[09:15:29.276] [6536 ] [I] [PULSAR] NPCSync: MATCHED hostRef=0xFF00D558 base=0xFF00D13C src=0x00259DC6 hostPos=(1,2,3) -> localRef=0xFF00D5AD")
+    $wrong = @(Find-WrongNpcMatches $matchLines)
+    $ok = ($wrong.Count -eq 1 -and $wrong[0] -eq "002146E0->002146EA")
+    if (-not $ok) { $bad++ }
+    Write-Host ("{0,-28} expected {1,-7} got {2,-7} {3}" -f "npc match: rotated guard", "1 wrong", "$($wrong.Count) wrong", $(if ($ok) { "ok" } else { "MISMATCH" }))
+    $cases += @{ Name = "npc match" }
     # Only the count goes down the pipeline (anything else would be captured with it).
     Write-Host $(if ($bad -eq 0) { "SELFTEST: OK ($($cases.Count) cases)" } else { "SELFTEST: FAILED ($bad of $($cases.Count))" })
     return $bad
@@ -611,6 +632,16 @@ try {
             $src = Join-Path $Instances "$slot\$f"
             if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src (Join-Path $runDir ("$slot-" + (Split-Path $f -Leaf))) }
         }
+    }
+    # Every scenario: the client must never stand one save-file NPC in for
+    # another (NPCSync matcher, NPCSync/MatchPolicy.h).
+    $clientLogCopy = Join-Path $runDir "$ClientSlot-PULSAR.log"
+    if (Test-Path -LiteralPath $clientLogCopy) {
+        $wrong = @(Find-WrongNpcMatches @(Select-String -LiteralPath $clientLogCopy -SimpleMatch "NPCSync: MATCHED" | ForEach-Object Line))
+        if ($wrong.Count) {
+            if ($result -eq "PASS") { $result = "FAIL" }
+            $why += "client matched host save-file NPCs to other NPCs: $($wrong -join ', ')"
+        } else { W "NPC matching: no save-file NPC matched to another" }
     }
     foreach ($w in $why) { W "reason: $w" }
     Add-Content -LiteralPath $logFile "RESULT: $result" -Encoding utf8
