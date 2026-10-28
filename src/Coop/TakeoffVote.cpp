@@ -16,6 +16,7 @@
 #include <deque>
 #include <string>
 #include <mutex>
+#include <thread>
 
 using namespace std::string_view_literals;
 
@@ -49,21 +50,24 @@ namespace {
         Pulsar::Network::GetSingleton().Send(buf, sizeof(buf), /*reliable=*/true);
     }
 
-    // On-screen messages. Not through the Papyrus VM: a DispatchStaticCall of
-    // Debug.Notification faulted inside the engine's dispatch on the game thread
-    // (run 20261028-214018: AV at Starfield.exe+0x22CB6C1 under +0x285C759,
-    // called from here; the game ended 3 s later). Nor CommonLibSF upstream's
-    // DebugNotification ID 138728: on 1.16.244 it resolves to RVA 0x2878C50,
-    // a copy routine that dereferences its 2nd argument (run 20261028-214810).
+    // On-screen messages: the Debug.Notification native, called directly.
     //
-    // Instead the Debug.Notification native itself, called directly. Found by
-    // its registration: the code at RVA 0x2005495 passes "Notification"
-    // (0x4D23F30) and the native 0x2003A60 to the NativeFunction constructor.
-    // The native only reads its 4th argument (the message BSFixedString),
-    // copies it into a task and queues that on the engine's main-thread task
-    // queue; it never touches the VM, stack id or self arguments. 1.16.244 only:
-    // the prologue is checked before the call. Queued here, shown from Tick,
-    // so it never runs inside an event sink.
+    // Not through the Papyrus VM: a DispatchStaticCall of Debug.Notification
+    // faulted inside the engine's dispatch on the game thread (run
+    // 20261028-214018: AV at Starfield.exe+0x22CB6C1 under +0x285C759; the game
+    // ended 3 s later). Not CommonLibSF upstream's DebugNotification ID 138728
+    // either: on 1.16.244 it resolves to RVA 0x2878C50, a copy routine.
+    //
+    // The native (RVA 0x2003A60) was found by its registration: the code at RVA
+    // 0x2005495 passes "Notification" (0x4D23F30) and it to the NativeFunction
+    // constructor. It only reads its 4th argument, the message BSFixedString,
+    // and fires the HUD notification event (source vtable 0x4C5E248, through
+    // BSTEventSource::Notify 0x22C9300), the same event the game's own
+    // notifications use. It must run on a worker thread, as the Papyrus VM
+    // calls it: fired on the main thread the event is delivered but nothing is
+    // drawn (runs 20261028-215638 to -221450); from a worker thread the text
+    // appears (run 20261028-230712, three of three). 1.16.244 only: the
+    // prologue is checked before the first call.
     std::mutex              s_msgMutex;
     std::deque<std::string> s_messages;
 
@@ -111,11 +115,13 @@ namespace {
         if (out.empty()) return;
         static const NotificationNative_t s_fn = ResolveNotificationNative();
         if (!s_fn) return;
-        for (const auto& m : out) {
-            const RE::BSFixedString msg(m.c_str());
-            const bool ok = SafeShow(s_fn, &msg);
-            PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] shown on screen: {} ({})"sv, m, ok ? "ok" : "FAULTED");
-        }
+        std::thread([texts = std::move(out)] {
+            for (const auto& t : texts) {
+                const RE::BSFixedString msg(t.c_str());
+                const bool ok = SafeShow(s_fn, &msg);
+                PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] shown on screen: {} ({})"sv, t, ok ? "ok" : "FAULTED");
+            }
+        }).detach();
     }
 
     const char* KeyName()
@@ -277,6 +283,11 @@ const char* StateForTest()
 {
     std::lock_guard lk(s_mutex);
     return s_pilot.Open() ? "open" : "idle";
+}
+
+void ShowMessageForTest(const char* a_msg)
+{
+    Notify(a_msg);
 }
 
 }  // namespace Pulsar::Coop::TakeoffVote

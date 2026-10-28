@@ -57,6 +57,7 @@ namespace Pulsar::TestBot
             float       lootRadius = 30.0f; // loot: search radius for the NPC to kill (metres)
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
             int         rewardCredits = 500;          // reward: credits given as the quest reward
+            std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
         };
 
         // Loot scenario progress (host). The kill happens at the usual act time;
@@ -86,6 +87,7 @@ namespace Pulsar::TestBot
             std::uint64_t voteSeenAtMs = 0;      // client: the takeoff request arrived (tick)
             std::uint64_t voteSeenWallMs = 0;
             std::uint64_t voteReadyWallMs = 0;   // client: answered ready
+            int           notifySent = 0;        // message check: test messages sent
         };
         State s_state;
 
@@ -126,6 +128,7 @@ namespace Pulsar::TestBot
                 else if (key == "lootradius")  s.lootRadius = std::stof(value);
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
+                else if (key == "notifytest") s.notifyTest = value;
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -723,6 +726,16 @@ namespace Pulsar::TestBot
             (s_state.lootPhase != LootPhase::kIdle ||
              (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
             TickLoot(player, me, now);
+        }
+
+        // Message check: the test message at +0, +6 and +12 s after the act.
+        if (s_state.acted && !s_state.cfg.notifyTest.empty() && s_state.notifySent < 3) {
+            const std::uint64_t since = WallMs() - s_state.actedAtWallMs;
+            if (since >= static_cast<std::uint64_t>(s_state.notifySent) * 6000) {
+                ++s_state.notifySent;
+                const std::string text = s_state.cfg.notifyTest + " " + std::to_string(s_state.notifySent);
+                Pulsar::Coop::TakeoffVote::ShowMessageForTest(text.c_str());
+            }
         }
 
         // Takeoff, client: answer the pilot's request 10 s after it arrives, so

@@ -58,6 +58,8 @@ param(
     [switch]$NoTakeoffVote,
     # Extra PULSAR.ini lines for both copies ("Key = value", separated by ";"), for bisects.
     [string]$ExtraIni = "",
+    # Extra PulsarTestBot.ini lines, same format (e.g. "NotifyTest = hello").
+    [string]$ExtraBotIni = "",
     # Hard working-set cap per test copy (MB, 0 = off): Windows pages out the
     # test game's memory instead of the owner's programs (PulsarTestHarness).
     [int]$MaxWorkingSetMB = 0
@@ -584,7 +586,7 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $questRewardsValue = if ($NoQuestRewards) { 0 } else { 1 }
     $takeoffVoteValue = if ($NoTakeoffVote) { 0 } else { 1 }
     Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
-    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
+    Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
     if (-not $NoLowMemory) {
