@@ -15,6 +15,7 @@
 #include "TransitSync/TransitSync.h"
 #include "WorldSync/LootSync.h"
 
+#include <RE/M/MemoryManager.h>
 #include <RE/P/PlayerCharacter.h>
 #include <RE/T/TESObjectCELL.h>
 #include <RE/T/TESObjectREFR.h>
@@ -797,6 +798,28 @@ namespace Pulsar::TestBot
                                   me.cellID, scan.refs, scan.doors, scan.loadDoors, scan.nearestLoadDoor,
                                   s_state.cfg.doorRadius, scan.seh ? 1 : 0);
                 }
+                s_state.actionInfo = msg;
+            } else if (s_state.cfg.scenario == "papyrus") {
+                // C++ -> Papyrus dispatch check: PULSAR's own static function the
+                // move-aboard and follow paths use, aimed at the player itself.
+                {
+                    // The scrap heap the patched BSScrapArrayAllocator uses: its
+                    // vtable slot 0x0B should be Deallocate, RVA 0x22CB6B0.
+                    auto* heap = RE::MemoryManager::GetSingleton()->GetThreadScrapHeap();
+                    const auto base = REX::FModule::GetExecutingModule().GetBaseAddress();
+                    const auto* vt = heap ? *reinterpret_cast<std::uintptr_t* const*>(heap) : nullptr;
+                    std::snprintf(msg, sizeof(msg), "papyrus: scrap heap %p vtable[0x0A] RVA 0x%llX [0x0B] RVA 0x%llX",
+                                  static_cast<void*>(heap),
+                                  vt ? static_cast<unsigned long long>(vt[0x0A] - base) : 0ull,
+                                  vt ? static_cast<unsigned long long>(vt[0x0B] - base) : 0ull);
+                    Trace(msg);
+                    PLOG_INFO("[PULSAR] TestBot: {}"sv, std::string(msg));
+                }
+                Trace("papyrus: DispatchStaticCall PulsarFurnSync.DoPlayerFollowMoveTo(player)");
+                const bool ok = Pulsar::SpaceSync::DispatchMoveToForTest(player);
+                std::snprintf(msg, sizeof(msg), "papyrus: DoPlayerFollowMoveTo(player) dispatched=%d thread=%lu",
+                              ok ? 1 : 0, GetCurrentThreadId());
+                Trace(msg);
                 s_state.actionInfo = msg;
             } else if (s_state.cfg.scenario == "reward") {
                 const bool credits = GiveAsQuestReward(player, kCredits, s_state.cfg.rewardCredits);

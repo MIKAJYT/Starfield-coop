@@ -1,22 +1,31 @@
 diff --git a/include/RE/B/BSTArray.h b/include/RE/B/BSTArray.h
-index b2ed670..e1d7f0f 100644
+index b2ed670..3f4b60c 100644
 --- a/include/RE/B/BSTArray.h
 +++ b/include/RE/B/BSTArray.h
-@@ -100,29 +100,17 @@ namespace RE
+@@ -98,21 +98,23 @@ namespace RE
+ 		BSScrapArrayAllocator& operator=(const BSScrapArrayAllocator&) = delete;
+ 		BSScrapArrayAllocator& operator=(BSScrapArrayAllocator&&) = delete;
  
++		// PULSAR: the engine frees some of these arrays itself, e.g. the argument
++		// array a Papyrus dispatch hands to our callback, through
++		// ScrapHeap::Deallocate(_allocator, ptr) (Starfield 1.16.244 RVA 0x22CB6B0).
++		// A block must therefore come from the thread's scrap heap with _allocator
++		// set. An earlier PULSAR version allocated with malloc and left _allocator
++		// null, and every C++ DispatchStaticCall crashed in that free (runs
++		// 20261028-214018 and -233633). malloc only when the thread has no scrap
++		// heap; such a block is freed with free.
  		void* allocate(std::size_t a_size)
  		{
--			if (!_allocator) {
--				_allocator = MemoryManager::GetSingleton()->GetThreadScrapHeap();
--			}
+ 			if (!_allocator) {
+ 				_allocator = MemoryManager::GetSingleton()->GetThreadScrapHeap();
+ 			}
 -
 -			if (!_allocator) {
 -				REX::FAIL("failed to get thread scrap heap");
 -			}
 -
 -			const auto mem = _allocator->Allocate(a_size, alignof(void*));
-+			// PULSAR: use regular heap - ScrapHeap::Allocate crashes in some contexts
-+			auto mem = RE::malloc(a_size);
++			const auto mem = _allocator ? _allocator->Allocate(a_size, alignof(void*)) : RE::malloc(a_size);
  			if (!mem) {
  				REX::FAIL("failed to handle allocation request");
  			}
@@ -24,17 +33,15 @@ index b2ed670..e1d7f0f 100644
  			return mem;
  		}
  
- 		void deallocate(void* a_ptr)
- 		{
--			if (_allocator) {
--				_allocator->Deallocate(a_ptr, 0);
--			} else {
+@@ -121,7 +123,7 @@ namespace RE
+ 			if (_allocator) {
+ 				_allocator->Deallocate(a_ptr, 0);
+ 			} else {
 -				REX::FAIL("failed to deallocate block");
--			}
-+			RE::free(a_ptr);
++				RE::free(a_ptr);
+ 			}
  		}
  
- 	protected:
 diff --git a/include/RE/IDs.h b/include/RE/IDs.h
 index 00495a2..545484c 100644
 --- a/include/RE/IDs.h

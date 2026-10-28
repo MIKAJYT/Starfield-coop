@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace RE { class TESObjectREFR; }
+
 namespace Pulsar::SpaceSync {
 
     // K.7 V1 - Sink onto Spaceship engine events (TakeOff, Landing, GravJump,
@@ -41,5 +43,9 @@ namespace Pulsar::SpaceSync {
     // Takeoff ready vote, partner: move the local player to the pilot's clone
     // (Papyrus MoveTo) unless both are in the same cell. Returns what it did.
     const char* BoardPartnerShip();
+
+    // Test bot: the Papyrus PulsarFurnSync.DoPlayerFollowMoveTo dispatch that
+    // BoardPartnerShip and the follow paths use. True if the VM accepted it.
+    bool DispatchMoveToForTest(RE::TESObjectREFR* a_dest);
 
 }  // namespace Pulsar::SpaceSync

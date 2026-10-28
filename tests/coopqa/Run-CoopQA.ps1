@@ -51,7 +51,7 @@ param(
     # takeoff: host pilots off a landed ship; the launch must wait for the
     # client's ready (CoopTakeoffVote=1). Needs a save aboard a landed ship
     # (Save10). -NoTakeoffVote sets it to 0: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff")][string]$Scenario = "follow",
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus")][string]$Scenario = "follow",
     [switch]$DoorFollow,
     [switch]$SharedLoot,
     [switch]$NoQuestRewards,
@@ -309,6 +309,34 @@ function Invoke-RewardScore {
     if (-not ($ClientDecisions | Where-Object { $_ -match "partner's reward 0x$item`: x1 already given by our own quest" })) {
         $r.Result = "FAIL"; $r.Reasons.Add("the client never logged cancelling the mirror of weapon $item against its own copy"); return $r
     }
+    $r.Result = "PASS"
+    return $r
+}
+
+# ---- papyrus scenario ---------------------------------------------------------
+# C++ -> Papyrus dispatch check. The host bot dispatches PULSAR's own
+# PulsarFurnSync.DoPlayerFollowMoveTo (the move-aboard / follow path) at itself.
+# PASS when the VM accepted it and the host is still running and connected 20 s
+# later; a game that ends is the failure this looks for (the launcher reports it).
+function Invoke-PapyrusScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs)
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never dispatched") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^papyrus: .* dispatched=1') {
+        $r.Result = "FAIL"; $r.Reasons.Add("the VM refused the dispatch: $($act.actionInfo)"); return $r
+    }
+    $late = @($hostList | Where-Object { $_.wallMs -ge [long]$act.actedAtWallMs + 20000 })
+    if ($late.Count -lt 3) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough host samples 20 s after the dispatch") }
+        return $r
+    }
+    $r.Details = "papyrus: $($act.actionInfo); host alive 20 s later, connected=$($late[-1].connected)"
+    if (-not $late[-1].connected) { $r.Result = "FAIL"; $r.Reasons.Add("the host lost the session after the dispatch"); return $r }
     $r.Result = "PASS"
     return $r
 }
@@ -768,6 +796,7 @@ try {
         $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "papyrus") { Invoke-PapyrusScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {

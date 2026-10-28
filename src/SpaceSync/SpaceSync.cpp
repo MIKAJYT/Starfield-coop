@@ -1486,6 +1486,11 @@ const char* BoardPartnerShip()
     return DispatchMoveTo(clone) ? "moving aboard" : "move failed";
 }
 
+bool DispatchMoveToForTest(RE::TESObjectREFR* a_dest)
+{
+    return DispatchMoveTo(a_dest);
+}
+
 bool FireTakeoffLaunchForTest()
 {
     auto fn = reinterpret_cast<FireTakeoffLaunchFn>(
