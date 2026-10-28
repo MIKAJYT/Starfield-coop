@@ -133,7 +133,7 @@ function Invoke-CoopScore {
 # spec: "doors only move the player who uses them") the host's cell must change
 # and the client's must not, for at least 20 s, while both stay in session.
 function Invoke-DoorScore {
-    param($HostSamples, $ClientSamples, [bool]$Final)
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
     $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
     $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
     if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
@@ -148,9 +148,9 @@ function Invoke-DoorScore {
         if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never used a door (clone never settled?)") }
         return $r
     }
-    # The bot dispatches Papyrus Activate; whether the host really went through
-    # shows as a cell change below, not in the dispatch flag.
-    if ($act.actionInfo -notmatch 'activate dispatched=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not use a door: $($act.actionInfo)"); return $r }
+    # The bot calls the engine's Activate as the player (1 = accepted); whether
+    # the host really went through shows as a cell change below.
+    if ($act.actionInfo -notmatch 'activate=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not use a door: $($act.actionInfo)"); return $r }
     $t0 = [long]$act.actedAtWallMs
     # Precondition: co-op worked before the door (both clones visible).
     $hBefore = @($hostList | Where-Object { $_.wallMs -lt $t0 -and $_.cloneVisible })
@@ -172,6 +172,13 @@ function Invoke-DoorScore {
     if ($hostCellAfter -eq $hostCellBefore) { $r.Result = "FAIL"; $r.Reasons.Add("the host did not change cell through the door"); return $r }
     if (@($clientCells | Where-Object { $_ -ne $clientCellBefore }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client was moved through the door with the host"); return $r }
     if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the door"); return $r }
+    # The client staying put is not enough on its own: with CoopDoorFollow=1 it also
+    # stays when the old follow path gives up (an interior door without a fixed
+    # destination, run 20261028-004820). Require the client's own decision.
+    $doorId = if ($act.actionInfo -match '^door ([0-9A-F]{8})') { $Matches[1] } else { "" }
+    if (-not ($ClientDecisions | Where-Object { $_ -match "host used door 0x$doorId .*staying here" })) {
+        $r.Result = "FAIL"; $r.Reasons.Add("the client never logged that it stays for door $doorId (CoopDoorFollow=0 decision missing)"); return $r
+    }
     $r.Result = "PASS"
     return $r
 }
@@ -180,7 +187,7 @@ function Invoke-DoorScore {
 function New-Sample($role, $t, $player, $clone, [bool]$visible = $true, [bool]$acted = $false, [long]$actedAt = 0) {
     [pscustomobject]@{ role = $role; wallMs = [long]$t; player = $player; clone = $clone; cloneVisible = $visible; acted = $acted; actedAtWallMs = $actedAt }
 }
-function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, [string]$info = "door 0001ABCD of 2 load doors (2.8 m away), activate dispatched=1", [bool]$acts = $true) {
+function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, [string]$info = "door 0001ABCD of 2 load doors (2.8 m away), activate=1", [bool]$acts = $true, [bool]$decides = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $doorAt = $t0 + 10000
     for ($i = 0; $i -lt 45; $i++) {
         $t = $t0 + $i * 1000; $after = $acts -and $t -ge $doorAt
@@ -192,7 +199,7 @@ function New-DoorRun([bool]$clientFollows = $false, [bool]$hostChanges = $true, 
         $cs | Add-Member playerCell $cCell; $cs | Add-Member connected $true
         $hostRun += $hs; $clientRun += $cs
     }
-    return @{ H = $hostRun; C = $clientRun }
+    return @{ H = $hostRun; C = $clientRun; D = $(if ($decides) { @("[PULSAR] AutoFollow: host used door 0x0001ABCD to 0x0000BEEF - staying here (CoopDoorFollow=0)") } else { @() }) }
 }
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
@@ -218,13 +225,15 @@ function Invoke-ScorerSelfTest {
         @{ Name = "roles swapped";           Run = @{ H = (New-Run).C; C = (New-Run).H }; Expect = "FAIL" },
         @{ Name = "door: client stays";      Run = (New-DoorRun);                      Expect = "PASS";    Door = $true },
         @{ Name = "door: client follows";    Run = (New-DoorRun -clientFollows $true); Expect = "FAIL";    Door = $true },
+        @{ Name = "door: stays, no decision"; Run = (New-DoorRun -decides $false);     Expect = "FAIL";    Door = $true },
         @{ Name = "door: host stays";        Run = (New-DoorRun -hostChanges $false);  Expect = "FAIL";    Door = $true },
         @{ Name = "door: no door found";     Run = (New-DoorRun -info "no load door found"); Expect = "ERROR"; Door = $true },
+        @{ Name = "door: engine refused";    Run = (New-DoorRun -info "door 0001ABCD of 2 load doors (2.8 m away), activate=0"); Expect = "ERROR"; Door = $true },
         @{ Name = "door: never acted";       Run = (New-DoorRun -acts $false);         Expect = "TIMEOUT"; Door = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
-        $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+        $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
         if (-not $ok) { $bad++ }
@@ -286,6 +295,7 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $state = Join-Path $root "logs\bot-state.jsonl"
     Remove-Item -LiteralPath $state -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $root "logs\bot-state.json") -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $root "logs\bot-trace.log") -ErrorAction SilentlyContinue
     $mode = if ($role -eq "host") { "host" } else { "client" }
     $doorFollowValue = if ($DoorFollow) { 1 } else { 0 }
     Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`n"
@@ -342,6 +352,17 @@ function Stop-Slot([string]$slot) {
 # The bot appends one JSON line per second. Read only what is new since the last
 # call (shared read, so the bot's writes never fail), complete lines only.
 $readOffsets = @{}
+# Lines of a log the game holds open (shared read) that contain $needle.
+function Read-SharedLines([string]$path, [string]$needle) {
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            while ($null -ne ($line = $sr.ReadLine())) { if ($line.Contains($needle)) { $line } }
+        } finally { $fs.Dispose() }
+    } catch { }
+}
 function Read-NewSamples([string]$path) {
     $out = New-Object System.Collections.Generic.List[object]
     if (-not (Test-Path -LiteralPath $path)) { return ,$out }
@@ -452,7 +473,8 @@ try {
         if ($cs -and $now - [long]$cs.wallMs -gt 30000) { throw ("client bot state is stale ({0:N0} s old) while the game runs" -f (($now - [long]$cs.wallMs) / 1000)) }
         if (-not $cs -and $now - $clientStart -gt 120000) { throw "client bot wrote nothing within 120 s" }
         $final = (Get-Date) -gt $deadline
-        $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+        $decisions = if ($Scenario -eq "door") { @(Read-SharedLines (Join-Path $Instances "$ClientSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log") 'AutoFollow: host used door') } else { @() }
+        $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
             $lastLog = Get-Date
@@ -495,7 +517,7 @@ try {
     } catch { $why += "owner check failed: $($_.Exception.Message)"; $result = "ERROR" }
 
     foreach ($slot in @($HostSlot, $ClientSlot)) {
-        foreach ($f in @("logs\harness.log", "logs\bot-state.jsonl", "profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log")) {
+        foreach ($f in @("logs\harness.log", "logs\bot-state.jsonl", "logs\bot-trace.log", "profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log")) {
             $src = Join-Path $Instances "$slot\$f"
             if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src (Join-Path $runDir ("$slot-" + (Split-Path $f -Leaf))) }
         }

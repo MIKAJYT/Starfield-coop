@@ -9,9 +9,6 @@
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "TransitSync/TransitSync.h"
 
-#include <RE/B/BSFixedString.h>
-#include <RE/B/BSScriptUtil.h>
-#include <RE/G/GameVM.h>
 #include <RE/P/PlayerCharacter.h>
 #include <RE/T/TESObjectCELL.h>
 #include <RE/T/TESObjectREFR.h>
@@ -177,19 +174,22 @@ namespace Pulsar::TestBot
             bool          seh = false;
         };
 
-        RE::TESObjectREFR* SafeFindNearestLoadDoor(RE::TESObjectCELL* a_cell, float a_px, float a_py,
-                                                   float a_pz, float a_radius, DoorScan& a_scan) noexcept
+        // Load doors within a_radius, nearest first (up to a_max). Some are
+        // locked: Akila City's nearest (00297D8D, 2.8 m) is, and the engine
+        // refuses it, so the bot tries them in order.
+        int SafeFindLoadDoors(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz, float a_radius,
+                              DoorScan& a_scan, RE::TESObjectREFR** a_out, float* a_outDist, int a_max) noexcept
         {
             a_scan = {};
+            int n = 0;
             __try {
-                if (!a_cell) return nullptr;
+                if (!a_cell) return 0;
                 auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
                 const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
                 auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
                 a_scan.refs = size;
-                if (!data || size == 0 || size > 20000) return nullptr;
-                RE::TESObjectREFR* best = nullptr;
-                float bestD2 = a_radius * a_radius;
+                if (!data || size == 0 || size > 20000) return 0;
+                const float maxD2 = a_radius * a_radius;
                 float nearestD2 = -1.0f;
                 for (std::uint32_t i = 0; i < size; ++i) {
                     auto* ref = data[i];
@@ -209,43 +209,90 @@ namespace Pulsar::TestBot
                     const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;
                     const float d2 = dx * dx + dy * dy + dz * dz;
                     if (nearestD2 < 0 || d2 < nearestD2) nearestD2 = d2;
-                    if (d2 < bestD2) { bestD2 = d2; best = ref; }
+                    if (d2 >= maxD2) continue;
+                    // Insertion into the sorted list; drop the farthest when full.
+                    int at = n;
+                    while (at > 0 && a_outDist[at - 1] > d2) --at;
+                    if (at >= a_max) continue;
+                    for (int k = (n < a_max ? n : a_max - 1); k > at; --k) {
+                        a_out[k] = a_out[k - 1];
+                        a_outDist[k] = a_outDist[k - 1];
+                    }
+                    a_out[at] = ref;
+                    a_outDist[at] = d2;
+                    if (n < a_max) ++n;
                 }
                 if (nearestD2 >= 0) a_scan.nearestLoadDoor = std::sqrt(nearestD2);
-                return best;
+                for (int k = 0; k < n; ++k) a_outDist[k] = std::sqrt(a_outDist[k]);
+                return n;
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 a_scan.seh = true;
-                return nullptr;
+                return 0;
             }
         }
 
-        // Activate a door as the player would: Papyrus ObjectReference.Activate
-        // (akActivator = player, abDefaultProcessingOnly = false), dispatched on
-        // the script VM like Debug/Buddy's PlaceAtMe. The direct engine call
-        // TESObjectREFR::Activate(OBJ_ACTIVATE_DATA) returned false for every
-        // load door tried (ship hatch, Akila City door 00297D8D) and nobody
-        // moved. Deliberately NOT TransitSync's SafeActivateDoor either: that
-        // marks the activation as an auto-follow and hides the transit under test.
-        // Returns whether the call was queued; the result shows as a cell change.
-        bool DispatchActivateAsPlayer(RE::TESObjectREFR* a_door, RE::PlayerCharacter* a_player)
+        // Activate a door as the player would, through the engine's Activate
+        // core (REL::ID 63380): the function the Papyrus ObjectReference.Activate
+        // native calls and LootSync hooks, so every hook sees a real player
+        // activation. Tried before and dropped:
+        //  - TESObjectREFR::Activate(OBJ_ACTIVATE_DATA) returned false for every
+        //    load door (ship hatch, Akila City door 00297D8D) and nobody moved.
+        //  - Papyrus ObjectReference.Activate via DispatchMethodCall took the host
+        //    down (run 20261027-231108): its game thread went silent the moment
+        //    the bot acted and no F.8 door probe was logged, so Activate was
+        //    never reached.
+        // Deliberately NOT TransitSync's SafeActivateDoor: that marks the
+        // activation as an auto-follow and hides the transit under test.
+        struct ActivateArgs {
+            RE::TESObjectREFR* activator;
+            std::uint64_t      unused1;
+            std::uint64_t      unused2;
+            std::uint32_t      countOrFlag;
+            std::uint8_t       flag1c;   // abDefaultProcessingOnly
+            std::uint8_t       flag1d;
+            std::uint8_t       flag1e;
+            std::uint8_t       flag1f;
+        };
+        static_assert(sizeof(ActivateArgs) == 0x20);
+
+        using ActivateFn = bool(__fastcall*)(RE::TESObjectREFR*, ActivateArgs*);
+
+        ActivateFn EngineActivate()
         {
-            auto* game = RE::GameVM::GetSingleton();
-            auto* vm = game ? game->GetVM() : nullptr;
-            if (!vm || !a_door || !a_player) return false;
-            RE::BSScript::Variable self, who, dflt;
-            RE::BSScript::PackVariable(self, a_door);
-            RE::BSScript::PackVariable(who, static_cast<RE::TESObjectREFR*>(a_player));
-            RE::BSScript::PackVariable(dflt, false);
-            if (!self.is<RE::BSScript::Object>()) return false;
-            auto obj = RE::BSScript::get<RE::BSScript::Object>(self);
-            auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
-                args.resize(2);
-                args[0] = who;
-                args[1] = dflt;
-                return true;
-            };
-            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-            return vm->DispatchMethodCall(obj, RE::BSFixedString("Activate"), argFn, callback, 0);
+            static const auto s_fn = reinterpret_cast<ActivateFn>(REL::Relocation<std::uintptr_t>{ REL::ID(63380) }.address());
+            return s_fn;
+        }
+
+        // 1 = activated, 0 = engine refused, -1 = exception.
+        int SafeActivateAsPlayer(RE::TESObjectREFR* a_door, RE::PlayerCharacter* a_player) noexcept
+        {
+            if (!a_door || !a_player) return 0;
+            const ActivateFn s_activate = EngineActivate();
+            ActivateArgs args{};
+            args.activator   = a_player;
+            args.countOrFlag = 1;
+            args.flag1d      = 1;
+            __try {
+                return s_activate(a_door, &args) ? 1 : 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return -1;
+            }
+        }
+
+        // Breadcrumbs that survive a dead game thread: one flushed line per
+        // step of the bot's action, next to the state log.
+        void Trace(const char* a_line)
+        {
+            static std::FILE* s_file = nullptr;
+            if (!s_file) {
+                std::string path = s_state.cfg.stateFile;
+                const auto slash = path.find_last_of("\\/");
+                path = (slash == std::string::npos ? std::string() : path.substr(0, slash + 1)) + "bot-trace.log";
+                s_file = _fsopen(path.c_str(), "a", _SH_DENYWR);
+                if (!s_file) return;
+            }
+            std::fprintf(s_file, "%llu %s\n", static_cast<unsigned long long>(WallMs()), a_line);
+            std::fflush(s_file);
         }
 
         bool SafeMovePlayer(RE::PlayerCharacter* a_player, float a_x, float a_y, float a_z) noexcept
@@ -318,12 +365,25 @@ namespace Pulsar::TestBot
             char msg[200];
             if (s_state.cfg.scenario == "door") {
                 DoorScan scan;
-                auto* door = SafeFindNearestLoadDoor(player->parentCell, me.x, me.y, me.z,
-                                                     s_state.cfg.doorRadius, scan);
-                const bool ok = door && DispatchActivateAsPlayer(door, player);
-                if (door) {
-                    std::snprintf(msg, sizeof(msg), "door %08X of %d load doors (%.1f m away), activate dispatched=%d",
-                                  door->formID, scan.loadDoors, scan.nearestLoadDoor, ok ? 1 : 0);
+                Trace("door: scanning the cell");
+                constexpr int kMaxDoors = 8;
+                RE::TESObjectREFR* doors[kMaxDoors] = {};
+                float dist[kMaxDoors] = {};
+                const int found = SafeFindLoadDoors(player->parentCell, me.x, me.y, me.z,
+                                                    s_state.cfg.doorRadius, scan, doors, dist, kMaxDoors);
+                if (found > 0) {
+                    int result = 0, tried = 0;
+                    for (; tried < found && result != 1; ++tried) {
+                        std::snprintf(msg, sizeof(msg), "door: activating %08X (%.1f m)", doors[tried]->formID, dist[tried]);
+                        Trace(msg);
+                        result = SafeActivateAsPlayer(doors[tried], player);
+                        std::snprintf(msg, sizeof(msg), "door: %08X activate=%d", doors[tried]->formID, result);
+                        Trace(msg);
+                        PLOG_INFO("[PULSAR] TestBot: {}"sv, std::string(msg));
+                    }
+                    std::snprintf(msg, sizeof(msg), "door %08X of %d load doors (%.1f m away), activate=%d, tried %d",
+                                  doors[tried - 1]->formID, scan.loadDoors, dist[tried - 1], result, tried);
+                    Trace(msg);
                 } else {
                     LogDoorsInCell(player->parentCell, me.x, me.y, me.z);
                     std::snprintf(msg, sizeof(msg),
