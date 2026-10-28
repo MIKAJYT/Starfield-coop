@@ -31,6 +31,7 @@
 #include <ShlObj.h>
 #include <MinHook.h>
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -38,6 +39,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <share.h>
@@ -185,6 +187,107 @@ namespace {
         return h;
     }
 
+    // ---- Exit tracer ---------------------------------------------------------
+    // A test copy that quits on purpose (ExitProcess / TerminateProcess on
+    // itself) leaves no crash record. Log who asked, as module+offset frames
+    // (run 20261028-211220: the partner exited after a Papyrus notification).
+    using ExitProcess_t      = void(WINAPI*)(UINT);
+    using TerminateProcess_t = BOOL(WINAPI*)(HANDLE, UINT);
+    ExitProcess_t      g_origExitProcess = nullptr;
+    TerminateProcess_t g_origTerminateProcess = nullptr;
+
+    void LogCallers(const char* a_what, UINT a_code)
+    {
+        void* frames[32];
+        const USHORT n = CaptureStackBackTrace(1, 32, frames, nullptr);
+        Log("%s(code=%u) thread=%lu, %u frames:", a_what, a_code, GetCurrentThreadId(), n);
+        for (USHORT i = 0; i < n; ++i) {
+            HMODULE mod = nullptr;
+            char name[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   static_cast<LPCSTR>(frames[i]), &mod) && mod) {
+                char path[MAX_PATH];
+                if (GetModuleFileNameA(mod, path, MAX_PATH)) {
+                    const char* slash = std::strrchr(path, '\\');
+                    strncpy_s(name, slash ? slash + 1 : path, _TRUNCATE);
+                }
+            }
+            Log("  #%02u %s+0x%llX", i, name,
+                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) -
+                                                reinterpret_cast<std::uintptr_t>(mod)));
+        }
+    }
+
+    // ntdll level: the CRT's exit reaches RtlExitUserProcess without kernel32.
+    using RtlExitUserProcess_t = void(NTAPI*)(LONG);
+    using NtTerminateProcess_t = LONG(NTAPI*)(HANDLE, LONG);
+    RtlExitUserProcess_t g_origRtlExit = nullptr;
+    NtTerminateProcess_t g_origNtTerminate = nullptr;
+
+    void NTAPI Hook_RtlExitUserProcess(LONG a_code)
+    {
+        LogCallers("RtlExitUserProcess", static_cast<UINT>(a_code));
+        g_origRtlExit(a_code);
+    }
+
+    LONG NTAPI Hook_NtTerminateProcess(HANDLE a_process, LONG a_code)
+    {
+        if (a_process == nullptr || a_process == GetCurrentProcess() ||
+            GetProcessId(a_process) == GetCurrentProcessId())
+            LogCallers("NtTerminateProcess(self)", static_cast<UINT>(a_code));
+        return g_origNtTerminate(a_process, a_code);
+    }
+
+    // First-chance access violations and fail-fast codes, with where they came
+    // from. The game and PULSAR catch many on purpose; the last ones before an
+    // unexplained exit are the interesting ones. Capped.
+    LONG CALLBACK FatalExceptionLogger(EXCEPTION_POINTERS* a_info)
+    {
+        static std::atomic<int> s_count{ 0 };
+        const DWORD code = a_info->ExceptionRecord->ExceptionCode;
+        if (code != EXCEPTION_ACCESS_VIOLATION && code != 0xC0000409 && code != EXCEPTION_STACK_OVERFLOW &&
+            code != EXCEPTION_ILLEGAL_INSTRUCTION && code != 0xE06D7363 /* C++ throw */)
+            return EXCEPTION_CONTINUE_SEARCH;
+        void* at = a_info->ExceptionRecord->ExceptionAddress;
+        // Each address at most 3 times (one handled AV in a loop filled a flat
+        // cap of 200 before the fatal one, run 20261028-213422); 1000 lines total.
+        {
+            static std::mutex s_mu;
+            static std::map<void*, int> s_seen;
+            std::lock_guard lk(s_mu);
+            if (++s_seen[at] > 3) return EXCEPTION_CONTINUE_SEARCH;
+        }
+        if (s_count.fetch_add(1) >= 1000) return EXCEPTION_CONTINUE_SEARCH;
+        HMODULE mod = nullptr;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               static_cast<LPCSTR>(at), &mod) && mod) {
+            char path[MAX_PATH];
+            if (GetModuleFileNameA(mod, path, MAX_PATH)) {
+                const char* slash = std::strrchr(path, '\\');
+                strncpy_s(name, slash ? slash + 1 : path, _TRUNCATE);
+            }
+        }
+        Log("exception 0x%08lX at %s+0x%llX thread=%lu", code, name,
+            static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(at) - reinterpret_cast<std::uintptr_t>(mod)),
+            GetCurrentThreadId());
+        if (code == EXCEPTION_ACCESS_VIOLATION) LogCallers("  stack of the exception", 0);
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    void WINAPI Hook_ExitProcess(UINT a_code)
+    {
+        LogCallers("ExitProcess", a_code);
+        g_origExitProcess(a_code);
+    }
+
+    BOOL WINAPI Hook_TerminateProcess(HANDLE a_process, UINT a_code)
+    {
+        if (a_process == GetCurrentProcess() || GetProcessId(a_process) == GetCurrentProcessId())
+            LogCallers("TerminateProcess(self)", a_code);
+        return g_origTerminateProcess(a_process, a_code);
+    }
+
     bool HookFolderApis()
     {
         if (!GetModuleHandleW(L"shell32.dll")) LoadLibraryW(L"shell32.dll");
@@ -202,8 +305,18 @@ namespace {
             ok &= MH_CreateHookApi(L"kernel32", "CreateMutexW", reinterpret_cast<LPVOID>(&Hook_CreateMutexW),
                                    reinterpret_cast<LPVOID*>(&g_origCreateMutexW)) == MH_OK;
         }
+        const bool exitOk =
+            MH_CreateHookApi(L"kernel32", "ExitProcess", reinterpret_cast<LPVOID>(&Hook_ExitProcess),
+                             reinterpret_cast<LPVOID*>(&g_origExitProcess)) == MH_OK &&
+            MH_CreateHookApi(L"kernel32", "TerminateProcess", reinterpret_cast<LPVOID>(&Hook_TerminateProcess),
+                             reinterpret_cast<LPVOID*>(&g_origTerminateProcess)) == MH_OK &&
+            MH_CreateHookApi(L"ntdll", "RtlExitUserProcess", reinterpret_cast<LPVOID>(&Hook_RtlExitUserProcess),
+                             reinterpret_cast<LPVOID*>(&g_origRtlExit)) == MH_OK &&
+            MH_CreateHookApi(L"ntdll", "NtTerminateProcess", reinterpret_cast<LPVOID>(&Hook_NtTerminateProcess),
+                             reinterpret_cast<LPVOID*>(&g_origNtTerminate)) == MH_OK;
+        AddVectoredExceptionHandler(1, &FatalExceptionLogger);
         ok &= MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
-        Log("folder hooks %s", ok ? "installed" : "FAILED");
+        Log("folder hooks %s, exit tracer %s", ok ? "installed" : "FAILED", exitOk ? "on" : "off");
         return ok;
     }
 

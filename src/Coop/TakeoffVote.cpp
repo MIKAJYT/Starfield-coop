@@ -8,13 +8,13 @@
 #include "SpaceSync/SpaceSync.h"
 
 #include <RE/B/BSFixedString.h>
-#include <RE/B/BSScriptUtil.h>
-#include <RE/G/GameVM.h>
 
 #include <Windows.h>
 
 #include <atomic>
 #include <cstring>
+#include <deque>
+#include <string>
 #include <mutex>
 
 using namespace std::string_view_literals;
@@ -49,26 +49,73 @@ namespace {
         Pulsar::Network::GetSingleton().Send(buf, sizeof(buf), /*reliable=*/true);
     }
 
-    // On-screen message (Papyrus Debug.Notification, as Debug/Buddy).
+    // On-screen messages. Not through the Papyrus VM: a DispatchStaticCall of
+    // Debug.Notification faulted inside the engine's dispatch on the game thread
+    // (run 20261028-214018: AV at Starfield.exe+0x22CB6C1 under +0x285C759,
+    // called from here; the game ended 3 s later). Nor CommonLibSF upstream's
+    // DebugNotification ID 138728: on 1.16.244 it resolves to RVA 0x2878C50,
+    // a copy routine that dereferences its 2nd argument (run 20261028-214810).
+    //
+    // Instead the Debug.Notification native itself, called directly. Found by
+    // its registration: the code at RVA 0x2005495 passes "Notification"
+    // (0x4D23F30) and the native 0x2003A60 to the NativeFunction constructor.
+    // The native only reads its 4th argument (the message BSFixedString),
+    // copies it into a task and queues that on the engine's main-thread task
+    // queue; it never touches the VM, stack id or self arguments. 1.16.244 only:
+    // the prologue is checked before the call. Queued here, shown from Tick,
+    // so it never runs inside an event sink.
+    std::mutex              s_msgMutex;
+    std::deque<std::string> s_messages;
+
     void Notify(const char* a_msg)
     {
         PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] message: {}"sv, a_msg);
-        // Off by default (Config.h coopVoteMessages): the partner's game exited
-        // after this call in two of two runs.
         if (!Pulsar::GetConfig().coopVoteMessages) return;
-        auto* gameVM = RE::GameVM::GetSingleton();
-        auto* vm = gameVM ? gameVM->GetVM() : nullptr;
-        if (!vm) return;
-        RE::BSScript::Variable msg;
-        RE::BSScript::PackVariable(msg, RE::BSFixedString(a_msg));
-        auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
-            args.resize(1);
-            args[0] = msg;
+        std::lock_guard lk(s_msgMutex);
+        if (s_messages.size() < 8) s_messages.emplace_back(a_msg);
+    }
+
+    using NotificationNative_t = void (*)(void* a_vm, std::uint32_t a_stackID, void* a_self,
+                                          const RE::BSFixedString* a_msg);
+    constexpr std::uintptr_t kRVA_NotificationNative = 0x2003A60;
+    constexpr std::uint8_t   kNotificationPrologue[] = { 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48,
+                                                         0x83, 0xEC, 0x60, 0x49, 0x8B, 0x19 };
+
+    NotificationNative_t ResolveNotificationNative()
+    {
+        const auto base = REX::FModule::GetExecutingModule().GetBaseAddress();
+        auto* fn = reinterpret_cast<const std::uint8_t*>(base + kRVA_NotificationNative);
+        const bool match = std::memcmp(fn, kNotificationPrologue, sizeof(kNotificationPrologue)) == 0;
+        PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] Debug.Notification native at RVA 0x{:X}: {}"sv,
+                  kRVA_NotificationNative, match ? "prologue matches" : "PROLOGUE MISMATCH - messages off");
+        return match ? reinterpret_cast<NotificationNative_t>(base + kRVA_NotificationNative) : nullptr;
+    }
+
+    bool SafeShow(NotificationNative_t a_fn, const RE::BSFixedString* a_msg) noexcept
+    {
+        __try {
+            a_fn(nullptr, 0, nullptr, a_msg);
             return true;
-        };
-        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-        vm->DispatchStaticCall(RE::BSFixedString("Debug"), RE::BSFixedString("Notification"),
-                               argFn, callback, 0);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
+    void ShowQueuedMessages()
+    {
+        std::deque<std::string> out;
+        {
+            std::lock_guard lk(s_msgMutex);
+            out.swap(s_messages);
+        }
+        if (out.empty()) return;
+        static const NotificationNative_t s_fn = ResolveNotificationNative();
+        if (!s_fn) return;
+        for (const auto& m : out) {
+            const RE::BSFixedString msg(m.c_str());
+            const bool ok = SafeShow(s_fn, &msg);
+            PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] shown on screen: {} ({})"sv, m, ok ? "ok" : "FAULTED");
+        }
     }
 
     const char* KeyName()
@@ -145,6 +192,7 @@ void Tick()
 {
     auto& net = Pulsar::Network::GetSingleton();
     const std::uint64_t now = GetTickCount64();
+    ShowQueuedMessages();
 
     // Pilot side.
     TakeoffVotePolicy::Step step;

@@ -48,8 +48,8 @@ TEST(Config, TakeoffVoteSettingsAreRead)
 {
     CHECK(!Parse("CoopTakeoffVote = 0\n").coopTakeoffVote);
     CHECK_EQ(Parse("HotkeyTakeoffReady = F2\n").hotkeyTakeoffReady, 0x71);
-    CHECK(!Parse("").coopVoteMessages);     // off: crashed the partner (see Config.h)
-    CHECK(Parse("CoopVoteMessages = 1\n").coopVoteMessages);
+    CHECK(Parse("").coopVoteMessages);
+    CHECK(!Parse("CoopVoteMessages = 0\n").coopVoteMessages);
 }
 
 TEST(Config, InstancedEnemyLootCanBeTurnedOff)

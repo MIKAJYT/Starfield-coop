@@ -147,11 +147,11 @@ namespace Pulsar
         // ini: CoopTakeoffVote = 0, HotkeyTakeoffReady = F3
         bool        coopTakeoffVote    = true;
         int         hotkeyTakeoffReady = 0x72;  // VK_F3
-        // On-screen vote messages (Papyrus Debug.Notification). OFF by default:
-        // the partner's game exited right after showing the request message in
-        // runs 20261028-204918 and -211220, and never with messages off
-        // (-205624, -210210). Cause unknown. ini: CoopVoteMessages = 1
-        bool        coopVoteMessages   = false;
+        // On-screen vote messages (the engine's DebugNotification). The first
+        // version went through Papyrus Debug.Notification, which faulted inside
+        // the engine's dispatch and ended the game (runs 20261028-204918 to
+        // -214018). ini: CoopVoteMessages = 0
+        bool        coopVoteMessages   = true;
 
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
