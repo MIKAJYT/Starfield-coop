@@ -139,6 +139,20 @@ namespace Pulsar
         // 0 = rewards stay with the player who got them. ini: CoopQuestRewards = 0
         bool        coopQuestRewards = true;
 
+        // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
+        // ship with a partner connected, the launch waits until the partner is
+        // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard
+        // and the ship takes off. No answer within 60 s cancels the takeoff.
+        // 0 = the pilot launches at once (the 0.3.0 behaviour).
+        // ini: CoopTakeoffVote = 0, HotkeyTakeoffReady = F3
+        bool        coopTakeoffVote    = true;
+        int         hotkeyTakeoffReady = 0x72;  // VK_F3
+        // On-screen vote messages (Papyrus Debug.Notification). OFF by default:
+        // the partner's game exited right after showing the request message in
+        // runs 20261028-204918 and -211220, and never with messages off
+        // (-205624, -210210). Cause unknown. ini: CoopVoteMessages = 1
+        bool        coopVoteMessages   = false;
+
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
         // frame delta when it is set, so ALL NPCs/timers freeze the moment one player

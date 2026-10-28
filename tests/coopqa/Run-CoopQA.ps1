@@ -48,10 +48,16 @@ param(
     # items (CoopInstancedEnemyLoot=1). -SharedLoot sets it to 0: twin.
     # reward: host gets credits + a weapon as quest rewards; the client must get
     # both, once (CoopQuestRewards=1). -NoQuestRewards sets it to 0: twin.
-    [ValidateSet("follow", "door", "loot", "reward")][string]$Scenario = "follow",
+    # takeoff: host pilots off a landed ship; the launch must wait for the
+    # client's ready (CoopTakeoffVote=1). Needs a save aboard a landed ship
+    # (Save10). -NoTakeoffVote sets it to 0: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff")][string]$Scenario = "follow",
     [switch]$DoorFollow,
     [switch]$SharedLoot,
     [switch]$NoQuestRewards,
+    [switch]$NoTakeoffVote,
+    # Extra PULSAR.ini lines for both copies ("Key = value", separated by ";"), for bisects.
+    [string]$ExtraIni = "",
     # Hard working-set cap per test copy (MB, 0 = off): Windows pages out the
     # test game's memory instead of the owner's programs (PulsarTestHarness).
     [int]$MaxWorkingSetMB = 0
@@ -305,6 +311,63 @@ function Invoke-RewardScore {
     return $r
 }
 
+# ---- takeoff scenario ---------------------------------------------------------
+# Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
+# sits in the pilot seat, opens the takeoff menu and asks for the launch. The
+# client bot answers the ready vote 10 s after the request arrives. With
+# CoopTakeoffVote=1 the ship must not leave before the client's answer, must
+# leave after it, and the client must end up in space with it (save bridge).
+function Invoke-TakeoffScore {
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never asked for the launch") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^takeoff: seat ([0-9A-F]{8}) activate=1, seated=1, launch fired=1') {
+        $r.Result = "ERROR"; $r.Reasons.Add("host bot could not ask for the launch: $($act.actionInfo)"); return $r
+    }
+    $t0 = [long]$act.actedAtWallMs
+    if (@($hostList | Where-Object { $_.wallMs -lt $t0 -and $_.ship.inSpace }).Count -gt 0) {
+        $r.Result = "ERROR"; $r.Reasons.Add("the host was in space before the launch request"); return $r
+    }
+    $space = @($hostList | Where-Object { $_.wallMs -ge $t0 -and $_.ship.inSpace }) | Select-Object -First 1
+    $readyAt = ($clientList | ForEach-Object { [long]$_.vote.readyAtWallMs } | Measure-Object -Maximum).Maximum
+    $seenAt = ($clientList | ForEach-Object { [long]$_.vote.seenAtWallMs } | Measure-Object -Maximum).Maximum
+    if ($space -and ($readyAt -eq 0 -or [long]$space.wallMs -lt $readyAt)) {
+        $r.Result = "FAIL"; $r.Reasons.Add("the ship took off before the crew was ready (in space at +$([long]$space.wallMs - $t0) ms, ready $(if ($readyAt) { "at +$($readyAt - $t0) ms" } else { 'never' }))"); return $r
+    }
+    if (-not $space) {
+        if ($Final) {
+            $r.Result = "FAIL"
+            $r.Reasons.Add($(if ($readyAt) { "the crew was ready but the ship never took off" } elseif ($seenAt) { "the client saw the request but never answered" } else { "the takeoff request never reached the client" }))
+        }
+        return $r
+    }
+    $late = @($clientList | Where-Object { $_.wallMs -ge [long]$space.wallMs + 40000 })
+    if ($late.Count -lt 3) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough client samples 40 s after takeoff ($($late.Count) of 3)") }
+        return $r
+    }
+    $r.Details = "takeoff: $($act.actionInfo); request seen by the client at +$($seenAt - $t0) ms, ready at +$($readyAt - $t0) ms, host in space at +$([long]$space.wallMs - $t0) ms; client now in space: $($late[-1].ship.inSpace)"
+    if (-not $late[-1].ship.inSpace) { $r.Result = "FAIL"; $r.Reasons.Add("the client was left behind (not in space 40 s after takeoff)"); return $r }
+    if (@($late | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after takeoff"); return $r }
+    if (-not ($ClientDecisions | Where-Object { $_ -match "\[TAKEOFF-VOTE\] vote \d+ passed - boarding: " })) {
+        $r.Result = "FAIL"; $r.Reasons.Add("the client never logged boarding for the vote"); return $r
+    }
+    $r.Result = "PASS"
+    return $r
+}
+
 # "host->local" for every client match of a host save-file NPC (FormID below
 # 0xFF000000, the same reference on both machines) to a different local NPC.
 function Find-WrongNpcMatches([string[]]$Lines) {
@@ -365,6 +428,25 @@ function New-RewardRun([int]$clientCredits = 500, [int]$clientItems = 1, [int]$h
     $d = if ($decides) { @("[PULSAR] [REWARD] +0x0000000F x500 (partner's quest reward)", "[PULSAR] [REWARD] partner's reward 0x$($item): x1 already given by our own quest") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [bool]$clientFollows = $true, [bool]$boards = $true, [bool]$acts = $true, [bool]$answers = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $askAt = $t0 + 5000
+    $info = "takeoff: seat 0001ABCD activate=1, seated=1, launch fired=1"
+    for ($i = 0; $i -lt 90; $i++) {
+        $t = $t0 + $i * 1000
+        $hostUp = $acts -and $spaceAfter -ge 0 -and $t -ge $askAt + $spaceAfter
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $t -ge $askAt) $(if ($acts) { $askAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { $info } else { "" }); $hs | Add-Member connected $true
+        $hs | Add-Member ship ([pscustomobject]@{ inSpace = $hostUp; ship = "0001ABCE"; seated = $true })
+        $ready = if ($acts -and $answers -and $t -ge $askAt + $readyAfter) { $askAt + $readyAfter } else { 0 }
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cs | Add-Member ship ([pscustomobject]@{ inSpace = ($clientFollows -and $hostUp -and $t -ge $askAt + $spaceAfter + 8000); ship = "0001ABCE"; seated = $false })
+        $cs | Add-Member vote ([pscustomobject]@{ state = "idle"; seenAtWallMs = $(if ($acts -and $t -ge $askAt + 1000) { $askAt + 1000 } else { 0 }); readyAtWallMs = $ready })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: already aboard") } else { @() }
+    return @{ H = $hostRun; C = $clientRun; D = $d }
+}
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
     for ($i = 0; $i -lt 30; $i++) {
@@ -408,12 +490,20 @@ function Invoke-ScorerSelfTest {
         @{ Name = "reward: no decision lines"; Run = (New-RewardRun -decides $false);  Expect = "FAIL";    Reward = $true },
         @{ Name = "reward: no own copy";     Run = (New-RewardRun -ownCopy $false);    Expect = "ERROR";   Reward = $true },
         @{ Name = "reward: no weapon";       Run = (New-RewardRun -item "00000000");   Expect = "ERROR";   Reward = $true },
-        @{ Name = "reward: never acted";     Run = (New-RewardRun -acts $false);       Expect = "TIMEOUT"; Reward = $true }
+        @{ Name = "reward: never acted";     Run = (New-RewardRun -acts $false);       Expect = "TIMEOUT"; Reward = $true },
+        @{ Name = "takeoff: waits for ready"; Run = (New-TakeoffRun);                  Expect = "PASS";    Takeoff = $true },
+        @{ Name = "takeoff: leaves early";   Run = (New-TakeoffRun -spaceAfter 3000);  Expect = "FAIL";    Takeoff = $true },
+        @{ Name = "takeoff: no answer, leaves"; Run = (New-TakeoffRun -answers $false); Expect = "FAIL";   Takeoff = $true },
+        @{ Name = "takeoff: ready, stays";   Run = (New-TakeoffRun -spaceAfter -1);    Expect = "FAIL";    Takeoff = $true },
+        @{ Name = "takeoff: client left";    Run = (New-TakeoffRun -clientFollows $false); Expect = "FAIL"; Takeoff = $true },
+        @{ Name = "takeoff: no boarding log"; Run = (New-TakeoffRun -boards $false);   Expect = "FAIL";    Takeoff = $true },
+        @{ Name = "takeoff: never asked";    Run = (New-TakeoffRun -acts $false);      Expect = "TIMEOUT"; Takeoff = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Takeoff")) { Invoke-TakeoffScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Reward")) { Invoke-RewardScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
@@ -492,7 +582,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $doorFollowValue = if ($DoorFollow) { 1 } else { 0 }
     $instancedLootValue = if ($SharedLoot) { 0 } else { 1 }
     $questRewardsValue = if ($NoQuestRewards) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") "[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`n"
+    $takeoffVoteValue = if ($NoTakeoffVote) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") "; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n"
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -670,10 +761,12 @@ try {
         $clientLog = Join-Path $Instances "$ClientSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log"
         $decisions = if ($Scenario -eq "door") { @(Read-SharedLines $clientLog 'AutoFollow: host used door') }
                      elseif ($Scenario -eq "loot") { @(Read-SharedLines $clientLog 'instanced enemy loot') }
-                     elseif ($Scenario -eq "reward") { @(Read-SharedLines $clientLog '[REWARD]') } else { @() }
+                     elseif ($Scenario -eq "reward") { @(Read-SharedLines $clientLog '[REWARD]') }
+                     elseif ($Scenario -eq "takeoff") { @(Read-SharedLines $clientLog '[TAKEOFF-VOTE]') } else { @() }
         $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
             $lastLog = Get-Date

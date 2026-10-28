@@ -35,6 +35,7 @@
 #include "CellContentSync/CellContentSync.h"
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
+#include "Coop/TakeoffVote.h"
 #include "DialogSync/DialogSync.h"
 #include "SpawnSync/SpawnSync.h"
 #include "Coop/CoopMortality.h"
@@ -1348,6 +1349,13 @@ namespace Pulsar::Network
         if (a_packet->dataLength >= 1 + sizeof(LootDropData)
             && a_packet->data[0] == PKT_LOOT_DROP) {
             Pulsar::WorldSync::Loot::OnPacketReceived(a_packet->data, a_packet->dataLength);
+            return;
+        }
+
+        // PKT_TAKEOFF_VOTE - takeoff ready vote (request / ready / go / cancelled).
+        if (a_packet->dataLength >= 1 + sizeof(TakeoffVoteData)
+            && a_packet->data[0] == PKT_TAKEOFF_VOTE) {
+            Pulsar::Coop::TakeoffVote::OnPacketReceived(a_packet->data, a_packet->dataLength);
             return;
         }
 

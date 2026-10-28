@@ -9,6 +9,7 @@
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "Coop/TakeoffVote.h"
 #include "TransitSync/TransitSync.h"
 #include "NASLog.h"
 
@@ -286,6 +287,10 @@ namespace {
     // broadcast back. Set this thread_local before calling fire-helper, sink
     // checks it and skips broadcast if set.
     static thread_local bool t_inReceiveTrigger = false;
+
+    // Takeoff ready vote: set while re-firing the launch the vote held, so the
+    // sink lets it through (and broadcasts it as a normal local launch).
+    static thread_local bool t_releasingLaunch = false;
 
     // L.2 V2 - abort-gate suppression window. When Step 2 fires, we set this
     // tick. For ~5 seconds, FUN_1421249a0 hook returns success without
@@ -598,6 +603,19 @@ namespace {
                 Kind, KindStr(Kind), n);
             NASLOG("SpaceSync: %s fire #%d", KindStr(Kind), n);
             Pulsar::TakeoffProbe::OnEventFire(Kind);
+            // Takeoff ready vote: hold a local launch until the crew is ready.
+            // Stopping the event here keeps it from the takeoff menu's own sink
+            // (registered when the menu opens, after ours), so the ship stays.
+            if constexpr (Kind == kKind_TakeoffMenuLaunch) {
+                if (t_releasingLaunch) {
+                    PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] releasing the held launch"sv);
+                } else if (!t_inReceiveTrigger && Pulsar::Coop::TakeoffVote::HoldLaunch()) {
+                    return RE::BSEventNotifyControl::kStop;
+                }
+            }
+            if constexpr (Kind == kKind_MenuClose || Kind == kKind_MenuExit) {
+                Pulsar::Coop::TakeoffVote::OnTakeoffMenuClosed();
+            }
             if constexpr (Kind == kKind_GravJump) {
                 Pulsar::SpaceSync::FastTravel::OnGravJumpFired();
             }
@@ -1436,6 +1454,48 @@ void TickFollowApply()
     PLOG_INFO("[PULSAR] SpaceSync apply: TakeoffMenu_Launch - firing local cutscene"sv);
     NASLOG("SpaceSync: takeoff-recv firing local engine takeoff");
     TriggerReceiverTakeoff();
+}
+
+}  // namespace Pulsar::SpaceSync
+
+namespace Pulsar::SpaceSync {
+
+void OpenTakeoffMenuForTest()
+{
+    TriggerReceiverTakeoff_Step1();
+    g_step2DueTick.store(0, std::memory_order_release);   // the bot fires the launch itself
+}
+
+bool ReleaseHeldLaunch()
+{
+    auto fn = reinterpret_cast<FireTakeoffLaunchFn>(
+        REL::Offset{ kRVA_FireTakeoffMenuLaunch }.address());
+    t_releasingLaunch = true;
+    bool ok = true;
+    __try { fn(0, 0); } __except (EXCEPTION_EXECUTE_HANDLER) { ok = false; }
+    t_releasingLaunch = false;
+    return ok;
+}
+
+const char* BoardPartnerShip()
+{
+    auto* player = RE::PlayerCharacter::GetSingleton();
+    auto* clone  = Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteActor();
+    if (!player || !clone) return "no player or partner";
+    if (player->parentCell && player->parentCell == clone->parentCell) return "already aboard";
+    return DispatchMoveTo(clone) ? "moving aboard" : "move failed";
+}
+
+bool FireTakeoffLaunchForTest()
+{
+    auto fn = reinterpret_cast<FireTakeoffLaunchFn>(
+        REL::Offset{ kRVA_FireTakeoffMenuLaunch }.address());
+    __try {
+        fn(0, 0);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 }  // namespace Pulsar::SpaceSync

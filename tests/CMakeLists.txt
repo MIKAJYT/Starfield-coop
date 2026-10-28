@@ -43,6 +43,7 @@ add_executable(
   test_ride_policy.cpp
   test_match_policy.cpp
   test_reward_ledger.cpp
+  test_takeoff_vote.cpp
   test_stage_journal.cpp
   test_config.cpp
   test_follower_bonus.cpp

@@ -257,6 +257,28 @@ namespace Pulsar
                 cfg.coopInstancedEnemyLoot = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopInstancedEnemyLoot = {}"sv, cfg.coopInstancedEnemyLoot);
             }
+            else if (keyLower == "cooptakeoffvote" || keyLower == "coop_takeoff_vote") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopTakeoffVote = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopTakeoffVote = {}"sv, cfg.coopTakeoffVote);
+            }
+            else if (keyLower == "coopvotemessages" || keyLower == "coop_vote_messages") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopVoteMessages = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopVoteMessages = {}"sv, cfg.coopVoteMessages);
+            }
+            else if (keyLower == "hotkeytakeoffready" || keyLower == "hotkey_takeoff_ready") {
+                int vk = ParseVKey(value);
+                if (vk > 0) {
+                    cfg.hotkeyTakeoffReady = vk;
+                    PLOG_INFO("[PULSAR] Config: HotkeyTakeoffReady = {} (VK 0x{:02X})"sv, value, vk);
+                } else {
+                    PLOG_WARN("[PULSAR] Config: HotkeyTakeoffReady '{}' unparseable - keeping 0x{:02X}"sv,
+                              value, cfg.hotkeyTakeoffReady);
+                }
+            }
             else if (keyLower == "coopquestrewards" || keyLower == "coop_quest_rewards") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

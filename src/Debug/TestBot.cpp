@@ -9,6 +9,8 @@
 #include "Network/NetworkHost.h"
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "SpaceSync/SpaceSync.h"
+#include "Coop/TakeoffVote.h"
 #include "TransitSync/TransitSync.h"
 #include "WorldSync/LootSync.h"
 
@@ -78,6 +80,12 @@ namespace Pulsar::TestBot
             int           lootTries = 0;
             std::uint32_t rewardItem = 0;        // reward: both roles pick it from the same save
             bool          rewardOwnCopy = false; // client: its own quest copy gave the weapon
+            int           takeoffStep = 0;       // takeoff: 0 idle, 1 sat down, 2 menu open, 3 launch asked
+            std::uint64_t takeoffSatAtMs = 0;
+            std::string   takeoffSeatInfo;
+            std::uint64_t voteSeenAtMs = 0;      // client: the takeoff request arrived (tick)
+            std::uint64_t voteSeenWallMs = 0;
+            std::uint64_t voteReadyWallMs = 0;   // client: answered ready
         };
         State s_state;
 
@@ -193,6 +201,95 @@ namespace Pulsar::TestBot
                 const std::string s(line);
                 PLOG_INFO("[PULSAR] TestBot: {}"sv, s);
             }
+        }
+
+        // Takeoff probe: every furniture reference within a_radius, with its
+        // display name (the pilot seat is among them aboard a ship).
+        void Trace(const char* a_line);
+
+        int CollectFurniture(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz, float a_radius,
+                             DoorSeen* a_out, int a_max);
+
+        // The pilot seat aboard the player's ship: furniture named "Pilot..."
+        // ("Pilotensitz" in the German test install, "Pilot Seat" in English).
+        RE::TESObjectREFR* FindPilotSeat(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz)
+        {
+            DoorSeen seen[64];
+            const int n = CollectFurniture(a_cell, a_px, a_py, a_pz, 60.0f, seen, 64);
+            RE::TESObjectREFR* best = nullptr;
+            float bestD = 1e9f;
+            for (int i = 0; i < n; ++i) {
+                const char* name = seen[i].ref->GetDisplayFullName();
+                if (!name || !std::strstr(name, "ilot")) continue;
+                if (seen[i].dist < bestD) { best = seen[i].ref; bestD = seen[i].dist; }
+            }
+            return best;
+        }
+
+        void LogFurnitureInCell(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz, float a_radius)
+        {
+            DoorSeen seen[64];
+            const int n = CollectFurniture(a_cell, a_px, a_py, a_pz, a_radius, seen, 64);
+            for (int i = 0; i < n; ++i) {
+                const char* name = seen[i].ref->GetDisplayFullName();
+                char line[200];
+                std::snprintf(line, sizeof(line), "furniture ref %08X base %08X '%s' %.1f m",
+                              seen[i].ref->formID, seen[i].baseID, name ? name : "", seen[i].dist);
+                Trace(line);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, std::string(line));
+            }
+        }
+
+        int CollectFurniture(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz, float a_radius,
+                             DoorSeen* a_out, int a_max)
+        {
+            DoorSeen* seen = a_out;
+            int n = 0;
+            [&]() noexcept {
+                __try {
+                    if (!a_cell) return;
+                    auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+                    const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                    auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                    if (!data || size == 0 || size > 20000) return;
+                    for (std::uint32_t i = 0; i < size && n < a_max; ++i) {
+                        auto* ref = data[i];
+                        if (!ref) continue;
+                        auto* base = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(ref) + 0x98);
+                        if (!base || *(base + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kFURN)) continue;
+                        auto* loc = reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(ref) + 0x8C);
+                        const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;
+                        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if (d > a_radius) continue;
+                        seen[n++] = { ref, *reinterpret_cast<std::uint32_t*>(base + 0x28), d };
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            }();
+            return n;
+        }
+
+        // The player's ship state, for the takeoff scenario's state lines.
+        struct ShipSnap {
+            bool          inSpace = false;
+            std::uint32_t ship = 0;     // GetSpaceship: the ship the player is aboard
+            bool          seated = false;
+        };
+
+        ShipSnap SnapShip(RE::PlayerCharacter* a_player) noexcept
+        {
+            ShipSnap s{};
+            __try {
+                if (!a_player) return s;
+                s.inSpace = a_player->IsInSpace(true);
+                auto* ship = a_player->GetSpaceship(true);
+                s.ship = ship ? ship->formID : 0;
+                // Seated: process +0x228, middle-high +0x08, furniture handle +0x428
+                // (as SpaceSync's HostSeatedInShip).
+                auto* proc = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(a_player) + 0x228);
+                auto* mh = proc ? *reinterpret_cast<std::uint8_t**>(proc + 0x08) : nullptr;
+                s.seated = mh && *reinterpret_cast<std::uint32_t*>(mh + 0x428) != 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return s;
         }
 
         // What the door scan saw, for the state log when no door is used.
@@ -391,6 +488,10 @@ namespace Pulsar::TestBot
             return true;
         }
 
+        // Takeoff (host): sit in the pilot seat, then, once seated, ask for the
+        // launch the way the takeoff menu does (TakeoffMenu_Launch event).
+        void TickTakeoff(RE::PlayerCharacter* a_player, const ActorSnap& a_me, std::uint64_t a_now);
+
         void FinishLoot(const char* a_info)
         {
             s_state.actionInfo = a_info;
@@ -511,6 +612,60 @@ namespace Pulsar::TestBot
             std::snprintf(buf, sizeof(buf), "%.3f", a_v);
             return buf;
         }
+
+        void TickTakeoff(RE::PlayerCharacter* a_player, const ActorSnap& a_me, std::uint64_t a_now)
+        {
+            char msg[200];
+            if (s_state.takeoffStep == 0) {
+                LogFurnitureInCell(a_player->parentCell, a_me.x, a_me.y, a_me.z, 40.0f);
+                auto* seat = FindPilotSeat(a_player->parentCell, a_me.x, a_me.y, a_me.z);
+                if (!seat) {
+                    const ShipSnap sh = SnapShip(a_player);
+                    std::snprintf(msg, sizeof(msg), "takeoff: no pilot seat in cell %08X (ship=%08X inSpace=%d)",
+                                  a_me.cellID, sh.ship, sh.inSpace ? 1 : 0);
+                    s_state.actionInfo = msg;
+                    s_state.acted = true;
+                    s_state.actedAtWallMs = WallMs();
+                    Trace(msg);
+                    return;
+                }
+                std::snprintf(msg, sizeof(msg), "takeoff: sitting in pilot seat %08X", seat->formID);
+                Trace(msg);
+                const int r = SafeActivateAsPlayer(seat, a_player);
+                std::snprintf(msg, sizeof(msg), "seat %08X activate=%d", seat->formID, r);
+                s_state.takeoffSeatInfo = msg;
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: takeoff {}"sv, s_state.takeoffSeatInfo);
+                s_state.takeoffStep = 1;
+                s_state.takeoffSatAtMs = a_now;
+                return;
+            }
+            if (s_state.takeoffStep == 1) {
+                const ShipSnap sh = SnapShip(a_player);
+                // Seated, or 15 s without it: go on either way and record it.
+                if (!sh.seated && a_now - s_state.takeoffSatAtMs < 15000) return;
+                if (a_now - s_state.takeoffSatAtMs < 3000) return;
+                Trace("takeoff: opening the takeoff menu");
+                Pulsar::SpaceSync::OpenTakeoffMenuForTest();
+                s_state.takeoffStep = 2;
+                s_state.takeoffSatAtMs = a_now;
+                return;
+            }
+            if (s_state.takeoffStep == 2) {
+                if (a_now - s_state.takeoffSatAtMs < 3000) return;   // let the menu settle
+                const ShipSnap sh = SnapShip(a_player);
+                Trace("takeoff: asking for the launch");
+                const bool fired = Pulsar::SpaceSync::FireTakeoffLaunchForTest();
+                std::snprintf(msg, sizeof(msg), "takeoff: %s, seated=%d, launch fired=%d",
+                              s_state.takeoffSeatInfo.c_str(), sh.seated ? 1 : 0, fired ? 1 : 0);
+                s_state.actionInfo = msg;
+                s_state.takeoffStep = 3;
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            }
+        }
     }
 
     void Tick()
@@ -570,8 +725,34 @@ namespace Pulsar::TestBot
             TickLoot(player, me, now);
         }
 
+        // Takeoff, client: answer the pilot's request 10 s after it arrives, so
+        // the test can tell a held launch from one that did not wait.
+        if (!isHost && s_state.cfg.scenario == "takeoff" && !s_state.voteReadyWallMs) {
+            if (!s_state.voteSeenAtMs && Pulsar::Coop::TakeoffVote::PendingRequestForTest()) {
+                s_state.voteSeenAtMs = now;
+                s_state.voteSeenWallMs = WallMs();
+                Trace("takeoff: partner's request arrived");
+            }
+            if (s_state.voteSeenAtMs && now - s_state.voteSeenAtMs >= 10000) {
+                Pulsar::Coop::TakeoffVote::AnswerReadyForTest();
+                s_state.voteReadyWallMs = WallMs();
+                s_state.acted = true;
+                s_state.actedAtWallMs = s_state.voteReadyWallMs;
+                s_state.actionInfo = "takeoff: answered ready";
+                Trace("takeoff: answered ready");
+            }
+        }
+
+        // Takeoff: sit down, then ask for the launch.
+        if (isHost && s_state.cfg.scenario == "takeoff" && !s_state.acted && me.valid &&
+            (s_state.takeoffStep != 0 ||
+             (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
+            TickTakeoff(player, me, now);
+        }
+
         // The test action, once the partner is settled: host only.
-        if (isHost && s_state.cfg.scenario != "loot" && !s_state.acted && cloneVisible && me.valid &&
+        if (isHost && s_state.cfg.scenario != "loot" && s_state.cfg.scenario != "takeoff" &&
+            !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
             if (s_state.cfg.scenario == "door") {
@@ -654,6 +835,16 @@ namespace Pulsar::TestBot
                 j += c;
             }
             j += "]";
+        }
+        if (s_state.cfg.scenario == "takeoff") {
+            const ShipSnap sh = SnapShip(player);
+            char c[120];
+            std::snprintf(c, sizeof(c), ",\"ship\":{\"inSpace\":%s,\"ship\":\"%08X\",\"seated\":%s}",
+                          sh.inSpace ? "true" : "false", sh.ship, sh.seated ? "true" : "false");
+            j += c;
+            j += ",\"vote\":{\"state\":\"" + std::string(Pulsar::Coop::TakeoffVote::StateForTest()) + "\"";
+            j += ",\"seenAtWallMs\":" + std::to_string(s_state.voteSeenWallMs);
+            j += ",\"readyAtWallMs\":" + std::to_string(s_state.voteReadyWallMs) + "}";
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];

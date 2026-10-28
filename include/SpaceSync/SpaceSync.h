@@ -23,4 +23,23 @@ namespace Pulsar::SpaceSync {
     // Game-thread tick - applies pending auto-follow if armed.
     void TickFollowApply();
 
+    // Test bot: fire the engine's TakeoffMenu_Launch event through its helper
+    // (RVA 0x1677090), as a local launch (our sink broadcasts it). Returns false
+    // if the helper threw.
+    bool FireTakeoffLaunchForTest();
+
+    // Test bot: open the engine's takeoff menu for the seated pilot
+    // (LaunchImmediate, RVA 0x16757D0, as the receiver's step 1). The launch
+    // itself is FireTakeoffLaunchForTest. Run 20261028-203830: the two together
+    // take the ship off.
+    void OpenTakeoffMenuForTest();
+
+    // Takeoff ready vote: re-fire the launch the vote held; the sink lets it
+    // through. False if the engine helper threw.
+    bool ReleaseHeldLaunch();
+
+    // Takeoff ready vote, partner: move the local player to the pilot's clone
+    // (Papyrus MoveTo) unless both are in the same cell. Returns what it did.
+    const char* BoardPartnerShip();
+
 }  // namespace Pulsar::SpaceSync

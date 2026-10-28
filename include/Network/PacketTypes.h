@@ -88,6 +88,7 @@ namespace Pulsar::Network
         PKT_NPC_SPAWN        = 0xA3,  // Host → Client: a persistent quest NPC just became active (enabled/placed) in the host player's cell - e.g. Block-Event-quest dropship pirates the client's own (non-deterministic) BE alias-fill never produces, and which NPCSync can't bring in (it only updates EXISTING NPCs + caps at 20). Detected via ActorCellChangeEvent ENTER (cellA==0). Client LookupByID the same persistent FormID and Enable+place it (REL::ID 63386, idempotent, safe off-VM). NPC-spawn-replication.
         PKT_QUEST_STAGE_REPLAY = 0xA5,  // Host -> Client: a quest stage the host set while the client was disconnected, replayed on a reconnect that skipped the save bridge (QuestSync/StageJournal.h). Same wire as PKT_QUEST_STAGE; the client skips stages it set itself during the gap. 0.5.0.
         PKT_VOICE            = 0xA4,  // Either side -> peer: one Opus voice frame on unreliable ENet channel 2. Wire: [1B type][2B seq][1B flags][opus]. Framed/handled by VoiceBridge, never reaches the PacketReader switch. Proximity Voice .
+        PKT_TAKEOFF_VOTE     = 0xA7,  // Either side -> peer: takeoff ready vote (Coop/TakeoffVote.h). Payload TakeoffVoteData{op, voteId}: 1 request (the pilot's launch is held), 2 ready, 3 go (board now; launch follows in 3 s), 4 cancelled. Phase 1 "voting/ready system".
         PKT_QUEST_REWARD     = 0xA6,  // Either side -> peer: the local player just got a quest reward (an item add with reason kQuestReward or kScriptAddItem and no source container: stage-script or dialogue AddItem, credits included). Payload QuestRewardData. The receiver holds it 5 s and grants what its own replicated stage script did not already give (QuestSync/RewardLedger.h). Phase 1 "quest rewards for everyone".
     };
 
@@ -421,6 +422,15 @@ namespace Pulsar::Network
         uint32_t base;            // sender-local base FormID
         uint32_t localID;         // plugin-local portion (flag-aware mask)
         char     plugin[NPC_SOURCE_PLUGIN_MAX];
+    };
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+    // PKT_TAKEOFF_VOTE payload.
+    struct TakeoffVoteData
+    {
+        uint8_t  op;        // 1 request, 2 ready, 3 go, 4 cancelled
+        uint32_t voteId;
     };
 #pragma pack(pop)
 

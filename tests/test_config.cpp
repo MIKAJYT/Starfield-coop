@@ -40,6 +40,16 @@ TEST(Config, EmptyFileGivesTheDefaults)
     CHECK(!c.coopDoorFollow);               // spec: doors move only the user
     CHECK(c.coopInstancedEnemyLoot);        // spec: each player loots their own copy
     CHECK(c.coopQuestRewards);              // spec: quest rewards for everyone
+    CHECK(c.coopTakeoffVote);               // spec: takeoff waits for a ready vote
+    CHECK_EQ(c.hotkeyTakeoffReady, 0x72);   // F3
+}
+
+TEST(Config, TakeoffVoteSettingsAreRead)
+{
+    CHECK(!Parse("CoopTakeoffVote = 0\n").coopTakeoffVote);
+    CHECK_EQ(Parse("HotkeyTakeoffReady = F2\n").hotkeyTakeoffReady, 0x71);
+    CHECK(!Parse("").coopVoteMessages);     // off: crashed the partner (see Config.h)
+    CHECK(Parse("CoopVoteMessages = 1\n").coopVoteMessages);
 }
 
 TEST(Config, InstancedEnemyLootCanBeTurnedOff)
