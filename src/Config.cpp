@@ -269,6 +269,43 @@ namespace Pulsar
                 cfg.coopVoteMessages = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopVoteMessages = {}"sv, cfg.coopVoteMessages);
             }
+            else if (keyLower == "directsession" || keyLower == "direct_session") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.directSession = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: DirectSession = {}"sv, cfg.directSession);
+            }
+            else if (keyLower == "joincode" || keyLower == "join_code") {
+                cfg.joinCode = value;
+                PLOG_INFO("[PULSAR] Config: JoinCode set ({} characters)"sv, cfg.joinCode.size());
+            }
+            else if (keyLower == "replycode" || keyLower == "reply_code") {
+                cfg.replyCode = value;
+                PLOG_INFO("[PULSAR] Config: ReplyCode set ({} characters)"sv, cfg.replyCode.size());
+            }
+            else if (keyLower == "stunservers" || keyLower == "stun_servers") {
+                cfg.stunServers = value;
+                PLOG_INFO("[PULSAR] Config: StunServers = {}"sv, cfg.stunServers);
+            }
+            else if (keyLower == "useupnp" || keyLower == "use_upnp") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.useUpnp = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: UseUpnp = {}"sv, cfg.useUpnp);
+            }
+            else if (keyLower == "copycodetoclipboard" || keyLower == "copy_code_to_clipboard") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.copyCodeToClipboard = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CopyCodeToClipboard = {}"sv, cfg.copyCodeToClipboard);
+            }
+            else if (keyLower == "hotkeypastereplycode" || keyLower == "hotkey_paste_reply_code") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                const int vk = (v == "0" || v == "off" || v == "none") ? 0 : ParseVKey(value);
+                if (vk >= 0) cfg.hotkeyPasteReplyCode = vk;
+                PLOG_INFO("[PULSAR] Config: HotkeyPasteReplyCode = {} (VK 0x{:02X})"sv, value, cfg.hotkeyPasteReplyCode);
+            }
             else if (keyLower == "hotkeytakeoffready" || keyLower == "hotkey_takeoff_ready") {
                 int vk = ParseVKey(value);
                 if (vk > 0) {

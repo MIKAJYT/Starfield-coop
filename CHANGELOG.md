@@ -16,6 +16,20 @@ The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
 
+## Unreleased - full co-op spec, phase 2: direct sessions
+
+- **Join by code, no relay or lobby server** (`DirectSession = 1`). The host's game
+  publishes a join code (log, `PULSAR_JoinCode.txt` next to `PULSAR.ini`, clipboard,
+  on-screen message) with its LAN address, its public address (asked from a STUN server
+  over the game's own socket) and a port its router opened by UPnP. A friend sets
+  `JoinCode`; their game tries every address at once. If none answers, it publishes a
+  reply code; the host presses F2 with it on the clipboard (`HotkeyPasteReplyCode`) or sets
+  `ReplyCode`, and punches back. Only holders of the code finish the encrypted handshake;
+  an old or wrong code now says so and stops instead of a session where nothing arrives.
+  *Bot-tested* (`-JoinByCode` PASS, `-StaleJoinCode` twin FAIL) on one PC through the LAN
+  address; STUN, UPnP and a connection between two homes are not tested yet. Status of
+  every spec item: [docs/SPEC-STATUS.md](docs/SPEC-STATUS.md).
+
 ## Unreleased - phase 1 of the co-op spec
 
 - **Doors move only the player who uses them.** A load door the host uses no

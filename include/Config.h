@@ -153,6 +153,21 @@ namespace Pulsar
         // -214018). ini: CoopVoteMessages = 0
         bool        coopVoteMessages   = true;
 
+        // Direct sessions by join code, no relay or lobby server, no port forwarding
+        // (include/Network/DirectSession.h). The host publishes a join code; a friend sets
+        // JoinCode. If that alone can't connect, the friend's game publishes a reply code
+        // the host pastes with HotkeyPasteReplyCode (F2) or sets as ReplyCode.
+        // ini: DirectSession = 1, JoinCode = PSR-..., ReplyCode = PSR-...,
+        //      StunServers = host:port,host:port (empty = none), UseUpnp = 0,
+        //      CopyCodeToClipboard = 0, HotkeyPasteReplyCode = F2 (0 = off)
+        bool        directSession        = false;
+        std::string joinCode;
+        std::string replyCode;
+        std::string stunServers          = "stun.l.google.com:19302,stun.cloudflare.com:3478";
+        bool        useUpnp              = true;
+        bool        copyCodeToClipboard  = true;
+        int         hotkeyPasteReplyCode = 0x71;  // VK_F2
+
         // co-op "no menu pause". The engine sets RE::Main::isGameMenuPaused
         // (Main+0x448) when a pausing menu opens; ~150 subsystem updates each zero their
         // frame delta when it is set, so ALL NPCs/timers freeze the moment one player

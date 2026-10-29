@@ -79,6 +79,20 @@ $diagAllow = @(
     '[PULSAR] co-op: refused entering the host''s vehicle', # SharedVehicleRide
     # Performance numbers only (docs/PERFORMANCE.md): bandwidth by packet type ID and
     # PULSAR's game-thread time, so players can report them.
+    # Direct sessions by join code (phase 2): what a player needs to see to connect.
+    '[PULSAR] co-op: direct session on port',
+    '[PULSAR] co-op: join code (send it',
+    '[PULSAR] co-op: joining by code',
+    '[PULSAR] co-op: connected directly to the host',
+    '[PULSAR] co-op: the join code is not valid',
+    '[PULSAR] co-op: that is not a valid reply code',
+    '[PULSAR] co-op: that reply code is for another session',
+    '[PULSAR] co-op: reply code accepted',
+    '[PULSAR] co-op: can''t reach the host directly yet',
+    '[PULSAR] co-op: public address of this PC',
+    '[PULSAR] co-op: the router opened a port',
+    '[PULSAR] co-op: the router did not open a port',
+    '[PULSAR] co-op: the other side uses a different join code',
     '[PULSAR] NetStats ',
     '[PULSAR] TaskStats '
 )

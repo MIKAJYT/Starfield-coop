@@ -52,6 +52,28 @@ TEST(Config, TakeoffVoteSettingsAreRead)
     CHECK(!Parse("CoopVoteMessages = 0\n").coopVoteMessages);
 }
 
+TEST(Config, DirectSessionSettings)
+{
+    const auto d = Parse("");
+    CHECK(!d.directSession);
+    CHECK(d.joinCode.empty());
+    CHECK(d.useUpnp);
+    CHECK(d.copyCodeToClipboard);
+    CHECK_EQ(d.hotkeyPasteReplyCode, 0x71);   // F2
+    CHECK(!d.stunServers.empty());
+
+    const auto c = Parse("DirectSession = 1\nJoinCode = PSR-ABCDE-FGHJK\nReplyCode = PSR-0\n"
+                         "StunServers =\nUseUpnp = 0\nCopyCodeToClipboard = off\nHotkeyPasteReplyCode = 0\n");
+    CHECK(c.directSession);
+    CHECK(c.joinCode == "PSR-ABCDE-FGHJK");
+    CHECK(c.replyCode == "PSR-0");
+    CHECK(c.stunServers.empty());
+    CHECK(!c.useUpnp);
+    CHECK(!c.copyCodeToClipboard);
+    CHECK_EQ(c.hotkeyPasteReplyCode, 0);
+    CHECK_EQ(Parse("HotkeyPasteReplyCode = F6\n").hotkeyPasteReplyCode, 0x75);
+}
+
 TEST(Config, InstancedEnemyLootCanBeTurnedOff)
 {
     CHECK(!Parse("CoopInstancedEnemyLoot = 0\n").coopInstancedEnemyLoot);

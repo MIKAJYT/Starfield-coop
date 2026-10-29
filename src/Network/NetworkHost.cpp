@@ -28,6 +28,8 @@
 #include "Network/VersionCompat.h"
 #include "Network/KeyExchange.h"
 #include "Diag/PerfStats.h"
+#include "Network/DirectSession.h"
+#include "UI/HudMessage.h"
 #include "Plugin.h"
 #include "SpaceSync/ShipCombatSync.h"
 #include "SpaceSync/SpaceSync.h"
@@ -111,6 +113,25 @@ namespace Pulsar::Network
         if (a == 0 || a == 127 || a >= 224) return false;        // 0/8, loopback, multicast/255
         if (ipNetOrder == 0xFFFFFFFF) return false;              // broadcast
         return true;
+    }
+
+    // Direct-session settings from PULSAR.ini (StunServers is a comma-separated list).
+    static Direct::Settings DirectSettings()
+    {
+        const auto& cfg = Pulsar::GetConfig();
+        Direct::Settings st;
+        std::string cur;
+        for (char ch : cfg.stunServers + ",") {
+            if (ch == ',') {
+                if (!cur.empty()) st.stunServers.push_back(cur);
+                cur.clear();
+            } else if (ch != ' ' && ch != '\t') {
+                cur.push_back(ch);
+            }
+        }
+        st.useUpnp = cfg.useUpnp;
+        st.clipboard = cfg.copyCodeToClipboard;
+        return st;
     }
 
     NetworkHost& GetSingleton()
@@ -350,6 +371,13 @@ namespace Pulsar::Network
         }
 
         m_isHost = true;
+        m_directHost = Pulsar::GetConfig().directSession && !m_relayMode;
+        if (m_directHost) {
+            std::lock_guard lock(m_enetMutex);
+            Direct::BeginHost(m_host, a_port, DirectSettings());
+            SetAuthSecret(Direct::SecretBytes());   // only holders of the join code finish the key exchange
+            if (!Pulsar::GetConfig().replyCode.empty()) Direct::SubmitReply(Pulsar::GetConfig().replyCode);
+        }
         if (m_relayMode) {
             SendRelayControl(Relay::kTypeRegister);
             m_relayKeepaliveAt = GetTickCount64() + 15000;
@@ -396,6 +424,24 @@ namespace Pulsar::Network
                 return false;
             }
             m_initialized = true;
+        }
+
+        // Direct session: join by code, several attempts at once (DirectSession.h).
+        if (!m_relayMode && !Pulsar::GetConfig().joinCode.empty()) {
+            std::lock_guard lock(m_enetMutex);
+            m_host = enet_host_create(nullptr, Direct::kJoinPeers, NUM_CHANNELS, 0, 0);
+            if (!m_host) {
+                PLOG_WARN("Failed to create ENet client"sv);
+                return false;
+            }
+            m_isHost = false;
+            m_directJoin = true;
+            if (!Direct::BeginJoin(m_host, Pulsar::GetConfig().joinCode, DirectSettings())) {
+                m_directJoin = false;
+                return false;
+            }
+            SetAuthSecret(Direct::SecretBytes());
+            return true;
         }
 
         m_host = enet_host_create(nullptr, 1, NUM_CHANNELS, 0, 0);
@@ -662,7 +708,19 @@ namespace Pulsar::Network
         // Client auto-reconnect
         if (m_reconnectAt > 0 && GetTickCount64() >= m_reconnectAt) {
             m_reconnectAt = 0;
-            if (!m_peer && !m_lastAddress.empty()) {
+            if (!m_peer && m_directJoin) {
+                // Direct session: join again by code on a fresh socket (new NAT mapping).
+                PLOG_INFO("[PULSAR] Auto-reconnecting by join code..."sv);
+                std::lock_guard lock(m_enetMutex);
+                ENetHost* fresh = enet_host_create(nullptr, Direct::kJoinPeers, NUM_CHANNELS, 0, 0);
+                if (fresh) {
+                    if (m_host) enet_host_destroy(m_host);
+                    m_host = fresh;
+                    Direct::BeginJoin(m_host, Pulsar::GetConfig().joinCode, DirectSettings());
+                } else {
+                    m_reconnectAt = GetTickCount64() + 5000;
+                }
+            } else if (!m_peer && !m_lastAddress.empty()) {
                 PLOG_INFO("[PULSAR] Auto-reconnecting to {}:{}..."sv, m_lastAddress, m_lastPort);
                 NASLOG("Auto-reconnecting...");
 
@@ -695,6 +753,7 @@ namespace Pulsar::Network
         // any ENet API from another thread without this lock.
         {
             std::lock_guard lock(m_enetMutex);
+            if (m_directHost || m_directJoin) Direct::Tick(m_host, m_connectionEstablished.load(std::memory_order_acquire));
             ENetEvent event{};
             while (enet_host_service(m_host, &event, 0) > 0) {
                 switch (event.type) {
@@ -1036,6 +1095,7 @@ namespace Pulsar::Network
 
     void NetworkHost::Shutdown()
     {
+        if (m_directHost || m_directJoin) Direct::Stop();
         Disconnect();
 
         if (m_initialized) {
@@ -1048,6 +1108,11 @@ namespace Pulsar::Network
 
     void NetworkHost::OnConnect(ENetPeer* a_peer)
     {
+        // Direct join: several attempts run at once; the first to connect wins.
+        if (!m_isHost && m_directJoin) {
+            if (m_peer && m_peer != a_peer) { enet_peer_reset(a_peer); return; }
+            Direct::OnConnected(m_host, a_peer);
+        }
         m_peer = a_peer;
 
         // Configure peer timeout: detect dead connections.
@@ -1080,6 +1145,8 @@ namespace Pulsar::Network
             m_cryptoReady = false;
             m_preCryptoTx.clear();
         }
+        m_decryptedAny = false;
+        m_decryptFailures = 0;
         if (wantE2e) {
             if (cryptoInitOk) {
                 // Anti-MITM: mix the DB-delivered per-lobby secret into the key derivation
@@ -1144,8 +1211,19 @@ namespace Pulsar::Network
         ENetPacket localPkt{};
         if (m_e2e) {
             if (!m_cryptoReady) return;                  // key not agreed yet -> drop
-            if (!a_packet || !m_crypto.Decrypt(a_packet->data, a_packet->dataLength, plain))
+            if (!a_packet || !m_crypto.Decrypt(a_packet->data, a_packet->dataLength, plain)) {
+                // Not one packet ever decrypted on this connection: the two sides hold
+                // different session secrets (an old or wrong join code, or a stranger).
+                // Say so and end it instead of a session where nothing arrives.
+                if (!m_decryptedAny && ++m_decryptFailures == kWrongKeyFailures && a_peer) {
+                    m_wrongKey = true;
+                    PLOG_DIAG("[PULSAR] co-op: the other side uses a different join code (an old or wrong one) - disconnecting"sv);
+                    if (!m_isHost) Pulsar::UI::HudMessage::Show("Co-op: this join code is old or wrong. Ask the host for the current code.");
+                    enet_peer_disconnect(a_peer, 0);
+                }
                 return;                                  // forged / corrupt -> drop
+            }
+            m_decryptedAny = true;
             localPkt.data       = plain.data();
             localPkt.dataLength = static_cast<enet_uint32>(plain.size());
             a_packet = &localPkt;
@@ -1848,6 +1926,12 @@ namespace Pulsar::Network
 
     void NetworkHost::OnDisconnect(ENetPeer* a_peer, uint32_t a_reason)
     {
+        // A direct-join attempt that did not get through is not a session disconnect.
+        if (!m_isHost && m_directJoin && Direct::Joining()) {
+            PLOG_INFO("[PULSAR] [Direct] attempt to {} got no answer"sv,
+                      a_peer ? Direct::ToString(a_peer->address.host, a_peer->address.port) : std::string("?"));
+            return;
+        }
         const char* reasonStr = "unknown";
         switch (a_reason) {
             case 0: reasonStr = "graceful"; break;
@@ -1916,7 +2000,10 @@ namespace Pulsar::Network
         }
 
         // Host stays listening - client can reconnect without restart
-        if (!m_isHost && !m_lastAddress.empty() && !versionRejected) {
+        // (not with a join code the host doesn't accept: it would only fail again).
+        const bool wrongKey = m_wrongKey;
+        m_wrongKey = false;
+        if (!m_isHost && (!m_lastAddress.empty() || m_directJoin) && !versionRejected && !wrongKey) {
             m_reconnectAt = GetTickCount64() + 3000;  // try reconnect in 3s
             PLOG_INFO("[PULSAR] Will auto-reconnect in 3s..."sv);
         }

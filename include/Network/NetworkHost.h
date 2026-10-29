@@ -92,6 +92,11 @@ namespace Pulsar::Network
         std::vector<uint8_t> m_authSecret;   // DB-delivered E2E auth secret bytes (anti-MITM); empty = none
         bool          m_e2e = true;          // cached from config at connect
         bool          m_cryptoReady = false; // shared key derived (peer hello received)
+        // Wrong session secret: nothing ever decrypts on the connection (OnReceive).
+        static constexpr int kWrongKeyFailures = 20;
+        bool          m_decryptedAny = false;
+        int           m_decryptFailures = 0;
+        bool          m_wrongKey = false;    // disconnected for it: no auto-reconnect
         struct PendingTx { int channel; std::vector<uint8_t> data; bool reliable; };
         std::vector<PendingTx> m_preCryptoTx; // app packets sent before the key is ready
         // Guards m_e2e / m_cryptoReady / m_preCryptoTx ONLY. EncSend runs from both the
@@ -119,6 +124,10 @@ namespace Pulsar::Network
         uint64_t    m_rzDeadline = 0;
         bool        m_forceRelay = false;     // PULSAR_FORCE_RELAY=1 → relay-always
         ENetAddress m_directAddress{};        // peer's punched public endpoint
+
+        // Direct session by join code (DirectSession.h): host publishes a code, client joins by it.
+        bool        m_directHost = false;
+        bool        m_directJoin = false;
         void        PunchTo(const ENetAddress& a_ep, int a_count);  // raw datagrams via m_host->socket
 
         bool      m_pendingSendPos = false;

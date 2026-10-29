@@ -60,6 +60,10 @@ param(
     [switch]$PartnerOutside,
     # takeoff: the pilot presses F8 (the regroup key) during the vote; the launch must still wait.
     [switch]$F8DuringVote,
+    # Direct session: the client joins only by the join code the host published (no HostIP).
+    # -StaleJoinCode (twin) gives the client the code of the previous host session instead.
+    [switch]$JoinByCode,
+    [switch]$StaleJoinCode,
     # Extra PULSAR.ini lines for both copies ("Key = value", separated by ";"), for bisects.
     [string]$ExtraIni = "",
     # Extra PulsarTestBot.ini lines, same format (e.g. "NotifyTest = hello").
@@ -79,6 +83,9 @@ $LowMemoryIni = "[Archive]`r`nsResourceArchiveMemoryCacheList=`r`nsResourceMiscA
 $ErrorActionPreference = "Stop"
 if ($PartnerOutside) { $ExtraBotIni = "TakeoffPartnerOutside = 1;" + $ExtraBotIni }
 if ($F8DuringVote) { $ExtraBotIni = "TakeoffF8DuringVote = 1;" + $ExtraBotIni }
+$JoinByCode = $JoinByCode -or $StaleJoinCode
+# Bots never touch the router (UPnP), a public STUN server, the clipboard or the F2 key.
+if ($JoinByCode) { $ExtraIni = "DirectSession = 1;StunServers = ;UseUpnp = 0;CopyCodeToClipboard = 0;HotkeyPasteReplyCode = 0;" + $ExtraIni }
 Set-StrictMode -Version 2
 
 # ============================================================================
@@ -650,6 +657,7 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     Remove-Item -LiteralPath $state -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $root "logs\bot-state.json") -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $root "logs\bot-trace.log") -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $plugins "PULSAR_JoinCode.txt"), (Join-Path $plugins "PULSAR_ReplyCode.txt") -ErrorAction SilentlyContinue
     $mode = if ($role -eq "host") { "host" } else { "client" }
     $doorFollowValue = if ($DoorFollow) { 1 } else { 0 }
     $instancedLootValue = if ($SharedLoot) { 0 } else { 1 }
@@ -807,6 +815,25 @@ try {
     $free = FreeGB
     W ("host settled after {0:N0} s, free RAM {1} GB" -f ((Get-Date) - $settleStart).TotalSeconds, $free)
     if ($free -lt 5) { throw "RAM guard: only $free GB free, not starting the client" }
+    if ($JoinByCode) {
+        $codeFile = Join-Path $Instances "$HostSlot\game\Data\SFSE\Plugins\PULSAR_JoinCode.txt"
+        $lastFile = Join-Path $Instances "last-join-code.txt"
+        $codeWait = (Get-Date).AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $codeFile) -and (Get-Date) -lt $codeWait) { Start-Sleep -Seconds 1 }
+        if (-not (Test-Path -LiteralPath $codeFile)) { $result = "ERROR"; throw "the host never published a join code" }
+        $fresh = (Get-Content -LiteralPath $codeFile -Raw).Trim()
+        if ($StaleJoinCode) {
+            if (-not (Test-Path -LiteralPath $lastFile)) { $result = "ERROR"; throw "no join code from an earlier run for -StaleJoinCode" }
+            $code = (Get-Content -LiteralPath $lastFile -Raw).Trim()
+            if ($code -eq $fresh) { $result = "ERROR"; throw "the earlier join code equals this session's" }
+            W "TWIN: the client gets the previous session's join code - this run must not pass"
+        } else { $code = $fresh }
+        Write-PrivateFile $lastFile ($fresh + "`r`n")
+        $cIni = Join-Path $Instances "$ClientSlot\game\Data\SFSE\Plugins\PULSAR.ini"
+        $text = (Get-Content -LiteralPath $cIni -Raw).Replace("HostIP = 127.0.0.1", "HostIP = 192.0.2.1") + "JoinCode = $code`r`n"
+        Write-PrivateFile $cIni $text
+        W "client joins by code only ($($code.Length) characters, HostIP unreachable)"
+    }
     $cp = Start-Slot $ClientSlot
 
     $hostSeen = New-Object System.Collections.Generic.List[object]; $clientSeen = New-Object System.Collections.Generic.List[object]
@@ -846,6 +873,12 @@ try {
             W ("host: inWorld={0} connected={1} cloneVisible={2} acted={3} cell={4} | client: inWorld={5} connected={6} cloneVisible={7} cell={8} | free RAM {9} GB" -f `
                 $(if ($hs) { $hs.inWorld } else { "-" }), $(if ($hs) { $hs.connected } else { "-" }), $(if ($hs) { $hs.cloneVisible } else { "-" }), $(if ($hs) { $hs.acted } else { "-" }), $(if ($hs) { $hs.playerCell } else { "-" }),
                 $(if ($cs) { $cs.inWorld } else { "-" }), $(if ($cs) { $cs.connected } else { "-" }), $(if ($cs) { $cs.cloneVisible } else { "-" }), $(if ($cs) { $cs.playerCell } else { "-" }), (FreeGB))
+        }
+        if ($JoinByCode -and (Read-SharedLines $clientLog 'uses a different join code')) {
+            $score.Result = "FAIL"; $score.Reasons.Add("the host did not accept the client's join code (wrong session secret)")
+        }
+        if ($JoinByCode -and $score.Result -eq "PASS" -and -not (Read-SharedLines $clientLog 'connected directly to the host through')) {
+            $score.Result = "FAIL"; $score.Reasons.Add("the client never logged a direct connection by join code")
         }
         if ($score.Result -ne "PENDING") { $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }; break }
     }
