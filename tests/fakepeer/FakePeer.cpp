@@ -230,6 +230,13 @@ namespace Pulsar::FakePeer
     void FakePeer::OnPlain(const uint8_t* a_data, size_t a_len)
     {
         if (a_len == 0) return;
+        // 2-4 players: another player's packet, forwarded by the host ([FROM][sender][packet]).
+        if (a_data[0] == PKT_FROM && a_len >= 3 && a_data[2] == PKT_TAKEOFF_VOTE) {
+            ++m_stats.recvCount[PKT_FROM];
+            m_stats.recvBytes[PKT_FROM] += a_len;
+            OnTakeoffVote(a_data + 2, a_len - 2);
+            return;
+        }
         const uint8_t type = a_data[0];
         const bool first = m_stats.recvCount[type]++ == 0;
         m_stats.recvBytes[type] += a_len;
@@ -284,12 +291,32 @@ namespace Pulsar::FakePeer
                 }
                 break;
             }
+            case PKT_TAKEOFF_VOTE:
+                OnTakeoffVote(a_data, a_len);
+                break;
             case PKT_HOST_REQUEST_RECONNECT:
                 Log("host asked us to reconnect");
                 m_wantReconnect = true;
                 break;
             default:
                 break;
+        }
+    }
+
+    // Takeoff vote, crew side: a pilot's request is answered "ready" after voteReadyAfterMs.
+    void FakePeer::OnTakeoffVote(const uint8_t* a_data, size_t a_len)
+    {
+        if (a_len < 1 + sizeof(TakeoffVoteData)) return;
+        TakeoffVoteData d{};
+        std::memcpy(&d, a_data + 1, sizeof(d));
+        if (d.op == 1) {
+            Log(Fmt("takeoff vote %u requested%s", d.voteId, m_opts.voteReadyAfterMs < 0 ? " - not answering (--vote-ready-after -1)" : ""));
+            if (m_opts.voteReadyAfterMs >= 0) {
+                m_voteToAnswer = d.voteId;
+                m_voteAnswerAt = Clock::now() + std::chrono::milliseconds(m_opts.voteReadyAfterMs);
+            }
+        } else if (d.op == 3) {
+            Log(Fmt("takeoff vote %u passed (go)", d.voteId));
         }
     }
 
@@ -386,6 +413,17 @@ namespace Pulsar::FakePeer
     {
         if (!m_connected || !SecureReady()) return;
         const auto now = Clock::now();
+        if (m_voteToAnswer && now >= m_voteAnswerAt) {
+            uint8_t b[1 + sizeof(TakeoffVoteData)];
+            b[0] = PKT_TAKEOFF_VOTE;
+            const TakeoffVoteData d{ 2, m_voteToAnswer };
+            std::memcpy(b + 1, &d, sizeof(d));
+            SendApp(b, sizeof(b), true);
+            const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            Log(Fmt("takeoff vote %u: ready sent wallMs=%lld", m_voteToAnswer, static_cast<long long>(wall)));
+            m_voteToAnswer = 0;
+        }
         const auto period = std::chrono::microseconds(1000000 / m_opts.rateHz);
         if (now < m_nextSend) return;
         m_nextSend = (m_nextSend + period < now) ? now + period : m_nextSend + period;

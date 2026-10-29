@@ -92,3 +92,38 @@ TEST(RewardLedger, DifferentItemsDoNotCancel)
     CHECK_EQ(l.Local(kCredits, 0, 1000).fresh, 0);
     CHECK_EQ(l.Local(0, 5, 1000).fresh, 0);
 }
+
+// 2-4 players: a stage script rewards every player, so each of the two others announces it.
+TEST(RewardLedger, ThreePlayersEveryoneGotItOwesNothing)
+{
+    RewardLedger l;
+    l.Local(0xABC, 1, 1000);          // our own script gave it
+    l.Peer(0xABC, 1, 1200, 0);        // the host announces its copy
+    l.Peer(0xABC, 1, 1300, 2);        // player 2 announces its copy
+    const auto due = l.Due(1300 + RewardLedger::kHoldMs);
+    CHECK(due.size() == 2);
+    CHECK(due[0].count == 0 && due[1].count == 0);
+}
+
+// Two others got it from their scripts, ours did not run: one copy, not two.
+TEST(RewardLedger, ThreePlayersMissingRewardIsGrantedOnce)
+{
+    RewardLedger l;
+    l.Peer(0xABC, 1, 1000, 0);
+    l.Peer(0xABC, 1, 1100, 2);
+    const auto due = l.Due(1100 + RewardLedger::kHoldMs);
+    CHECK(due.size() == 2);
+    CHECK(due[0].count + due[1].count == 1);
+}
+
+// The same sender's second reward of that item is a new reward, not a duplicate.
+TEST(RewardLedger, SameSenderTwiceIsTwoRewards)
+{
+    RewardLedger l;
+    l.Peer(0xABC, 1, 1000, 0);
+    auto due = l.Due(1000 + RewardLedger::kHoldMs);
+    CHECK(due.size() == 1 && due[0].count == 1);
+    l.Peer(0xABC, 1, 8000, 0);
+    due = l.Due(8000 + RewardLedger::kHoldMs);
+    CHECK(due.size() == 1 && due[0].count == 1);
+}

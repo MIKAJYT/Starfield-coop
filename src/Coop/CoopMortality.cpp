@@ -52,7 +52,8 @@ namespace Pulsar::Coop::Mortality
     // ENet receive thread (OnDownedReceived), read on the game thread (hook) →
     // atomic. When BOTH g_localDowned and g_remoteDowned are set, each machine
     // lets its own vanilla reload fire = controlled both-downed game-over.
-    static std::atomic<bool> g_remoteDowned{ false };
+    // 2-4 players: each other player's downed and combat state, by player ID.
+    static std::atomic<bool> g_downedOf[4]{};
 
     // Way A - medpack revive request received from the partner (PKT_PLAYER_REVIVE).
     // Written on the ENet receive thread (OnReviveReceived = queue only), consumed
@@ -66,7 +67,56 @@ namespace Pulsar::Coop::Mortality
     // reliably (its local enemies disengage the instant it goes down → its hostiles
     // scan reads "clear" mid-fight), so Way-B also requires the FIGHTER to report
     // combat-clear before standing the downed player back up.
-    static std::atomic<bool> g_remoteCombatActive{ false };
+    static std::atomic<bool> g_combatOf[4]{};
+
+    static std::uint8_t LocalId()
+    {
+        const auto id = Pulsar::Network::GetSingleton().LocalPlayerId();
+        if (id < 4) return id;
+        return Pulsar::Network::GetSingleton().IsHost() ? 0 : 1;   // before the roster
+    }
+
+    // Any other player down (revive prompt).
+    static bool AnyRemoteDowned()
+    {
+        const auto me = LocalId();
+        for (std::uint8_t i = 0; i < 4; ++i)
+            if (i != me && g_downedOf[i].load(std::memory_order_relaxed)) return true;
+        return false;
+    }
+
+    // Every other player in the session down (with us: the both/all-down game over).
+    static bool AllRemoteDowned()
+    {
+        const auto me = LocalId();
+        int down = 0;
+        for (std::uint8_t i = 0; i < 4; ++i)
+            if (i != me && g_downedOf[i].load(std::memory_order_relaxed)) ++down;
+        const int others = static_cast<int>(Pulsar::Network::GetSingleton().PlayerCount()) - 1;
+        return down > 0 && down >= others;
+    }
+
+    // Any other player still up and fighting (a downed player stays down meanwhile).
+    static bool AnyFighterInCombat()
+    {
+        const auto me = LocalId();
+        for (std::uint8_t i = 0; i < 4; ++i)
+            if (i != me && g_combatOf[i].load(std::memory_order_relaxed) && !g_downedOf[i].load(std::memory_order_relaxed))
+                return true;
+        return false;
+    }
+
+    static void ClearRemoteStates()
+    {
+        for (auto& d : g_downedOf) d.store(false, std::memory_order_relaxed);
+        for (auto& c : g_combatOf) c.store(false, std::memory_order_relaxed);
+    }
+
+    static std::uint8_t SenderId()
+    {
+        const auto s = Pulsar::Network::NetworkHost::CurrentSender();
+        return s < 4 ? s : Pulsar::RemotePlayer::FirstPartner();
+    }
 
     // Broadcast our local downed transition to the peer (reliable).
     static void SendDownedState(bool a_downed)
@@ -78,7 +128,7 @@ namespace Pulsar::Coop::Mortality
         buf[0] = PKT_PLAYER_DOWNED;
         PlayerDownedData d{};
         d.downed     = a_downed ? 1 : 0;
-        d.playerSlot = net.IsHost() ? 0 : 1;
+        d.playerSlot = LocalId();
         std::memcpy(&buf[1], &d, sizeof(d));
         net.Send(buf, sizeof(buf), /*reliable=*/true);
         PLOG_INFO("[DOWNED] sent downed-state={} to peer"sv, d.downed);
@@ -98,7 +148,7 @@ namespace Pulsar::Coop::Mortality
         buf[0] = PKT_PLAYER_COMBAT;
         PlayerCombatData d{};
         d.inCombat   = a_inCombat ? 1 : 0;
-        d.playerSlot = net.IsHost() ? 0 : 1;
+        d.playerSlot = LocalId();
         std::memcpy(&buf[1], &d, sizeof(d));
         net.Send(buf, sizeof(buf), /*reliable=*/true);
         if (a_log) PLOG_INFO("[DOWNED] sent combat-state={} to peer"sv, d.inCombat);
@@ -335,13 +385,13 @@ namespace Pulsar::Coop::Mortality
     // SEH: is the local player within a_radius of the downed remote clone?
     // Also returns the clone ptr + squared distance for diagnostics.
     // POD-only inside __try (NiPoint3 = 3 floats, raw ptrs) → C2712-safe.
-    static bool SafeNearDownedClone(RE::PlayerCharacter* a_player, float a_radius,
-                                    std::uintptr_t& a_cloneOut, float& a_distSqOut)
+    static bool SafeNearActor(RE::PlayerCharacter* a_player, RE::Actor* a_actor, float a_radius,
+                              std::uintptr_t& a_cloneOut, float& a_distSqOut)
     {
         a_cloneOut  = 0;
         a_distSqOut = -1.0f;
         __try {
-            RE::Actor* clone = Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteActor();
+            RE::Actor* clone = a_actor;
             a_cloneOut = reinterpret_cast<std::uintptr_t>(clone);
             if (!clone) return false;
             const RE::NiPoint3 pp = a_player->GetPosition();
@@ -427,7 +477,7 @@ namespace Pulsar::Coop::Mortality
             // would fire every frame and clear g_localDowned. Recovery now happens via
             // ReviveLocalPlayer and the load-tick post-load reset in OnGameThreadTick.
             const bool deathNow   = ok && (live == kDeathState1 || live == kDeathState2);
-            const bool bothDowned = g_remoteDowned.load(std::memory_order_relaxed);
+            const bool bothDowned = AllRemoteDowned();
 
             // Throttle a status log to ~1 Hz.
             static std::uint64_t s_lastDownLogMs = 0;
@@ -529,7 +579,7 @@ namespace Pulsar::Coop::Mortality
         void* const ret = _ReturnAddress();  // caller = the death-process we want to find
         if (Pulsar::Network::GetSingleton().IsConnected() && SafeIsLocalPlayer(a_this)) {
             const bool isDeath    = (a_newState == kDeathEnum1 || a_newState == kDeathEnum2);
-            const bool bothDowned = g_remoteDowned.load(std::memory_order_relaxed);
+            const bool bothDowned = AllRemoteDowned();
             if (isDeath && !bothDowned) {
                 // Swallow the engine's player death-set entirely (do NOT call orig) →
                 // the life-state is left untouched (stays alive / 0). The game-thread
@@ -579,7 +629,7 @@ namespace Pulsar::Coop::Mortality
             if (SafeIsLocalPlayer(a_this)) {
                 // Both-down game-over needs a REAL death (forced elsewhere, bypasses
                 // this hook). Otherwise: abort the kill → no death, no death-audio.
-                const bool bothDowned = g_remoteDowned.load(std::memory_order_relaxed);
+                const bool bothDowned = AllRemoteDowned();
                 if (!bothDowned) {
                     if (!g_localDowned.exchange(true)) {
                         SendDownedState(true);  // tell the peer we are down
@@ -1120,10 +1170,9 @@ namespace Pulsar::Coop::Mortality
 
             if (loadTick != s_lastLoadSeen || loadMenuClosedEdge) {
                 s_lastLoadSeen = loadTick;
-                if (g_localDowned || g_remoteDowned.load(std::memory_order_relaxed)) {
+                if (g_localDowned || AnyRemoteDowned()) {
                     g_localDowned = false;
-                    g_remoteDowned.store(false, std::memory_order_relaxed);
-                    g_remoteCombatActive.store(false, std::memory_order_relaxed);
+                    ClearRemoteStates();
                     SafeSetPlayerControlsEnabled(true);
                     Pulsar::RemotePlayer::SetPlayerCombatActionsBlocked(false);
                     SendDownedState(false);
@@ -1148,7 +1197,7 @@ namespace Pulsar::Coop::Mortality
         // ----------------------------------------------------------------
         {
             static bool s_bothDownTriggered = false;
-            const bool bothDown = g_localDowned && g_remoteDowned.load(std::memory_order_relaxed);
+            const bool bothDown = g_localDowned && AllRemoteDowned();
             if (bothDown) {
                 SafeClearLoadCounter();  // keep the load counter ≤ 1 every frame (host 2nd-load trap)
                 if (!s_bothDownTriggered) {
@@ -1238,7 +1287,8 @@ namespace Pulsar::Coop::Mortality
         // on it would pure-virtual-call (same crash class as the player hold).
         if (!Pulsar::Cell3DAttach::IsQuiet()) {
             static bool s_cloneInjured = false;
-            const bool remoteDown = g_remoteDowned.load(std::memory_order_relaxed);
+            // The downed pose is applied to the first partner's figure.
+            const bool remoteDown = g_downedOf[Pulsar::RemotePlayer::FirstPartner() & 3].load(std::memory_order_relaxed);
             if (remoteDown && !s_cloneInjured) {
                 if (RE::Actor* clone = SafeGetRemoteClone()) {
                     s_cloneInjured = true;
@@ -1336,7 +1386,7 @@ namespace Pulsar::Coop::Mortality
             const std::uint64_t nowMs = ::GetTickCount64();
             const bool ok           = s_localHostilesOk;
             const bool hostilesNear = s_localHostiles;
-            const bool remoteCombat = g_remoteCombatActive.load(std::memory_order_relaxed);
+            const bool remoteCombat = AnyFighterInCombat();
 
             // DIAG: log the combined combat signal ~1 Hz while downed.
             static std::uint64_t s_diagBMs = 0;
@@ -1371,10 +1421,16 @@ namespace Pulsar::Coop::Mortality
             const std::uint64_t  nowMs = ::GetTickCount64();
             const bool activateDown = (::GetAsyncKeyState(kActivateVK) & 0x8000) != 0;
 
-            if (!g_localDowned && g_remoteDowned.load(std::memory_order_relaxed)) {
+            if (!g_localDowned && AnyRemoteDowned()) {
                 std::uintptr_t clonePtr = 0;
                 float          distSq   = -1.0f;
-                const bool inRange = SafeNearDownedClone(player, kReviveRadius, clonePtr, distSq);
+                std::uint8_t   target   = 0xFF;
+                bool           inRange  = false;
+                for (std::uint8_t id = 0; id < 4 && !inRange; ++id) {
+                    if (id == LocalId() || !g_downedOf[id].load(std::memory_order_relaxed)) continue;
+                    RE::Actor* fig = Pulsar::RemotePlayer::GetRemotePlayerFigure(id).GetRemoteActor();
+                    if (SafeNearActor(player, fig, kReviveRadius, clonePtr, distSq)) { inRange = true; target = id; }
+                }
 
                 // DIAG ~1 Hz.
                 static std::uint64_t s_diagAMs = 0;
@@ -1390,8 +1446,7 @@ namespace Pulsar::Coop::Mortality
                 const bool rising = activateDown && !s_activatePrev;
                 if (rising && inRange && (nowMs - s_lastFireMs >= 1000)) {
                     s_lastFireMs = nowMs;
-                    auto& net = Pulsar::Network::GetSingleton();
-                    const std::uint8_t downedSlot = net.IsHost() ? 1 : 0;  // the OTHER player
+                    const std::uint8_t downedSlot = target;   // the downed player in range
                     SendRevive(downedSlot);
                     PLOG_INFO("[DOWNED] medpack revive triggered for slot {} (v2 tap; no item consume yet)"sv,
                               downedSlot);
@@ -1452,8 +1507,9 @@ namespace Pulsar::Coop::Mortality
         if (!a_data || a_len < 1 + sizeof(PlayerDownedData)) return;
         PlayerDownedData d{};
         std::memcpy(&d, a_data + 1, sizeof(d));
-        g_remoteDowned.store(d.downed != 0, std::memory_order_relaxed);
-        PLOG_INFO("[DOWNED] peer downed-state received = {} (slot {})"sv, d.downed, d.playerSlot);
+        const auto from = SenderId();
+        g_downedOf[from].store(d.downed != 0, std::memory_order_relaxed);
+        PLOG_INFO("[DOWNED] player {} downed-state received = {}"sv, from, d.downed);
     }
 
     // True while the remote partner (their clone on this machine) is downed.
@@ -1461,7 +1517,14 @@ namespace Pulsar::Coop::Mortality
     // update doesn't reset the bleedout pose.
     bool IsRemoteDowned()
     {
-        return g_remoteDowned.load(std::memory_order_relaxed);
+        return g_downedOf[Pulsar::RemotePlayer::FirstPartner() & 3].load(std::memory_order_relaxed);
+    }
+
+    void ForgetPlayer(std::uint8_t a_id)
+    {
+        if (a_id >= 4) return;
+        g_downedOf[a_id].store(false, std::memory_order_relaxed);
+        g_combatOf[a_id].store(false, std::memory_order_relaxed);
     }
 
     bool IsLocalDowned()
@@ -1499,8 +1562,9 @@ namespace Pulsar::Coop::Mortality
         if (!a_data || a_len < 1 + sizeof(PlayerCombatData)) return;
         PlayerCombatData d{};
         std::memcpy(&d, a_data + 1, sizeof(d));
-        g_remoteCombatActive.store(d.inCombat != 0, std::memory_order_relaxed);
-        PLOG_INFO("[DOWNED] peer combat-state received = {} (slot {})"sv, d.inCombat, d.playerSlot);
+        const auto from = SenderId();
+        g_combatOf[from].store(d.inCombat != 0, std::memory_order_relaxed);
+        PLOG_INFO("[DOWNED] player {} combat-state received = {}"sv, from, d.inCombat);
     }
 
     // ENet receive thread - queue only (engine mutation happens on the game
@@ -1513,9 +1577,8 @@ namespace Pulsar::Coop::Mortality
         PlayerReviveData d{};
         std::memcpy(&d, a_data + 1, sizeof(d));
 
-        auto& net = Pulsar::Network::GetSingleton();
-        const std::uint8_t mySlot = net.IsHost() ? 0 : 1;
-        if (d.playerSlot != mySlot) return;
+        const std::uint8_t mySlot = LocalId();
+        if (d.playerSlot != mySlot) return;   // a revive for another downed player
 
         g_medpackRevivePending.store(true, std::memory_order_relaxed);
         PLOG_INFO("[DOWNED] medpack revive request received (slot {})"sv, d.playerSlot);
@@ -1530,12 +1593,18 @@ namespace Pulsar::Coop::Mortality
     {
         if (!a_self || !a_activator) return false;
         if (!Pulsar::Network::GetSingleton().IsConnected()) return false;
-        if (g_localDowned || !g_remoteDowned.load(std::memory_order_relaxed)) return false;
+        if (g_localDowned || !AnyRemoteDowned()) return false;
         if (!SafeIsLocalPlayer(reinterpret_cast<RE::Actor*>(a_activator))) return false;
 
         // DIAG: while the partner is downed, log what the player's interact actually
         // hits - tells us whether the clone produces Activate calls at all.
-        const bool isClone = SafeIsRemoteClone(reinterpret_cast<RE::Actor*>(a_self));
+        // Which downed player's figure was activated, if any.
+        std::uint8_t target = 0xFF;
+        for (std::uint8_t id = 0; id < 4 && target == 0xFF; ++id) {
+            if (id == LocalId() || !g_downedOf[id].load(std::memory_order_relaxed)) continue;
+            if (reinterpret_cast<RE::Actor*>(a_self) == Pulsar::RemotePlayer::GetRemotePlayerFigure(id).GetRemoteActor()) target = id;
+        }
+        const bool isClone = target != 0xFF;
         PLOG_INFO("[REVIVE-DIAG] wayA activate self=0x{:X} isClone={}"sv,
                   reinterpret_cast<std::uintptr_t>(a_self), isClone ? 1 : 0);
         if (!isClone) return false;
@@ -1545,7 +1614,7 @@ namespace Pulsar::Coop::Mortality
         if (nowMs - s_lastFireMs < 1000) return true;  // debounce, still consume
         s_lastFireMs = nowMs;
 
-        const std::uint8_t downedSlot = Pulsar::Network::GetSingleton().IsHost() ? 1 : 0;
+        const std::uint8_t downedSlot = target;
         SendRevive(downedSlot);
         PLOG_INFO("[DOWNED] medpack revive triggered for slot {} (Activate on downed clone; no item consume yet)"sv,
                   downedSlot);

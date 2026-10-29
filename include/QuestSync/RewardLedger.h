@@ -16,8 +16,14 @@
 //   - Due()           : peer rewards whose hold ran out, minus what the local
 //                       player already got of the same item in the window.
 //                       Every expired one is returned, owed or not.
+//
+// 2-4 players: when a stage script rewards every player, each of them announces it, so
+// the same reward arrives once per other player. Each sender's announcement is matched
+// on its own against what the local player holds (its own reward, and mirrors granted for
+// other senders), so the local player ends up with one copy, not one per sender.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -53,10 +59,13 @@ namespace Pulsar::QuestSync {
             return r;
         }
 
-        void Peer(std::uint32_t a_base, std::int32_t a_count, std::uint64_t a_nowMs)
+        // a_sender: the player ID of the peer that announced it (0-3).
+        void Peer(std::uint32_t a_base, std::int32_t a_count, std::uint64_t a_nowMs, std::uint8_t a_sender = 1)
         {
-            if (!a_base || a_count <= 0) return;
-            m_pending.push_back({ a_base, a_count, a_nowMs });
+            if (!a_base || a_count <= 0 || a_sender >= kSenders) return;
+            Entry e{ a_base, a_count, a_nowMs };
+            e.sender = a_sender;
+            m_pending.push_back(e);
         }
 
         std::vector<RewardGrant> Due(std::uint64_t a_nowMs)
@@ -68,10 +77,15 @@ namespace Pulsar::QuestSync {
                     keep.push_back(p);
                     continue;
                 }
-                const std::int32_t cancelled = Consume(m_local, p.base, p.count, p.ms);
+                std::int32_t cancelled = ConsumeFor(m_local, p.sender, p.base, p.count, p.ms);
+                cancelled += ConsumeFor(m_granted, p.sender, p.base, p.count - cancelled, p.ms);
                 const std::int32_t owed = p.count - cancelled;
                 out.push_back({ p.base, owed, cancelled });
-                if (owed > 0) m_granted.push_back({ p.base, owed, a_nowMs });
+                if (owed > 0) {
+                    Entry g{ p.base, owed, a_nowMs };
+                    g.used[p.sender] = owed;   // a later reward from the same sender is a new one
+                    m_granted.push_back(g);
+                }
             }
             m_pending.swap(keep);
             Prune(a_nowMs);
@@ -88,12 +102,35 @@ namespace Pulsar::QuestSync {
         }
 
     private:
+        static constexpr std::size_t kSenders = 4;
+
         struct Entry
         {
             std::uint32_t base;
             std::int32_t  count;
             std::uint64_t ms;
+            std::uint8_t  sender = 1;                     // pending: who announced it
+            std::array<std::int32_t, kSenders> used{};    // held: matched per sender so far
         };
+
+        // Matches a sender's announcement against what the local player holds: each
+        // held entry can cancel up to its count once per sender.
+        static std::int32_t ConsumeFor(std::vector<Entry>& a_list, std::uint8_t a_sender, std::uint32_t a_base,
+                                       std::int32_t a_count, std::uint64_t a_refMs)
+        {
+            std::int32_t taken = 0;
+            for (auto& e : a_list) {
+                if (taken >= a_count) break;
+                if (e.base != a_base || e.count <= 0) continue;
+                if (e.ms + kWindowMs < a_refMs) continue;
+                const std::int32_t free = e.count - e.used[a_sender];
+                if (free <= 0) continue;
+                const std::int32_t t = (std::min)(free, a_count - taken);
+                e.used[a_sender] += t;
+                taken += t;
+            }
+            return taken;
+        }
 
         // Takes up to a_count of a_base from entries no older than kWindowMs
         // before a_refMs. Returns how much it took.

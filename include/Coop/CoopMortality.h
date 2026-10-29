@@ -14,7 +14,9 @@ namespace Pulsar::Coop::Mortality
     // gate clone-mutating ops on this: e.g. EquipSync's apply (DoEquipArmor/Weapon)
     // must NOT run while the clone is downed - its 3D/graph update resets the
     // bleedout/knee pose (confirmed: armor sync blocked the downed animation).
-    bool IsRemoteDowned();
+    bool IsRemoteDowned();   // the first partner (its figure carries the downed pose)
+    // 2-4 players: a player left; their downed and combat state no longer count.
+    void ForgetPlayer(std::uint8_t a_id);
 
     // True while THIS (local) player is downed (HP hit 0 → bleedout). EquipSync
     // gates its SEND on this: while locally downed, do NOT scan/broadcast our worn

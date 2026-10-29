@@ -23,7 +23,7 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
 | Spaceflight: launch, cruise, manual flight, docking, station entry; ship position | partial | Launch done (vote). Flight input is mirrored to the partner. Ship position sync is switched off in the code (`kShipPosSyncEnabled = false`). Docking exists, rough. | 6 |
 | Quest/event sync: quest states, triggers, scripted events (doors, cutscenes, interactions) | partial | Quest stages, doors, locks, activators and dialogue exist. Cutscenes: missing. | 5 |
 | Stability: SFSE + Address Library, crash logging, installer/launcher, lobby UI, crash reports, character reset | partial | SFSE and Address Library yes. Crash guard absorbs known engine crashes, but no crash dumps or reports are written. The launcher (installer, lobby, character backup and reset) is the original C# tool. | 2 (launcher join codes), 7 (crash dumps and reports) |
-| Target: 2-4 players, PC Steam, clear versions | partial | Versions documented (COMPATIBILITY.md). Up to 4 players connect (`MaxPlayers`); the host forwards between clients; every player has a figure on every screen. Bot-tested with 2 game copies plus a headless third player. Votes, rewards, loot and other per-player features still count only the first partner (phase 3c). | 3 |
+| Target: 2-4 players, PC Steam, clear versions | partial | Versions documented (COMPATIBILITY.md). Up to 4 players connect (`MaxPlayers`); the host forwards between clients; every player has a figure on every screen. Bot-tested with 2 game copies plus a headless third player. Takeoff vote, quest rewards, downed/revive, item drops, kill XP and the pilot's flight data work for every player (phase 3c). Voice is still first partner only. | 3 |
 
 ## Loot, inventory and progression
 
@@ -41,7 +41,7 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
 |---|---|---|---|
 | Fly together in the same ship, multi-crew (pilot, gunner, engineer) | partial | The partner comes along in the cockpit as a passenger. Roles: missing. | 6 |
 | Doors move only the user | done | Bot `door`, twin fails. | 1 |
-| Takeoff vote; everyone moved aboard; then takeoff | done | Bot `takeoff`, also with the partner outside the ship; twin fails. | 1 (3-4 players in 3) |
+| Takeoff vote; everyone moved aboard; then takeoff | done | Bot `takeoff` with 2 and 3 players (the launch waits for the last ready player), also with the partner outside the ship; twins fail. The bot now opens the takeoff menu as a pilot does (the phase 1 test bypassed the hold). | 1, 3 |
 
 ## Co-op gameplay
 

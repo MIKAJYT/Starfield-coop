@@ -62,6 +62,7 @@ namespace Pulsar::TestBot
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
             bool        takeoffPartnerOutside = false;  // takeoff: the client leaves the ship first, so the vote must move it aboard
             bool        takeoffF8DuringVote = false;    // takeoff: the pilot "presses" F8 (regroup key) while the vote waits
+            bool        takeoffMenuOnly = false;        // takeoff experiment: open the takeoff menu, never fire the launch
         };
 
         // Loot scenario progress (host). The kill happens at the usual act time;
@@ -139,6 +140,7 @@ namespace Pulsar::TestBot
                 else if (key == "notifytest") s.notifyTest = value;
                 else if (key == "takeoffpartneroutside") s.takeoffPartnerOutside = (value == "1" || value == "true");
                 else if (key == "takeofff8duringvote") s.takeoffF8DuringVote = (value == "1" || value == "true");
+                else if (key == "takeoffmenuonly") s.takeoffMenuOnly = (value == "1" || value == "true");
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -668,9 +670,11 @@ namespace Pulsar::TestBot
                 if (a_now - s_state.takeoffSatAtMs < 3000) return;   // let the menu settle
                 const ShipSnap sh = SnapShip(a_player);
                 Trace("takeoff: asking for the launch");
-                const bool fired = Pulsar::SpaceSync::FireTakeoffLaunchForTest();
-                std::snprintf(msg, sizeof(msg), "takeoff: %s, seated=%d, launch fired=%d",
-                              s_state.takeoffSeatInfo.c_str(), sh.seated ? 1 : 0, fired ? 1 : 0);
+                const bool menu = Pulsar::SpaceSync::IsTakeoffMenuOpenForTest();
+                const bool fired = s_state.cfg.takeoffMenuOnly ? true : Pulsar::SpaceSync::FireTakeoffLaunchForTest();
+                if (s_state.cfg.takeoffMenuOnly) Trace("takeoff: TakeoffMenuOnly - launch event NOT fired");
+                std::snprintf(msg, sizeof(msg), "takeoff: %s, seated=%d, launch fired=%d, menu=%d",
+                              s_state.takeoffSeatInfo.c_str(), sh.seated ? 1 : 0, fired ? 1 : 0, menu ? 1 : 0);
                 s_state.actionInfo = msg;
                 s_state.takeoffStep = 3;
                 s_state.takeoffSatAtMs = a_now;

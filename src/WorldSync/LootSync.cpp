@@ -2106,6 +2106,7 @@ namespace {
         int32_t  count;
         uint16_t modSentinel;                // M.2 V16
         std::vector<uint32_t> resolvedMods;  // F.2: client-local mod FormIDs
+        uint8_t  sender = 0xFF;              // 2-4 players: who dropped it (their figure is the spot)
     };
 
     static std::mutex             s_pendingMutex;
@@ -3636,7 +3637,8 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
             std::lock_guard g(s_pendingMutex);
             s_pendingDrops.push_back({
                 resolved, d.itemFormType, d.count,
-                d.modSentinel, std::move(resolvedMods)
+                d.modSentinel, std::move(resolvedMods),
+                Pulsar::Network::NetworkHost::CurrentSender()
             });
         }
         PLOG_INFO(
@@ -4152,7 +4154,7 @@ void DrainPendingPickups()
         }
     }
     for (auto& dp : dropWork) {
-        auto* clone = Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteActor();
+        auto* clone = Pulsar::RemotePlayer::GetRemotePlayerFigure(dp.sender).GetRemoteActor();   // the dropper's figure
         if (!clone) {
             PLOG_WARN(
                 "[PULSAR] F.1.d: drop replay skipped - no remote clone for base=0x{:08X}"sv,

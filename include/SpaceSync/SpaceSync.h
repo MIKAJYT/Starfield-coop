@@ -35,6 +35,7 @@ namespace Pulsar::SpaceSync {
     // itself is FireTakeoffLaunchForTest. Run 20261028-203830: the two together
     // take the ship off.
     void OpenTakeoffMenuForTest();
+    bool IsTakeoffMenuOpenForTest();
 
     // Test bot: act as if F8 was pressed, on the next TickFollowApply (the raw-F8
     // takeoff-launch debug key, which only runs with DevHotkeys = 1).
@@ -47,7 +48,8 @@ namespace Pulsar::SpaceSync {
     // Takeoff ready vote, partner: move the local player into the pilot's cell
     // (as reported over the network) with a Papyrus MoveTo to a reference there,
     // unless it is already in that cell. Returns what it did.
-    const char* BoardPartnerShip();
+    // a_pilot: the player ID of the pilot (2-4 players; the host is 0).
+    const char* BoardPartnerShip(std::uint8_t a_pilot = 0);
 
     // Test bot: the Papyrus PulsarFurnSync.DoPlayerFollowMoveTo dispatch that
     // BoardPartnerShip and the follow paths use. True if the VM accepted it.

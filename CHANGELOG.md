@@ -16,6 +16,28 @@ The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
 
+## Unreleased - full co-op spec, phase 3: 2-4 players
+
+- **Up to 4 players** (`MaxPlayers`, default 4). The host forwards each player's data to
+  the others and tells everyone who is in the session. A joining player loads the save
+  alone. *Bot-tested* with two game copies and a headless third player; twin `MaxPlayers =
+  2` refuses player 3.
+- **Every player has a figure on every screen.** Players 3 and 4 spawn from C++
+  (`ExtraPlayerFigures`, default 1). *Bot-tested*: host and client both see player 3's
+  figure near the host and moving; twin with the switch off fails.
+- **Per-player features:** the takeoff vote waits for every player and boards into the
+  pilot's ship; quest rewards arrive once per player even when several players announce
+  them; downed/revive per player (all-down game over, revive the downed player in range);
+  dropped items appear at the dropper; kill XP and a client pilot's flight data work.
+  *Takeoff vote bot-tested with 3 players* (the launch waits for player 3; twin where
+  player 3 never answers: no takeoff). Rewards: unit tests. Downed/revive, drops, XP:
+  not tested in game yet. Voice: still first partner only.
+- **Takeoff test fixed.** The bot called `LaunchImmediate`, which takes off by itself, so
+  the phase 1 test never tested the vote's hold (it passed by timing). The bot now opens the
+  takeoff menu as a pilot does and fires the launch event the vote holds.
+- **The F9 buddy works.** Its `PlaceAtMe` passed 5 of the 8 arguments Starfield needs and
+  never spawned anything.
+
 ## Unreleased - full co-op spec, phase 2: direct sessions
 
 - **Join by code, no relay or lobby server** (`DirectSession = 1`). The host's game

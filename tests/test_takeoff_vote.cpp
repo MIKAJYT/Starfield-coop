@@ -62,3 +62,14 @@ TEST(TakeoffVote, CancelEndsTheVote)
     CHECK(v.Ready(v.Id(), 1, 2000) == Answer::kNone);
     CHECK(v.Tick(1000 + TakeoffVotePolicy::kTimeoutMs) == Step::kNone);
 }
+
+TEST(TakeoffVote, ThreePlayersWaitForBoth)
+{
+    TakeoffVotePolicy v;
+    CHECK(v.LaunchRequested(1000, 2) == Request::kHoldAndAsk);
+    CHECK(v.Ready(v.Id(), 1, 2000) == Answer::kNone);       // player 1 ready
+    CHECK(v.Ready(v.Id(), 1, 2500) == Answer::kNone);       // the same player again: still 1 of 2
+    CHECK(v.ReadyCount() == 1);
+    CHECK(v.Ready(v.Id(), 2, 9000) == Answer::kSendGo);     // player 2 ready: go
+    CHECK(v.Tick(9000 + TakeoffVotePolicy::kBoardMs) == Step::kLaunch);
+}

@@ -114,7 +114,8 @@ void OnPacketReceived(const std::uint8_t* a_data, std::size_t a_length)
               d.base, resolved, d.count, d.reason);
     s_peerRewards.fetch_add(1);
     std::lock_guard lk(s_mutex);
-    s_ledger.Peer(resolved, d.count, GetTickCount64());
+    const std::uint8_t sender = Pulsar::Network::NetworkHost::CurrentSender();   // per sender (2-4 players)
+    s_ledger.Peer(resolved, d.count, GetTickCount64(), sender < 4 ? sender : std::uint8_t{ 1 });
 }
 
 void Tick()

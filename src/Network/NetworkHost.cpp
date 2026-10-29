@@ -1353,6 +1353,8 @@ namespace Pulsar::Network
                 if (Routing::ParseRoster(a_packet->data, a_packet->dataLength, r)) {
                     m_localPlayerId.store(r.yourId, std::memory_order_release);
                     m_playerCount.store(static_cast<uint8_t>(r.ids.size()), std::memory_order_release);
+                    for (uint8_t id = 0; id < Routing::kMaxPlayers; ++id)   // players who left
+                        if (std::find(r.ids.begin(), r.ids.end(), id) == r.ids.end()) Pulsar::Coop::Mortality::ForgetPlayer(id);
                     PLOG_DIAG("[PULSAR] co-op: you are player {} of {} in the session"sv, r.yourId, r.ids.size());
                 }
                 return;
@@ -1370,7 +1372,16 @@ namespace Pulsar::Network
         const uint8_t pt = a_packet->data[0];
         const bool figureData = Pulsar::GetConfig().extraPlayerFigures &&
                                 (pt == PKT_POSITION || pt == PKT_BONES || pt == PKT_EQUIP_V2 || pt == PKT_FIRE);
-        if (!fromPrimary && !figureData && Routing::ClassOf(pt) == Routing::Class::kPlayer) {
+        // Handled per sender: figures (above), the takeoff vote, quest rewards, downed/revive,
+        // item drops, kill XP and the pilot's flight data. Still first partner only: voice
+        // (one stream in the companion), cell transits (a client follows the host).
+        const bool perSender = figureData || pt == PKT_TAKEOFF_VOTE || pt == PKT_QUEST_REWARD ||
+                               pt == PKT_PLAYER_DOWNED || pt == PKT_PLAYER_REVIVE || pt == PKT_PLAYER_COMBAT ||
+                               pt == PKT_LOOT_DROP || pt == PKT_KILL_XP ||
+                               // flight data: from whoever is the pilot (one at a time)
+                               pt == PKT_SHIP_POS || pt == PKT_FLIGHT_STATE || pt == PKT_FLIGHT_INPUT ||
+                               pt == PKT_PMO_PAYLOAD || pt == PKT_SHIP_TRANSFORM || pt == PKT_SHIP_FIRE;
+        if (!fromPrimary && !perSender && Routing::ClassOf(pt) == Routing::Class::kPlayer) {
             static std::atomic<uint64_t> s_otherPlayerDrops{ 0 };
             if ((s_otherPlayerDrops.fetch_add(1) & 0x3FF) == 0)
                 PLOG_INFO("[PULSAR] [Players] player {} data 0x{:02X} not applied yet (first partner only)"sv,
@@ -2109,6 +2120,7 @@ namespace Pulsar::Network
         for (auto& s : m_slots) if (s.peer) { next = &s; break; }
         if (m_isHost && next) {
             PLOG_DIAG("[PULSAR] co-op: player {} left ({} players in the session)"sv, leftId, PlayerCount());
+            Pulsar::Coop::Mortality::ForgetPlayer(leftId);
             SendRoster();
             if (!wasPrimary) {                // the first partner stays; only this player's figure goes
                 RemotePlayer::GetRemotePlayerFigure(leftId).RequestDespawn();

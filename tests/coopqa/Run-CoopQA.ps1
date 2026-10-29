@@ -66,6 +66,9 @@ param(
     # 2-4 players: once both copies see each other, a headless fake player joins as player 3
     # (tests\RelWithDebInfo\pulsar_fakepeer.exe). The two copies must play on undisturbed.
     [switch]$ThirdPlayer,
+    # -ThirdPlayer + takeoff: player 3 answers the takeoff vote "ready" this many ms after the
+    # request (-1 = never: twin, the ship must not take off).
+    [int]$ThirdPlayerVoteMs = 20000,
     # Debugging: Papyrus script logs in the test copies (Documents\My Games\Starfield\Logs\Script).
     [switch]$PapyrusLog,
     [switch]$StaleJoinCode,
@@ -937,7 +940,7 @@ try {
         }
         if ($ThirdPlayer -and -not $fakeProc -and $hs -and $cs -and $hs.cloneVisible -and $cs.cloneVisible) {
             $fakeExe = Join-Path $PSScriptRoot "..\..\build\vs\tests\RelWithDebInfo\pulsar_fakepeer.exe"
-            $fakeProc = Start-Process $fakeExe -ArgumentList "--host 127.0.0.1 --port $Port --mode circle --radius 2 --name QA-player3 --duration 240 --no-reconnect" `
+            $fakeProc = Start-Process $fakeExe -ArgumentList "--host 127.0.0.1 --port $Port --mode circle --radius 2 --name QA-player3 --duration 300 --no-reconnect --vote-ready-after $ThirdPlayerVoteMs" `
                 -RedirectStandardOutput (Join-Path $runDir "fakepeer.log") -RedirectStandardError (Join-Path $runDir "fakepeer-err.log") -WindowStyle Hidden -PassThru
             $fakeStartedAt = Get-Date
             W "third player (fake peer) started, pid $($fakeProc.Id)"
@@ -949,11 +952,21 @@ try {
                 $hostLog = Join-Path $Instances "$HostSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log"
                 $fakeLog = Get-Content -LiteralPath (Join-Path $runDir "fakepeer.log") -ErrorAction SilentlyContinue
                 $saves = @(Read-SharedLines $clientLog 'WorldSync: received save').Count
+                if ($Scenario -eq "takeoff") { $saves = 1 }   # takeoff sends every player a fresh save
                 if (-not (Read-SharedLines $hostLog 'joined (3 players in the session)')) { $score.Result = "FAIL"; $score.Reasons.Add("the host never had 3 players") }
                 elseif (-not (Read-SharedLines $clientLog 'of 3 in the session')) { $score.Result = "FAIL"; $score.Reasons.Add("the client never learned of player 3 (roster)") }
                 elseif (-not ($fakeLog -match 'SAVE_TRANSFER')) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never got its save") }
                 elseif (-not ($fakeLog -match '\b(FROM|0xA8)=')) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never got player 1's packets forwarded") }
                 elseif ($saves -ne 1) { $score.Result = "FAIL"; $score.Reasons.Add("the client got $saves saves - player 3's join made it reload") }
+                elseif ($Scenario -eq "takeoff") {
+                    # The vote must have asked a crew of 2 and waited for player 3's "ready".
+                    $readyMatch = [regex]::Match(($fakeLog -join "`n"), 'ready sent wallMs=(\d+)')
+                    $space = @($hostSeen | Sort-Object wallMs | Where-Object { $_.ship.inSpace }) | Select-Object -First 1
+                    if (-not (Read-SharedLines $hostLog 'asks the crew (0/2 ready)')) { $score.Result = "FAIL"; $score.Reasons.Add("the host's vote did not ask a crew of 2") }
+                    elseif (-not $readyMatch.Success) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never answered the vote") }
+                    elseif (-not $space -or [long]$space.wallMs -lt [long]$readyMatch.Groups[1].Value) { $score.Result = "FAIL"; $score.Reasons.Add("the ship took off before player 3 was ready") }
+                    else { W ("third player: the vote waited for player 3 (ready {0} ms before the host reached space)" -f ([long]$space.wallMs - [long]$readyMatch.Groups[1].Value)) }
+                }
                 else {
                     # Player 3 (ID 2) walks a 2 m circle near the host: on both copies its own
                     # figure must be there (3D loaded), near the host, and moving.

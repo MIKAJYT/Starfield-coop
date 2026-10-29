@@ -22,11 +22,13 @@ namespace {
 
     enum Op : std::uint8_t { kRequest = 1, kReady = 2, kGo = 3, kCancelled = 4 };
 
-    constexpr int kPartnerSlot = 1;   // one partner today (single m_peer)
-
+    // 2-4 players: the pilot waits for every other player; each "ready" counts by its
+    // sender's player ID. A crew member remembers which player asked, so votes of two
+    // pilots never mix and "go" boards into that pilot's ship.
     std::mutex        s_mutex;
     TakeoffVotePolicy s_pilot;                  // guarded by s_mutex
     std::uint32_t     s_partnerRequest = 0;     // partner: open request id
+    std::uint8_t      s_partnerPilot = 0;       // partner: player ID of the pilot who asked
     std::uint64_t     s_partnerRequestMs = 0;
     bool              s_partnerAnswered = false;
     std::uint32_t     s_partnerGo = 0;          // partner: go received, board on the game thread
@@ -73,13 +75,13 @@ bool HoldLaunch()
     std::uint32_t id;
     {
         std::lock_guard lk(s_mutex);
-        r = s_pilot.LaunchRequested(GetTickCount64(), /*crew=*/1);
+        r = s_pilot.LaunchRequested(GetTickCount64(), static_cast<int>(net.PlayerCount()) - 1);
         id = s_pilot.Id();
     }
     if (r == TakeoffVotePolicy::Request::kPass) return false;
     if (r == TakeoffVotePolicy::Request::kHoldAndAsk) {
         Send(kRequest, id);
-        PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] launch held, vote {} asks the crew (0/1 ready)"sv, id);
+        PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] launch held, vote {} asks the crew (0/{} ready)"sv, id, net.PlayerCount() - 1);
         Notify("Takeoff: waiting for your crew to be ready");
     } else {
         PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] launch held, vote {} still open"sv, id);
@@ -93,28 +95,32 @@ void OnPacketReceived(const std::uint8_t* a_data, std::size_t a_length)
     if (!a_data || a_length < 1 + sizeof(TakeoffVoteData)) return;
     TakeoffVoteData d{};
     std::memcpy(&d, a_data + 1, sizeof(d));
+    const std::uint8_t sender = Pulsar::Network::NetworkHost::CurrentSender();
     std::lock_guard lk(s_mutex);
     switch (d.op) {
     case kRequest:
         s_partnerRequest = d.voteId;
+        s_partnerPilot = sender;
         s_partnerRequestMs = GetTickCount64();
         s_partnerAnswered = false;
-        PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] partner wants to take off (vote {})"sv, d.voteId);
+        PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] player {} wants to take off (vote {})"sv, sender, d.voteId);
         break;
     case kReady:
-        if (s_pilot.Ready(d.voteId, kPartnerSlot, GetTickCount64()) == TakeoffVotePolicy::Answer::kSendGo) {
+        if (!s_pilot.Open()) break;   // another pilot's vote: not ours to count
+        if (s_pilot.Ready(d.voteId, sender, GetTickCount64()) == TakeoffVotePolicy::Answer::kSendGo) {
             s_sendGo = d.voteId;   // sent from Tick: Send here would re-lock the ENet mutex
             PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] crew ready for vote {} - boarding, launch in {} ms"sv,
                       d.voteId, TakeoffVotePolicy::kBoardMs);
         } else {
-            PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] ready for vote {} ignored (not open)"sv, d.voteId);
+            PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] player {} ready for vote {} ({}/{})"sv,
+                      sender, d.voteId, s_pilot.ReadyCount(), s_pilot.Crew());
         }
         break;
     case kGo:
-        if (d.voteId == s_partnerRequest) s_partnerGo = d.voteId;
+        if (d.voteId == s_partnerRequest && sender == s_partnerPilot) s_partnerGo = d.voteId;
         break;
     case kCancelled:
-        if (d.voteId == s_partnerRequest) {
+        if (d.voteId == s_partnerRequest && sender == s_partnerPilot) {
             s_partnerRequest = 0;
             PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] partner's takeoff vote {} cancelled"sv, d.voteId);
         }
@@ -153,6 +159,7 @@ void Tick()
     // Partner side.
     if (!net.IsConnected()) return;
     std::uint32_t request, go;
+    std::uint8_t pilot;
     bool answered;
     {
         std::lock_guard lk(s_mutex);
@@ -162,12 +169,14 @@ void Tick()
         answered = s_partnerAnswered;
         go = s_partnerGo;
         s_partnerGo = 0;
+        pilot = s_partnerPilot;
     }
     static std::uint32_t s_shown = 0;
     if (request && request != s_shown) {
         s_shown = request;
         char msg[96];
-        std::snprintf(msg, sizeof(msg), "Your partner wants to take off. Press %s when ready.", KeyName());
+        if (net.PlayerCount() > 2) std::snprintf(msg, sizeof(msg), "Player %u wants to take off. Press %s when ready.", pilot + 1u, KeyName());
+        else                       std::snprintf(msg, sizeof(msg), "Your partner wants to take off. Press %s when ready.", KeyName());
         Notify(msg);
     }
     const bool down = (GetAsyncKeyState(Pulsar::GetConfig().hotkeyTakeoffReady) & 0x8000) != 0;
@@ -183,7 +192,7 @@ void Tick()
         Notify("Takeoff: you are ready");
     }
     if (go) {
-        const char* what = Pulsar::SpaceSync::BoardPartnerShip();
+        const char* what = Pulsar::SpaceSync::BoardPartnerShip(pilot);
         PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] vote {} passed - boarding: {}"sv, go, what);
         std::lock_guard lk(s_mutex);
         if (s_partnerRequest == go) s_partnerRequest = 0;

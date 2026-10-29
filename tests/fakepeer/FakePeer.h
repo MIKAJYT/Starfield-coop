@@ -49,6 +49,8 @@ namespace Pulsar::FakePeer
         float       anchor[3] = {};
         uint32_t    anchorCell = 0;
         std::string saveOut;                   // write a received save here (empty = discard)
+        // Takeoff vote: answer a pilot's request with "ready" this many ms later (-1 = never).
+        int         voteReadyAfterMs = 5000;
     };
 
     // Per-type counters for everything received (index = packet type byte).
@@ -104,6 +106,7 @@ namespace Pulsar::FakePeer
     private:
         void OnReceive(const uint8_t* a_data, size_t a_len);
         void OnPlain(const uint8_t* a_data, size_t a_len);
+        void OnTakeoffVote(const uint8_t* a_data, size_t a_len);
         void SendHello();
         void SendApp(const uint8_t* a_data, size_t a_len, bool a_reliable, int a_channel = 0);
         void SendAfterSecure();     // handshake + time/weather request
@@ -126,6 +129,8 @@ namespace Pulsar::FakePeer
         std::deque<HostSample>  m_hostHistory;     // follow mode
         Clock::time_point       m_start{};
         Clock::time_point       m_nextSend{};
+        uint32_t                m_voteToAnswer = 0;   // takeoff vote to answer "ready"
+        Clock::time_point       m_voteAnswerAt{};
         float                   m_lastXYZ[3] = {};
         bool                    m_haveLast = false;
         Stats                   m_stats;

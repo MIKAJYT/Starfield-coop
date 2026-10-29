@@ -48,6 +48,7 @@ namespace {
             "                       (CELL hex, default 0 = no cell check on the host)\n"
             "  --no-handshake       skip PKT_HANDSHAKE (host then does not quicksave/send a save)\n"
             "  --no-load-complete   do not answer a save with PKT_CLIENT_LOAD_COMPLETE\n"
+            "  --vote-ready-after MS  answer a takeoff vote ready after MS (default 5000, -1 = never)\n"
             "  --save-out PATH      write a received save file to PATH\n"
             "  --duration S         quit after S seconds (default: run until Ctrl+C)\n"
             "  --no-reconnect       exit instead of reconnecting when the link drops\n");
@@ -120,6 +121,7 @@ int main(int argc, char** argv)
         }
         else if (a == "--no-handshake")     o.sendHandshake = false;
         else if (a == "--no-load-complete") o.sendLoadComplete = false;
+        else if (a == "--vote-ready-after") o.voteReadyAfterMs = std::atoi(next());
         else if (a == "--save-out")         o.saveOut = next();
         else if (a == "--duration")         durationS = std::atof(next());
         else if (a == "--no-reconnect")     reconnect = false;
