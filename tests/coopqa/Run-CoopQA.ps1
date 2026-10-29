@@ -63,6 +63,9 @@ param(
     # Direct session: the client joins only by the join code the host published (no HostIP).
     # -StaleJoinCode (twin) gives the client the code of the previous host session instead.
     [switch]$JoinByCode,
+    # 2-4 players: once both copies see each other, a headless fake player joins as player 3
+    # (tests\RelWithDebInfo\pulsar_fakepeer.exe). The two copies must play on undisturbed.
+    [switch]$ThirdPlayer,
     [switch]$StaleJoinCode,
     # Extra PULSAR.ini lines for both copies ("Key = value", separated by ";"), for bisects.
     [string]$ExtraIni = "",
@@ -740,6 +743,7 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
 
 # ---- processes this run owns ------------------------------------------------
 $owned = @{}
+$fakeProc = $null   # -ThirdPlayer
 function Start-Slot([string]$slot) {
     $game = Join-Path $Instances "$slot\game"
     $loader = Start-Process (Join-Path $game "sfse_loader.exe") -WorkingDirectory $game -PassThru
@@ -892,7 +896,7 @@ try {
 
     $hostSeen = New-Object System.Collections.Generic.List[object]; $clientSeen = New-Object System.Collections.Generic.List[object]
     if ($s) { $hostSeen.Add($s) }
-    $lastLog = Get-Date; $clientStart = NowWallMs; $lowRam = 0; $replyChecked = $false
+    $lastLog = Get-Date; $clientStart = NowWallMs; $lowRam = 0; $replyChecked = $false; $fakeProc = $null; $fakeStartedAt = $null
     $hs = $s; $cs = $null
     while ($true) {
         Start-Sleep -Seconds 1
@@ -928,6 +932,28 @@ try {
                 $(if ($hs) { $hs.inWorld } else { "-" }), $(if ($hs) { $hs.connected } else { "-" }), $(if ($hs) { $hs.cloneVisible } else { "-" }), $(if ($hs) { $hs.acted } else { "-" }), $(if ($hs) { $hs.playerCell } else { "-" }),
                 $(if ($cs) { $cs.inWorld } else { "-" }), $(if ($cs) { $cs.connected } else { "-" }), $(if ($cs) { $cs.cloneVisible } else { "-" }), $(if ($cs) { $cs.playerCell } else { "-" }), (FreeGB))
         }
+        if ($ThirdPlayer -and -not $fakeProc -and $hs -and $cs -and $hs.cloneVisible -and $cs.cloneVisible) {
+            $fakeExe = Join-Path $PSScriptRoot "..\..\build\vs\tests\RelWithDebInfo\pulsar_fakepeer.exe"
+            $fakeProc = Start-Process $fakeExe -ArgumentList "--host 127.0.0.1 --port $Port --mode circle --radius 2 --name QA-player3 --duration 240 --no-reconnect" `
+                -RedirectStandardOutput (Join-Path $runDir "fakepeer.log") -RedirectStandardError (Join-Path $runDir "fakepeer-err.log") -WindowStyle Hidden -PassThru
+            $fakeStartedAt = Get-Date
+            W "third player (fake peer) started, pid $($fakeProc.Id)"
+        }
+        if ($ThirdPlayer -and $score.Result -eq "PASS") {
+            # Give player 3 time to join, get its own save and see player 1's packets.
+            if (-not $fakeStartedAt -or ((Get-Date) - $fakeStartedAt).TotalSeconds -lt 40) { $score.Result = "PENDING" }
+            else {
+                $hostLog = Join-Path $Instances "$HostSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log"
+                $fakeLog = Get-Content -LiteralPath (Join-Path $runDir "fakepeer.log") -ErrorAction SilentlyContinue
+                $saves = @(Read-SharedLines $clientLog 'WorldSync: received save').Count
+                if (-not (Read-SharedLines $hostLog 'joined (3 players in the session)')) { $score.Result = "FAIL"; $score.Reasons.Add("the host never had 3 players") }
+                elseif (-not (Read-SharedLines $clientLog 'of 3 in the session')) { $score.Result = "FAIL"; $score.Reasons.Add("the client never learned of player 3 (roster)") }
+                elseif (-not ($fakeLog -match 'SAVE_TRANSFER')) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never got its save") }
+                elseif (-not ($fakeLog -match '\b(FROM|0xA8)=')) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never got player 1's packets forwarded") }
+                elseif ($saves -ne 1) { $score.Result = "FAIL"; $score.Reasons.Add("the client got $saves saves - player 3's join made it reload") }
+                else { W "third player: joined, got its own save, receives player 1's packets; the client loaded 1 save" }
+            }
+        }
         if ($JoinByCode -and -not $StaleJoinCode -and -not $replyChecked -and $cs -and $cs.connected) {
             # The launcher's reply-code handover (PULSAR_ReplyCodeIn.txt): another session's
             # code must be refused, this session's accepted.
@@ -954,6 +980,7 @@ try {
 } catch {
     if ($_.Exception.Message -notin @("timeout", "measure-done")) { $why += $_.Exception.Message }
 } finally {
+    if ($fakeProc -and -not $fakeProc.HasExited) { Stop-Process -Id $fakeProc.Id -Force -ErrorAction SilentlyContinue }
     foreach ($slot in @($ClientSlot, $HostSlot)) { try { Stop-Slot $slot } catch { $why += "closing $slot : $($_.Exception.Message)" } }
 
     # ---- owner protection: verify ------------------------------------------

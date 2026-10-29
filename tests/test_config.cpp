@@ -52,6 +52,14 @@ TEST(Config, TakeoffVoteSettingsAreRead)
     CHECK(!Parse("CoopVoteMessages = 0\n").coopVoteMessages);
 }
 
+TEST(Config, MaxPlayers)
+{
+    CHECK_EQ(Parse("").maxPlayers, 4u);
+    CHECK_EQ(Parse("MaxPlayers = 2\n").maxPlayers, 2u);
+    CHECK_EQ(Parse("MaxPlayers = 9\n").maxPlayers, 4u);   // out of range: default kept
+    CHECK_EQ(Parse("MaxPlayers = 1\n").maxPlayers, 4u);
+}
+
 TEST(Config, DirectSessionSettings)
 {
     const auto d = Parse("");

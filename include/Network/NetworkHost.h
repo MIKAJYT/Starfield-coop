@@ -12,7 +12,7 @@
 namespace Pulsar::Network
 {
     constexpr uint16_t DEFAULT_PORT = 7777;
-    constexpr uint32_t MAX_CLIENTS = 1;
+    constexpr uint32_t MAX_CLIENTS = 3;   // 2-4 players: the host plus up to 3 clients (PULSAR.ini MaxPlayers)
     constexpr uint32_t NUM_CHANNELS = 3;  // 0=control/state, 1=bulk(saves), 2=voice(unreliable). Voice protocol change, both peers must match.
 
     class NetworkHost
@@ -39,7 +39,8 @@ namespace Pulsar::Network
         // Send a specific .sfs file to client. If path empty, uses GetMostRecentSavePath().
         void SendSaveToClient(const std::string& a_path = {});
         // Host-side: trigger quicksave, poll until new save is written, then send it.
-        void BeginHostQuicksaveTransfer();
+        // a_target: the player who loads it (a joining one), 0xFF = every client.
+        void BeginHostQuicksaveTransfer(uint8_t a_target = 0xFF);
         // L.7 V8b - host-side: trigger a CUSTOM-named save (mode=1 via
         // SaveLoadManager dispatch REL::ID 98640) instead of a quicksave,
         // poll until the new file appears, then send it. The point is that
@@ -76,35 +77,66 @@ namespace Pulsar::Network
         // via SetPosition (which is game-thread-only).
         bool ConsumePendingTeleport(float& a_x, float& a_y, float& a_z, float& a_rotZ);
 
+        // 2-4 players (Network/PeerRouting.h). This player's ID (host 0, clients 1-3;
+        // 0xFF on a client until the host's roster arrives), how many players are in the
+        // session, and the sender of the packet being handled (network thread, inside a
+        // packet handler).
+        uint8_t LocalPlayerId() const { return m_localPlayerId.load(std::memory_order_acquire); }
+        uint8_t PlayerCount() const { return m_playerCount.load(std::memory_order_acquire); }
+        static uint8_t CurrentSender();
+
     private:
         void OnConnect(ENetPeer* a_peer);
-        void OnReceive(ENetPeer* a_peer, ENetPacket* a_packet);
+        void OnReceive(ENetPeer* a_peer, ENetPacket* a_packet, uint8_t a_channel = 0);
         void OnDisconnect(ENetPeer* a_peer, uint32_t a_reason = 0);
 
-        // E2E crypto. EncSend encrypts (or queues until the handshake completes)
-        // then sends; RawSendUnenc bypasses crypto (used only for the key-exchange hello).
-        void EncSend(int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable);
-        void RawSendUnenc(int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable);
-        void SendCryptoHello();
-        void FlushPreCryptoTx();
+        // One connection: the host keeps one per client (players 1-3), a client one for
+        // the host. Each has its own E2E key exchange.
+        struct PendingTx { int channel; std::vector<uint8_t> data; bool reliable; };
+        struct PeerSlot
+        {
+            ENetPeer*              peer = nullptr;
+            uint8_t                id = 0;              // player ID of the other side
+            CryptoChannel          crypto;
+            bool                   cryptoReady = false; // shared key derived (peer hello received)
+            std::vector<PendingTx> preCryptoTx;         // app packets sent before the key is ready
+            bool                   decryptedAny = false;
+            int                    decryptFailures = 0;
+            uint64_t               lastAutoBridgeMs = 0; // see the handshake debounce (L.7 D1)
+        };
+        static constexpr size_t kSlots = 3;
+        PeerSlot  m_slots[kSlots];
+        PeerSlot* SlotOf(ENetPeer* a_peer);
+        PeerSlot* AllocSlot(ENetPeer* a_peer);
+        PeerSlot* SlotById(uint8_t a_id);
+        void      FreeSlot(PeerSlot& a_slot);
+        void      SendRoster();            // host: to every client
+        bool      IsPrimary(const PeerSlot& a_slot) const { return a_slot.peer && a_slot.peer == m_peer; }
 
-        CryptoChannel m_crypto;
+        // E2E crypto. EncSend encrypts (or queues until the handshake completes) then
+        // sends to every connected slot; EncSendSlot to one. RawSendUnenc bypasses crypto
+        // (used only for the key-exchange hello).
+        void EncSend(int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable);
+        void EncSendSlot(PeerSlot& a_slot, int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable);
+        void RawSendUnenc(PeerSlot& a_slot, int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable);
+        void SendCryptoHello(PeerSlot& a_slot);
+        void FlushPreCryptoTx(PeerSlot& a_slot);
+
         std::vector<uint8_t> m_authSecret;   // DB-delivered E2E auth secret bytes (anti-MITM); empty = none
         bool          m_e2e = true;          // cached from config at connect
-        bool          m_cryptoReady = false; // shared key derived (peer hello received)
         // Wrong session secret: nothing ever decrypts on the connection (OnReceive).
         static constexpr int kWrongKeyFailures = 20;
-        bool          m_decryptedAny = false;
-        int           m_decryptFailures = 0;
         bool          m_wrongKey = false;    // disconnected for it: no auto-reconnect
-        struct PendingTx { int channel; std::vector<uint8_t> data; bool reliable; };
-        std::vector<PendingTx> m_preCryptoTx; // app packets sent before the key is ready
-        // Guards m_e2e / m_cryptoReady / m_preCryptoTx ONLY. EncSend runs from both the
-        // game thread (Send) and the network thread (quicksave SendSaveToClient), and the
+        // Guards m_e2e and each slot's cryptoReady / preCryptoTx ONLY. EncSend runs from both
+        // the game thread (Send) and the network thread (quicksave SendSaveToClient), and the
         // SendSaveToClient paths do not hold m_enetMutex, so that lock alone does not
         // serialize the queue. This dedicated lock does, and is always innermost: never
-        // held across an enet_* or m_crypto.* call, so it cannot deadlock with m_enetMutex.
+        // held across an enet_* or crypto call, so it cannot deadlock with m_enetMutex.
         mutable std::mutex m_cryptoQueueMtx;
+
+        std::atomic<uint8_t> m_localPlayerId{ 0xFF };
+        std::atomic<uint8_t> m_playerCount{ 1 };
+        uint8_t              m_saveTarget = 0xFF;   // host: the player the next save goes to (0xFF = every client)
 
         ENetHost* m_host = nullptr;
         ENetPeer* m_peer = nullptr;
@@ -184,12 +216,11 @@ namespace Pulsar::Network
         uintmax_t   m_quicksaveCandidateSize = 0;  // last observed size
         uint64_t    m_quicksaveSizeStableSince = 0;
 
-        // L.7 D1 - debounce the auto-bridge fired on every PKT_HANDSHAKE.
-        // A lossy ENet link (timeout 5s) re-handshakes after a hiccup; without
-        // this, the host re-sends the bridge save to a client that is ALREADY
-        // in-world, forcing a save-reload mid-session → clone freed mid-load →
+        // L.7 D1 - debounce the auto-bridge fired on every PKT_HANDSHAKE (per player:
+        // PeerSlot::lastAutoBridgeMs). A lossy ENet link (timeout 5s) re-handshakes after
+        // a hiccup; without it, the host re-sends the bridge save to a client that is
+        // ALREADY in-world, forcing a save-reload mid-session → clone freed mid-load →
         // CTD. We only auto-bridge once per window; a real rejoin can F8.
-        uint64_t    m_lastAutoBridgeMs = 0;  // GetTickCount64() of last handshake-bridge
     };
 
     NetworkHost& GetSingleton();

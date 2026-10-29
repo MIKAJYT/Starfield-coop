@@ -29,6 +29,7 @@
 #include "Network/KeyExchange.h"
 #include "Diag/PerfStats.h"
 #include "Network/DirectSession.h"
+#include "Network/PeerRouting.h"
 #include "UI/HudMessage.h"
 #include "Plugin.h"
 #include "SpaceSync/ShipCombatSync.h"
@@ -357,7 +358,8 @@ namespace Pulsar::Network
         address.host = ENET_HOST_ANY;
         address.port = a_port;
 
-        m_host = enet_host_create(&address, MAX_CLIENTS, NUM_CHANNELS, 0, 0);
+        const uint32_t maxPlayers = std::clamp<uint32_t>(Pulsar::GetConfig().maxPlayers, 2, MAX_CLIENTS + 1);
+        m_host = enet_host_create(&address, maxPlayers - 1, NUM_CHANNELS, 0, 0);
         if (!m_host) {
             PLOG_WARN("Failed to create ENet host on port {}"sv, a_port);
             return false;
@@ -762,7 +764,7 @@ namespace Pulsar::Network
                     OnConnect(event.peer);
                     break;
                 case ENET_EVENT_TYPE_RECEIVE:
-                    OnReceive(event.peer, event.packet);
+                    OnReceive(event.peer, event.packet, event.channelID);
                     enet_packet_destroy(event.packet);
                     break;
                 case ENET_EVENT_TYPE_DISCONNECT:
@@ -782,39 +784,47 @@ namespace Pulsar::Network
         EncSend(0, a_data, a_length, a_reliable);   // encrypt-or-queue then send
     }
 
-    // encrypt the payload (AES-256-GCM) then send. Before the key handshake
-    // completes, queue the packet and flush it once the shared key is derived. When
-    // e2e is off (debug), sends in the clear. Relay/network only ever see ciphertext.
+    // encrypt the payload (AES-256-GCM) then send to every connected slot (host: each
+    // client; client: the host). Before a slot's key handshake completes, its copy is
+    // queued and flushed once the shared key is derived. When e2e is off (debug), sends
+    // in the clear. Relay/network only ever see ciphertext.
     void NetworkHost::EncSend(int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable)
     {
         if (!m_peer) return;
         g_traffic.CountSent(a_data, a_len);
+        for (auto& slot : m_slots)
+            if (slot.peer) EncSendSlot(slot, a_channel, a_data, a_len, a_reliable);
+    }
+
+    void NetworkHost::EncSendSlot(PeerSlot& a_slot, int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable)
+    {
+        if (!a_slot.peer) return;
         const enet_uint32 flags = a_reliable ? ENET_PACKET_FLAG_RELIABLE : enet_uint32{0};
 
         // Read the e2e/ready flags and, if the key isn't ready yet, queue the plaintext
         // copy under m_cryptoQueueMtx (this runs from two threads; see header). Snapshot
-        // the flags then release the lock BEFORE any enet_*/m_crypto.* call.
+        // the flags then release the lock BEFORE any enet_*/crypto call.
         bool e2e, ready;
         {
             std::lock_guard<std::mutex> qk(m_cryptoQueueMtx);
             e2e   = m_e2e;
-            ready = m_cryptoReady;
+            ready = a_slot.cryptoReady;
             if (e2e && !ready) {
-                if (m_preCryptoTx.size() < 1024)
-                    m_preCryptoTx.push_back({ a_channel, std::vector<uint8_t>(a_data, a_data + a_len), a_reliable });
+                if (a_slot.preCryptoTx.size() < 1024)
+                    a_slot.preCryptoTx.push_back({ a_channel, std::vector<uint8_t>(a_data, a_data + a_len), a_reliable });
                 return;  // flushed once the handshake completes
             }
         }
 
         if (!e2e) {
             ENetPacket* p = enet_packet_create(a_data, a_len, flags);
-            enet_peer_send(m_peer, a_channel, p);
+            enet_peer_send(a_slot.peer, a_channel, p);
             return;
         }
         std::vector<uint8_t> enc;
-        if (!m_crypto.Encrypt(a_data, a_len, enc)) return;
+        if (!a_slot.crypto.Encrypt(a_data, a_len, enc)) return;
         ENetPacket* p = enet_packet_create(enc.data(), enc.size(), flags);
-        enet_peer_send(m_peer, a_channel, p);
+        enet_peer_send(a_slot.peer, a_channel, p);
     }
 
     // voice: prepend PKT_VOICE and send on channel 2 unreliable via EncSend
@@ -831,12 +841,80 @@ namespace Pulsar::Network
     }
 
     // Bypasses crypto: used only for the key-exchange hello (public key, safe in clear).
-    void NetworkHost::RawSendUnenc(int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable)
+    void NetworkHost::RawSendUnenc(PeerSlot& a_slot, int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable)
     {
-        if (!m_peer) return;
+        if (!a_slot.peer) return;
         const enet_uint32 flags = a_reliable ? ENET_PACKET_FLAG_RELIABLE : enet_uint32{0};
         ENetPacket* p = enet_packet_create(a_data, a_len, flags);
-        enet_peer_send(m_peer, a_channel, p);
+        enet_peer_send(a_slot.peer, a_channel, p);
+    }
+
+    // ── 2-4 players: connection slots and player IDs (Network/PeerRouting.h) ──
+    static thread_local uint8_t t_currentSender = Routing::kNoPlayer;
+
+    uint8_t NetworkHost::CurrentSender() { return t_currentSender; }
+
+    NetworkHost::PeerSlot* NetworkHost::SlotOf(ENetPeer* a_peer)
+    {
+        if (!a_peer) return nullptr;
+        for (auto& s : m_slots) if (s.peer == a_peer) return &s;
+        return nullptr;
+    }
+
+    NetworkHost::PeerSlot* NetworkHost::SlotById(uint8_t a_id)
+    {
+        for (auto& s : m_slots) if (s.peer && s.id == a_id) return &s;
+        return nullptr;
+    }
+
+    NetworkHost::PeerSlot* NetworkHost::AllocSlot(ENetPeer* a_peer)
+    {
+        if (auto* existing = SlotOf(a_peer)) return existing;
+        const size_t usable = m_isHost ? kSlots : 1;   // a client has one connection: the host
+        for (size_t i = 0; i < usable; ++i) {
+            auto& s = m_slots[i];
+            if (s.peer) continue;
+            s.peer = a_peer;
+            s.id = m_isHost ? static_cast<uint8_t>(i + 1) : Routing::kHostId;
+            s.cryptoReady = false;
+            s.preCryptoTx.clear();
+            s.decryptedAny = false;
+            s.decryptFailures = 0;
+            uint8_t n = 1;
+            for (auto& o : m_slots) if (o.peer) ++n;
+            m_playerCount.store(n, std::memory_order_release);
+            if (m_isHost) m_localPlayerId.store(Routing::kHostId, std::memory_order_release);
+            return &s;
+        }
+        return nullptr;
+    }
+
+    void NetworkHost::FreeSlot(PeerSlot& a_slot)
+    {
+        a_slot.crypto.Reset();
+        {
+            std::lock_guard<std::mutex> qk(m_cryptoQueueMtx);
+            a_slot.cryptoReady = false;
+            a_slot.preCryptoTx.clear();
+        }
+        a_slot.peer = nullptr;
+        a_slot.decryptedAny = false;
+        a_slot.decryptFailures = 0;
+        uint8_t n = 1;
+        for (auto& o : m_slots) if (o.peer) ++n;
+        m_playerCount.store(n, std::memory_order_release);
+    }
+
+    void NetworkHost::SendRoster()
+    {
+        if (!m_isHost) return;
+        std::vector<uint8_t> ids{ Routing::kHostId };
+        for (auto& s : m_slots) if (s.peer) ids.push_back(s.id);
+        for (auto& s : m_slots) {
+            if (!s.peer) continue;
+            const auto r = Routing::MakeRoster(s.id, ids);
+            EncSendSlot(s, 0, r.data(), r.size(), true);
+        }
     }
 
     void NetworkHost::SetAuthSecret(const std::string& a_secret)
@@ -847,32 +925,32 @@ namespace Pulsar::Network
         m_authSecret.assign(a_secret.begin(), a_secret.end());
     }
 
-    void NetworkHost::SendCryptoHello()
+    void NetworkHost::SendCryptoHello(PeerSlot& a_slot)
     {
-        auto pub = m_crypto.PublicBlob();
+        auto pub = a_slot.crypto.PublicBlob();
         if (pub.empty()) return;
         std::vector<uint8_t> buf(1 + pub.size());
         buf[0] = PKT_CRYPTO_HELLO;
         std::memcpy(buf.data() + 1, pub.data(), pub.size());
-        RawSendUnenc(0, buf.data(), buf.size(), true);
+        RawSendUnenc(a_slot, 0, buf.data(), buf.size(), true);
     }
 
-    void NetworkHost::FlushPreCryptoTx()
+    void NetworkHost::FlushPreCryptoTx(PeerSlot& a_slot)
     {
         // Take ownership of the queue under the lock, then send outside it so we never
-        // hold m_cryptoQueueMtx across an enet_*/m_crypto.* call.
+        // hold m_cryptoQueueMtx across an enet_*/crypto call.
         std::vector<PendingTx> pending;
         {
             std::lock_guard<std::mutex> qk(m_cryptoQueueMtx);
-            if (!m_cryptoReady || !m_peer) { m_preCryptoTx.clear(); return; }
-            pending.swap(m_preCryptoTx);
+            if (!a_slot.cryptoReady || !a_slot.peer) { a_slot.preCryptoTx.clear(); return; }
+            pending.swap(a_slot.preCryptoTx);
         }
         for (auto& tx : pending) {
             std::vector<uint8_t> enc;
-            if (!m_crypto.Encrypt(tx.data.data(), tx.data.size(), enc)) continue;
+            if (!a_slot.crypto.Encrypt(tx.data.data(), tx.data.size(), enc)) continue;
             const enet_uint32 flags = tx.reliable ? ENET_PACKET_FLAG_RELIABLE : enet_uint32{0};
             ENetPacket* p = enet_packet_create(enc.data(), enc.size(), flags);
-            enet_peer_send(m_peer, tx.channel, p);
+            enet_peer_send(a_slot.peer, tx.channel, p);
         }
     }
 
@@ -949,7 +1027,15 @@ namespace Pulsar::Network
         // Send as one big reliable packet - ENet fragments automatically. Encrypted :
         // the save (= character data) is the most sensitive payload, so it goes through
         // the same E2E path; the relay only ever forwards ciphertext fragments.
-        EncSend(1, buf.data(), buf.size(), true);  // channel 1 for large data
+        // 2-4 players: a save for one joining player goes to that player only.
+        const uint8_t target = m_saveTarget;
+        m_saveTarget = Routing::kNoPlayer;
+        if (PeerSlot* one = (target != Routing::kNoPlayer) ? SlotById(target) : nullptr) {
+            g_traffic.CountSent(buf.data(), buf.size());
+            EncSendSlot(*one, 1, buf.data(), buf.size(), true);   // channel 1 for large data
+        } else {
+            EncSend(1, buf.data(), buf.size(), true);  // channel 1 for large data
+        }
 
         auto filename = std::filesystem::path(savePath).filename().string();
         PLOG_INFO(
@@ -971,9 +1057,10 @@ namespace Pulsar::Network
         return true;
     }
 
-    void NetworkHost::BeginHostQuicksaveTransfer()
+    void NetworkHost::BeginHostQuicksaveTransfer(uint8_t a_target)
     {
         if (!m_peer || !m_isHost) return;
+        m_saveTarget = a_target;
 
         // Snapshot the newest save BEFORE triggering quicksave so we can detect a fresh one
         std::string preSave = SaveScanner::GetMostRecentSavePath();
@@ -1113,7 +1200,15 @@ namespace Pulsar::Network
             if (m_peer && m_peer != a_peer) { enet_peer_reset(a_peer); return; }
             Direct::OnConnected(m_host, a_peer);
         }
-        m_peer = a_peer;
+        PeerSlot* slotPtr = AllocSlot(a_peer);
+        if (!slotPtr) {   // the host has no free player slot (MaxPlayers)
+            PLOG_DIAG("[PULSAR] co-op: refused a player - the session is full"sv);
+            enet_peer_disconnect(a_peer, 0);
+            return;
+        }
+        PeerSlot& slot = *slotPtr;
+        if (!m_peer) m_peer = a_peer;   // the first partner (see IsPrimary)
+        if (!m_isHost) m_localPlayerId.store(0xFF, std::memory_order_release);   // until the roster
 
         // Configure peer timeout: detect dead connections.
         // params: limit, min_timeout_ms, max_timeout_ms
@@ -1138,15 +1233,15 @@ namespace Pulsar::Network
         // public key (unencrypted, safe); on receiving the peer's hello each derives the
         // same shared AES key (see OnReceive). App packets are queued until then.
         const bool wantE2e = Pulsar::GetConfig().e2eEncryption;
-        const bool cryptoInitOk = wantE2e && m_crypto.Init();  // Init() before taking the queue lock
+        const bool cryptoInitOk = wantE2e && slot.crypto.Init();  // Init() before taking the queue lock
         {
             std::lock_guard<std::mutex> qk(m_cryptoQueueMtx);
             m_e2e = wantE2e;
-            m_cryptoReady = false;
-            m_preCryptoTx.clear();
+            slot.cryptoReady = false;
+            slot.preCryptoTx.clear();
         }
-        m_decryptedAny = false;
-        m_decryptFailures = 0;
+        slot.decryptedAny = false;
+        slot.decryptFailures = 0;
         if (wantE2e) {
             if (cryptoInitOk) {
                 // Anti-MITM: mix the DB-delivered per-lobby secret into the key derivation
@@ -1154,19 +1249,19 @@ namespace Pulsar::Network
                 // on a secret actually being present; otherwise unauthenticated (legacy)
                 // ECDH. Set per-connect so a stale secret never carries over.
                 if (Pulsar::GetConfig().e2eRelayAuth && !m_authSecret.empty()) {
-                    m_crypto.SetAuthSecret(m_authSecret.data(), m_authSecret.size());
+                    slot.crypto.SetAuthSecret(m_authSecret.data(), m_authSecret.size());
                     PLOG_DIAG("[PULSAR] co-op: relay-auth secret applied (anti-MITM)"sv);
                 } else {
-                    m_crypto.SetAuthSecret(nullptr, 0);
+                    slot.crypto.SetAuthSecret(nullptr, 0);
                 }
-                SendCryptoHello();
+                SendCryptoHello(slot);
                 PLOG_DIAG("[PULSAR] co-op: secure channel handshake sent"sv);
             } else {
                 // Fail closed: never silently downgrade to plaintext. CNG is proven at
                 // startup by the self-test, so this path is effectively unreachable; if it
                 // ever does fire, drop the peer rather than leak gameplay traffic in clear.
                 PLOG_DIAG("[PULSAR] crypto init failed; refusing plaintext, disconnecting"sv);
-                if (m_peer) enet_peer_disconnect(m_peer, 0);
+                enet_peer_disconnect(a_peer, 0);
                 return;
             }
         }
@@ -1187,22 +1282,30 @@ namespace Pulsar::Network
 
         PLOG_DIAG("[PULSAR] Client connected! Timeout=8-16s, Ping=500ms"sv);
         NASLOG("Client connected, timeout configured");
+        if (m_isHost) {
+            PLOG_DIAG("[PULSAR] co-op: player {} joined ({} players in the session)"sv, slot.id, PlayerCount());
+            SendRoster();
+        }
     }
 
-    void NetworkHost::OnReceive(ENetPeer* a_peer, ENetPacket* a_packet)
+    void NetworkHost::OnReceive(ENetPeer* a_peer, ENetPacket* a_packet, uint8_t a_channel)
     {
+        PeerSlot* slotPtr = SlotOf(a_peer);
+        if (!slotPtr) return;   // an attempt or a refused peer
+        PeerSlot& slot = *slotPtr;
+        const bool reliable = a_packet && (a_packet->flags & ENET_PACKET_FLAG_RELIABLE) != 0;
         // E2E: handle the key-exchange hello, then decrypt every other packet BEFORE
         // any code below reads data[0]. After decrypt we repoint a_packet at the plaintext
         // (the original packet is destroyed by the caller, not here).
         // Only while the key is not agreed yet: encrypted packets start with a random
         // nonce, and ~1 in 256 of them begin with the hello byte (KeyExchange.h).
         bool sessionReady;
-        { std::lock_guard<std::mutex> qk(m_cryptoQueueMtx); sessionReady = m_cryptoReady; }
+        { std::lock_guard<std::mutex> qk(m_cryptoQueueMtx); sessionReady = slot.cryptoReady; }
         if (a_packet && IsKeyExchangeHello(m_e2e && sessionReady, a_packet->data, a_packet->dataLength)) {
             if (m_e2e && a_packet->dataLength > 1 &&
-                m_crypto.DeriveFromPeer(a_packet->data + 1, a_packet->dataLength - 1)) {
-                { std::lock_guard<std::mutex> qk(m_cryptoQueueMtx); m_cryptoReady = true; }
-                FlushPreCryptoTx();
+                slot.crypto.DeriveFromPeer(a_packet->data + 1, a_packet->dataLength - 1)) {
+                { std::lock_guard<std::mutex> qk(m_cryptoQueueMtx); slot.cryptoReady = true; }
+                FlushPreCryptoTx(slot);
                 PLOG_DIAG("[PULSAR] co-op: secure channel established"sv);
             }
             return;
@@ -1210,12 +1313,12 @@ namespace Pulsar::Network
         std::vector<uint8_t> plain;
         ENetPacket localPkt{};
         if (m_e2e) {
-            if (!m_cryptoReady) return;                  // key not agreed yet -> drop
-            if (!a_packet || !m_crypto.Decrypt(a_packet->data, a_packet->dataLength, plain)) {
+            if (!slot.cryptoReady) return;               // key not agreed yet -> drop
+            if (!a_packet || !slot.crypto.Decrypt(a_packet->data, a_packet->dataLength, plain)) {
                 // Not one packet ever decrypted on this connection: the two sides hold
                 // different session secrets (an old or wrong join code, or a stranger).
                 // Say so and end it instead of a session where nothing arrives.
-                if (!m_decryptedAny && ++m_decryptFailures == kWrongKeyFailures && a_peer) {
+                if (!slot.decryptedAny && ++slot.decryptFailures == kWrongKeyFailures && a_peer) {
                     m_wrongKey = true;
                     PLOG_DIAG("[PULSAR] co-op: the other side uses a different join code (an old or wrong one) - disconnecting"sv);
                     if (!m_isHost) Pulsar::UI::HudMessage::Show("Co-op: this join code is old or wrong. Ask the host for the current code.");
@@ -1223,12 +1326,55 @@ namespace Pulsar::Network
                 }
                 return;                                  // forged / corrupt -> drop
             }
-            m_decryptedAny = true;
+            slot.decryptedAny = true;
             localPkt.data       = plain.data();
             localPkt.dataLength = static_cast<enet_uint32>(plain.size());
             a_packet = &localPkt;
         }
         if (a_packet) g_traffic.CountReceived(a_packet->data, a_packet->dataLength);
+        if (!a_packet || a_packet->dataLength == 0) return;
+
+        // 2-4 players (Network/PeerRouting.h). The host forwards a client's packet to the
+        // other clients, wrapped with the sender's player ID; a client unwraps it.
+        uint8_t sender = slot.id;
+        bool fromPrimary = IsPrimary(slot);
+        if (m_isHost) {
+            if (Routing::Forwarded(a_packet->data[0]) && m_playerCount.load(std::memory_order_acquire) > 2) {
+                const auto wrapped = Routing::Wrap(slot.id, a_packet->data, a_packet->dataLength);
+                for (auto& other : m_slots)
+                    if (other.peer && &other != &slot) EncSendSlot(other, a_channel, wrapped.data(), wrapped.size(), reliable);
+            }
+        } else {
+            if (a_packet->data[0] == PKT_ROSTER) {
+                Routing::Roster r;
+                if (Routing::ParseRoster(a_packet->data, a_packet->dataLength, r)) {
+                    m_localPlayerId.store(r.yourId, std::memory_order_release);
+                    m_playerCount.store(static_cast<uint8_t>(r.ids.size()), std::memory_order_release);
+                    PLOG_DIAG("[PULSAR] co-op: you are player {} of {} in the session"sv, r.yourId, r.ids.size());
+                }
+                return;
+            }
+            const auto u = Routing::Unwrap(a_packet->data, a_packet->dataLength);
+            if (u.sender == Routing::kNoPlayer) return;   // malformed wrapper
+            sender = u.sender;
+            fromPrimary = (sender == Routing::kHostId);
+            localPkt.data       = const_cast<enet_uint8*>(u.data);
+            localPkt.dataLength = static_cast<enet_uint32>(u.len);
+            a_packet = &localPkt;
+        }
+        // Data about a player (their figure, gear, vote ...) is applied only from the first
+        // partner until each player has a figure of their own; world data from everyone.
+        if (!fromPrimary && Routing::ClassOf(a_packet->data[0]) == Routing::Class::kPlayer) {
+            static std::atomic<uint64_t> s_otherPlayerDrops{ 0 };
+            if ((s_otherPlayerDrops.fetch_add(1) & 0x3FF) == 0)
+                PLOG_INFO("[PULSAR] [Players] player {} data 0x{:02X} not applied yet (one partner figure)"sv,
+                          sender, a_packet->data[0]);
+            return;
+        }
+        struct SenderScope {
+            explicit SenderScope(uint8_t a_id) { t_currentSender = a_id; }
+            ~SenderScope() { t_currentSender = Routing::kNoPlayer; }
+        } senderScope(sender);
 
         // PKT_VOICE - proximity voice frame (own framing, unreliable ch2). High
         // frequency; handled + returned before the diagnostic logging and the
@@ -1770,7 +1916,7 @@ namespace Pulsar::Network
                     PLOG_DIAG("[PULSAR] co-op: refused '{}' - they run PULSAR {}, this host runs {}. "
                               "Both players need the same PULSAR version."sv,
                               hs.playerName, Compat::DescribeRemote(remoteV), Compat::ToString(localV));
-                    if (m_peer) enet_peer_disconnect(m_peer, Compat::EncodeVersionReject(localV));
+                    enet_peer_disconnect(a_peer, Compat::EncodeVersionReject(localV));
                     break;
                 }
                 PLOG_INFO("[PULSAR] Handshake: {} v{}.{}.{} DLC:0x{:02X}"sv,
@@ -1795,21 +1941,22 @@ namespace Pulsar::Network
                 // bridged in the last 90s; a genuine rejoin can press F8.
                 if (m_isHost) {
                     const uint64_t nowMs = GetTickCount64();
-                    if (m_lastAutoBridgeMs != 0 &&
-                        nowMs - m_lastAutoBridgeMs < 90000) {
+                    if (slot.lastAutoBridgeMs != 0 &&
+                        nowMs - slot.lastAutoBridgeMs < 90000) {
                         PLOG_INFO(
                             "[PULSAR] [L.7 D1] handshake re-bridge SKIPPED "
                             "({}ms since last auto-bridge < 90s) - client likely "
                             "reconnected mid-session; press F8 to force"sv,
-                            nowMs - m_lastAutoBridgeMs);
+                            nowMs - slot.lastAutoBridgeMs);
                         NASLOG("D1 re-bridge skipped (reconnect debounce)");
                         // No fresh save for this client: send it the quest stages
                         // it missed while disconnected (0.5.0).
                         Pulsar::QuestSync::ReplayMissedStagesToPeer();
                     } else {
-                        m_lastAutoBridgeMs = nowMs;
+                        slot.lastAutoBridgeMs = nowMs;
                         Pulsar::QuestSync::ForgetMissedStages();   // the save carries them
-                        BeginHostQuicksaveTransfer();   // fresh save of current pos (was: stale SendSaveToClient)
+                        // Only the joining player loads it; the others play on.
+                        BeginHostQuicksaveTransfer(slot.id);   // fresh save of current pos (was: stale SendSaveToClient)
                     }
                 }
             }
@@ -1943,21 +2090,31 @@ namespace Pulsar::Network
                   a_peer ? a_peer->roundTripTime : 0,
                   a_peer ? (a_peer->packetLoss / 65536.0f * 100.0f) : 0.0f);
         NASLOG("Peer disconnected reason=%d (%s)", a_reason, reasonStr);
-        if (m_peer == a_peer) {
+
+        // 2-4 players: free this player's slot (a reconnect derives a fresh key). If
+        // another player is still connected, the session goes on: only a leaving first
+        // partner tears down its figure below, and the next player becomes the first.
+        PeerSlot* slot = SlotOf(a_peer);
+        const uint8_t leftId = slot ? slot->id : Routing::kNoPlayer;
+        const bool wasPrimary = (m_peer == a_peer);
+        if (slot) FreeSlot(*slot);
+        PeerSlot* next = nullptr;
+        for (auto& s : m_slots) if (s.peer) { next = &s; break; }
+        if (m_isHost && next) {
+            PLOG_DIAG("[PULSAR] co-op: player {} left ({} players in the session)"sv, leftId, PlayerCount());
+            SendRoster();
+            if (!wasPrimary) return;          // the first partner and its figure stay
+            m_peer = next->peer;              // the next player's figure spawns from its packets
+            RemotePlayer::GetRemotePlayerManager().RequestDespawn();
+            return;
+        }
+        if (wasPrimary) {
             m_peer = nullptr;
             Pulsar::Voice::VoiceBridge::OnPeerDown();  // stop voice capture
         }
         // L.7 V9.4 - reset established flag so handshake-on-reconnect waits
         // for the new OnConnect callback rather than firing while CONNECTING.
         m_connectionEstablished.store(false, std::memory_order_release);
-
-        // tear down the E2E session; a reconnect derives a fresh ephemeral key.
-        m_crypto.Reset();
-        {
-            std::lock_guard<std::mutex> qk(m_cryptoQueueMtx);
-            m_cryptoReady = false;
-            m_preCryptoTx.clear();
-        }
 
         // Abort any in-flight quicksave transfer
         m_quicksavePending = false;

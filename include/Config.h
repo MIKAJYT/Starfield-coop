@@ -160,6 +160,8 @@ namespace Pulsar
         // ini: DirectSession = 1, JoinCode = PSR-..., ReplyCode = PSR-...,
         //      StunServers = host:port,host:port (empty = none), UseUpnp = 0,
         //      CopyCodeToClipboard = 0, HotkeyPasteReplyCode = F2 (0 = off)
+        // Players in a session, the host included (2-4). ini: MaxPlayers = 4
+        std::uint32_t maxPlayers         = 4;
         bool        directSession        = false;
         std::string joinCode;
         std::string replyCode;

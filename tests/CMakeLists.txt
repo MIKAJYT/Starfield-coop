@@ -46,6 +46,7 @@ add_executable(
   test_takeoff_vote.cpp
   test_perf_stats.cpp
   test_join_code.cpp
+  test_peer_routing.cpp
   test_stage_journal.cpp
   test_config.cpp
   test_follower_bonus.cpp
