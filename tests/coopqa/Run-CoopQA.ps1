@@ -56,6 +56,8 @@ param(
     [switch]$SharedLoot,
     [switch]$NoQuestRewards,
     [switch]$NoTakeoffVote,
+    # takeoff: the client leaves the ship before the vote; the vote must move it aboard.
+    [switch]$PartnerOutside,
     # Extra PULSAR.ini lines for both copies ("Key = value", separated by ";"), for bisects.
     [string]$ExtraIni = "",
     # Extra PulsarTestBot.ini lines, same format (e.g. "NotifyTest = hello").
@@ -73,6 +75,7 @@ $LowMemoryIni = "[Archive]`r`nsResourceArchiveMemoryCacheList=`r`nsResourceMiscA
                 "[Quality]`r`nuGlobalRendererQuality=0`r`n"
 
 $ErrorActionPreference = "Stop"
+if ($PartnerOutside) { $ExtraBotIni = "TakeoffPartnerOutside = 1;" + $ExtraBotIni }
 Set-StrictMode -Version 2
 
 # ============================================================================
@@ -348,7 +351,7 @@ function Invoke-PapyrusScore {
 # CoopTakeoffVote=1 the ship must not leave before the client's answer, must
 # leave after it, and the client must end up in space with it (save bridge).
 function Invoke-TakeoffScore {
-    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @(), [bool]$PartnerOutside = $false)
     $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
     $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
     if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
@@ -393,6 +396,20 @@ function Invoke-TakeoffScore {
     if (@($late | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after takeoff"); return $r }
     if (-not ($ClientDecisions | Where-Object { $_ -match "\[TAKEOFF-VOTE\] vote \d+ passed - boarding: " })) {
         $r.Result = "FAIL"; $r.Reasons.Add("the client never logged boarding for the vote"); return $r
+    }
+    if ($PartnerOutside) {
+        # The client must have left the ship before the request, and the vote must
+        # have moved it into the host's cell before the ship reached space (later,
+        # the save bridge would put it there anyway).
+        $shipCell = $act.playerCell
+        $out = @($clientList | Where-Object { $_.wallMs -lt $seenAt -and $_.exitInfo -match 'activate=1' -and $_.playerCell -ne $shipCell })
+        if ($out.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("the client never left the ship before the request"); return $r }
+        if (-not ($ClientDecisions | Where-Object { $_ -match "boarding: moving aboard" })) {
+            $r.Result = "FAIL"; $r.Reasons.Add("the client did not move aboard (no 'boarding: moving aboard')"); return $r
+        }
+        $aboard = @($clientList | Where-Object { $_.wallMs -ge $readyAt -and $_.wallMs -lt [long]$space.wallMs -and $_.playerCell -eq $shipCell }) | Select-Object -First 1
+        if (-not $aboard) { $r.Result = "FAIL"; $r.Reasons.Add("the client was not aboard (cell $shipCell) before the ship reached space"); return $r }
+        $r.Details += "; client left the ship to cell $($out[-1].playerCell), aboard again at +$([long]$aboard.wallMs - $t0) ms"
     }
     $r.Result = "PASS"
     return $r
@@ -458,7 +475,7 @@ function New-RewardRun([int]$clientCredits = 500, [int]$clientItems = 1, [int]$h
     $d = if ($decides) { @("[PULSAR] [REWARD] +0x0000000F x500 (partner's quest reward)", "[PULSAR] [REWARD] partner's reward 0x$($item): x1 already given by our own quest") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
-function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [bool]$clientFollows = $true, [bool]$boards = $true, [bool]$acts = $true, [bool]$answers = $true) {
+function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [bool]$clientFollows = $true, [bool]$boards = $true, [bool]$acts = $true, [bool]$answers = $true, [bool]$outside = $false, [bool]$movedAboard = $true, [bool]$left = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $askAt = $t0 + 5000
     $info = "takeoff: seat 0001ABCD activate=1, seated=1, launch fired=1"
     for ($i = 0; $i -lt 90; $i++) {
@@ -467,14 +484,19 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
         $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $t -ge $askAt) $(if ($acts) { $askAt } else { 0 })
         $hs | Add-Member actionInfo $(if ($acts) { $info } else { "" }); $hs | Add-Member connected $true
         $hs | Add-Member ship ([pscustomobject]@{ inSpace = $hostUp; ship = "0001ABCE"; seated = $true })
+        $hs | Add-Member playerCell "032928FE"
         $ready = if ($acts -and $answers -and $t -ge $askAt + $readyAfter) { $askAt + $readyAfter } else { 0 }
         $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
         $cs | Add-Member connected $true
         $cs | Add-Member ship ([pscustomobject]@{ inSpace = ($clientFollows -and $hostUp -and $t -ge $askAt + $spaceAfter + 8000); ship = "0001ABCE"; seated = $false })
         $cs | Add-Member vote ([pscustomobject]@{ state = "idle"; seenAtWallMs = $(if ($acts -and $t -ge $askAt + 1000) { $askAt + 1000 } else { 0 }); readyAtWallMs = $ready })
+        $isOut = $outside -and $left -and $t -ge $t0 + 2000 -and -not ($movedAboard -and $t -ge $askAt + $readyAfter + 2000) -and -not ($hostUp -and $t -ge $askAt + $spaceAfter + 8000)
+        $cs | Add-Member playerCell $(if ($isOut) { "0000AAAA" } else { "032928FE" })
+        $cs | Add-Member exitInfo $(if ($outside -and $t -ge $t0 + 2000) { "left the ship: 1 load doors, tried 1, activate=$(if ($left) { 1 } else { 0 }), from cell 032928FE" } else { "" })
         $hostRun += $hs; $clientRun += $cs
     }
-    $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: already aboard") } else { @() }
+    $how = if (-not $outside) { "already aboard" } elseif ($movedAboard) { "moving aboard" } else { "move failed" }
+    $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
@@ -527,13 +549,17 @@ function Invoke-ScorerSelfTest {
         @{ Name = "takeoff: ready, stays";   Run = (New-TakeoffRun -spaceAfter -1);    Expect = "FAIL";    Takeoff = $true },
         @{ Name = "takeoff: client left";    Run = (New-TakeoffRun -clientFollows $false); Expect = "FAIL"; Takeoff = $true },
         @{ Name = "takeoff: no boarding log"; Run = (New-TakeoffRun -boards $false);   Expect = "FAIL";    Takeoff = $true },
-        @{ Name = "takeoff: never asked";    Run = (New-TakeoffRun -acts $false);      Expect = "TIMEOUT"; Takeoff = $true }
+        @{ Name = "takeoff: never asked";    Run = (New-TakeoffRun -acts $false);      Expect = "TIMEOUT"; Takeoff = $true },
+        @{ Name = "board: moved aboard";     Run = (New-TakeoffRun -outside $true);    Expect = "PASS";    Takeoff = $true; Outside = $true },
+        @{ Name = "board: not moved";        Run = (New-TakeoffRun -outside $true -movedAboard $false); Expect = "FAIL"; Takeoff = $true; Outside = $true },
+        @{ Name = "board: never left ship";  Run = (New-TakeoffRun -outside $true -left $false); Expect = "ERROR"; Takeoff = $true; Outside = $true },
+        @{ Name = "board: stayed inside";    Run = (New-TakeoffRun);                   Expect = "ERROR";   Takeoff = $true; Outside = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
-             elseif ($case.ContainsKey("Takeoff")) { Invoke-TakeoffScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Takeoff")) { Invoke-TakeoffScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true -PartnerOutside $case.ContainsKey("Outside") }
              elseif ($case.ContainsKey("Reward")) { Invoke-RewardScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
@@ -797,7 +823,7 @@ try {
                  elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "papyrus") { Invoke-PapyrusScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
-                 elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final -PartnerOutside $PartnerOutside.IsPresent }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }
         if (((Get-Date) - $lastLog).TotalSeconds -ge 15) {
             $lastLog = Get-Date

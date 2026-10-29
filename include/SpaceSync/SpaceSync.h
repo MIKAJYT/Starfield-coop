@@ -40,8 +40,9 @@ namespace Pulsar::SpaceSync {
     // through. False if the engine helper threw.
     bool ReleaseHeldLaunch();
 
-    // Takeoff ready vote, partner: move the local player to the pilot's clone
-    // (Papyrus MoveTo) unless both are in the same cell. Returns what it did.
+    // Takeoff ready vote, partner: move the local player into the pilot's cell
+    // (as reported over the network) with a Papyrus MoveTo to a reference there,
+    // unless it is already in that cell. Returns what it did.
     const char* BoardPartnerShip();
 
     // Test bot: the Papyrus PulsarFurnSync.DoPlayerFollowMoveTo dispatch that

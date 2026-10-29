@@ -60,6 +60,7 @@ namespace Pulsar::TestBot
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
+            bool        takeoffPartnerOutside = false;  // takeoff: the client leaves the ship first, so the vote must move it aboard
         };
 
         // Loot scenario progress (host). The kill happens at the usual act time;
@@ -72,6 +73,9 @@ namespace Pulsar::TestBot
             Settings      cfg;
             std::uint64_t nextWriteMs = 0;
             std::uint64_t cloneSeenSinceMs = 0;
+            std::uint64_t firstCloneSeenMs = 0;   // first tick the clone was visible (never reset)
+            bool          partnerExited = false; // takeoff, client: tried the ship hatch
+            std::string   partnerExitInfo;
             bool          acted = false;
             std::uint64_t actedAtWallMs = 0;
             std::string   actionInfo;
@@ -131,6 +135,7 @@ namespace Pulsar::TestBot
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
+                else if (key == "takeoffpartneroutside") s.takeoffPartnerOutside = (value == "1" || value == "true");
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -698,6 +703,7 @@ namespace Pulsar::TestBot
 
         if (cloneVisible) {
             if (s_state.cloneSeenSinceMs == 0) s_state.cloneSeenSinceMs = now;
+            if (s_state.firstCloneSeenMs == 0) s_state.firstCloneSeenMs = now;
         } else {
             s_state.cloneSeenSinceMs = 0;
         }
@@ -758,10 +764,36 @@ namespace Pulsar::TestBot
             }
         }
 
-        // Takeoff: sit down, then ask for the launch.
+        // Takeoff, client (TakeoffPartnerOutside): leave the landed ship through
+        // its hatch 20 s after the partner shows up, so the vote's "go" has to
+        // move this player back aboard.
+        if (!isHost && s_state.cfg.scenario == "takeoff" && s_state.cfg.takeoffPartnerOutside &&
+            !s_state.partnerExited && cloneVisible && me.valid && now - s_state.cloneSeenSinceMs >= 20000) {
+            s_state.partnerExited = true;
+            DoorScan scan;
+            constexpr int kMaxDoors = 8;
+            RE::TESObjectREFR* doors[kMaxDoors] = {};
+            float dist[kMaxDoors] = {};
+            const int found = SafeFindLoadDoors(player->parentCell, me.x, me.y, me.z, s_state.cfg.doorRadius,
+                                                scan, doors, dist, kMaxDoors);
+            char msg[160];
+            int result = 0, tried = 0;
+            for (; tried < found && result != 1; ++tried)
+                result = SafeActivateAsPlayer(doors[tried], player);
+            std::snprintf(msg, sizeof(msg), "left the ship: %d load doors, tried %d, activate=%d, from cell %08X",
+                          found, tried, result, me.cellID);
+            s_state.partnerExitInfo = msg;
+            Trace(msg);
+            PLOG_INFO("[PULSAR] TestBot: takeoff {}"sv, s_state.partnerExitInfo);
+        }
+
+        // Takeoff: sit down, then ask for the launch. With the partner outside,
+        // its clone leaves view, so time from the first sighting instead.
+        const bool takeoffDue = s_state.cfg.takeoffPartnerOutside
+            ? (connected && s_state.firstCloneSeenMs && now - s_state.firstCloneSeenMs >= s_state.cfg.moveAfterMs)
+            : (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs);
         if (isHost && s_state.cfg.scenario == "takeoff" && !s_state.acted && me.valid &&
-            (s_state.takeoffStep != 0 ||
-             (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
+            (s_state.takeoffStep != 0 || takeoffDue)) {
             TickTakeoff(player, me, now);
         }
 
@@ -882,6 +914,7 @@ namespace Pulsar::TestBot
             j += ",\"vote\":{\"state\":\"" + std::string(Pulsar::Coop::TakeoffVote::StateForTest()) + "\"";
             j += ",\"seenAtWallMs\":" + std::to_string(s_state.voteSeenWallMs);
             j += ",\"readyAtWallMs\":" + std::to_string(s_state.voteReadyWallMs) + "}";
+            j += ",\"exitInfo\":\"" + s_state.partnerExitInfo + "\"";
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];

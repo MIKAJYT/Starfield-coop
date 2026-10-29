@@ -1477,13 +1477,54 @@ bool ReleaseHeldLaunch()
     return ok;
 }
 
+namespace {
+    // A reference to move to inside a cell: a piece of furniture (a seat stands
+    // on the floor) if there is one, else the first reference. Raw cell array
+    // (+0x80 count, +0x88 data; base at ref+0x98, form type at base+0x2E).
+    RE::TESObjectREFR* SafeFindBoardingTarget(RE::TESObjectCELL* a_cell) noexcept
+    {
+        RE::TESObjectREFR* first = nullptr;
+        __try {
+            if (!a_cell) return nullptr;
+            auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+            const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+            auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+            if (!data || size == 0 || size > 20000) return nullptr;
+            for (std::uint32_t i = 0; i < size; ++i) {
+                auto* ref = data[i];
+                if (!ref) continue;
+                if (!first) first = ref;
+                auto* base = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(ref) + 0x98);
+                if (base && *(base + 0x2E) == static_cast<std::uint8_t>(RE::FormType::kFURN)) return ref;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return first;
+    }
+}
+
 const char* BoardPartnerShip()
 {
+    // The host's real cell comes over the network. Not the clone's cell: when
+    // the host is in an interior this player has not loaded, the clone stands
+    // in this player's own cell (run 20261029-073224: "already aboard" while
+    // outside the ship).
+    static char s_result[96];
     auto* player = RE::PlayerCharacter::GetSingleton();
-    auto* clone  = Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteActor();
-    if (!player || !clone) return "no player or partner";
-    if (player->parentCell && player->parentCell == clone->parentCell) return "already aboard";
-    return DispatchMoveTo(clone) ? "moving aboard" : "move failed";
+    if (!player) return "no player";
+    const std::uint32_t hostCell = Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteCellID();
+    if (!hostCell) return "host cell unknown";
+    if (player->parentCell && player->parentCell->formID == hostCell) return "already aboard";
+    auto* form = RE::TESForm::LookupByID(hostCell);
+    auto* cell = form ? form->As<RE::TESObjectCELL>() : nullptr;
+    auto* target = SafeFindBoardingTarget(cell);
+    if (!target) {
+        std::snprintf(s_result, sizeof(s_result), "no reference in the host's cell %08X", hostCell);
+        return s_result;
+    }
+    const bool ok = DispatchMoveTo(target);
+    std::snprintf(s_result, sizeof(s_result), "%s (cell %08X, ref %08X)", ok ? "moving aboard" : "move failed",
+                  hostCell, target->formID);
+    return s_result;
 }
 
 bool DispatchMoveToForTest(RE::TESObjectREFR* a_dest)
