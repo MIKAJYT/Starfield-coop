@@ -158,7 +158,7 @@ namespace Pulsar::Coop::GravityGuard
         const GravSnap g = RawSnapGravity(player);
         if (!g.valid) return;
 
-        RE::BSFixedString loadingMenuName("LoadingMenu");
+        static const RE::BSFixedString loadingMenuName("LoadingMenu");   // a string-pool lookup per run otherwise
         const bool inLoadMenu = RawCheckMenuOpen(RE::UI::GetSingleton(), loadingMenuName);
         const std::uint64_t now = ::GetTickCount64();
 

@@ -4391,6 +4391,14 @@ void TickKeySync()
     auto* plr = RE::PlayerCharacter::GetSingleton();
     if (!plr) return;
 
+    // The inventory walk costs ~0.03 ms and this runs every SFSE task run (300-400 per
+    // second): only walk when a mirrored key waits or the scan is due.
+    uint64_t now = GetTickCount64();
+    const bool scanDue = now - s_lastKeyScanMs >= kKeyScanIntervalMs;
+    bool addsWaiting;
+    { std::lock_guard<std::mutex> lk(s_keyMutex); addsWaiting = !s_pendingKeyAdds.empty(); }
+    if (!scanDue && !addsWaiting) return;
+
     // One inventory snapshot (robust SEH-guarded walk) used for both the
     // add-dedup and the broadcast scan.
     ContainerSnapshot snap;
@@ -4415,8 +4423,7 @@ void TickKeySync()
     }
 
     // 2) scan local inventory for NEW keys → broadcast (rate-limited).
-    uint64_t now = GetTickCount64();
-    if (now - s_lastKeyScanMs < kKeyScanIntervalMs) return;
+    if (!scanDue) return;
     s_lastKeyScanMs = now;
 
     for (const auto& it : snap.items) {

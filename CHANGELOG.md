@@ -37,6 +37,12 @@ number here means the code for that milestone is in, not that the goal is met.
 - **Papyrus calls from C++ could crash the game.** The local CommonLibSF patch freed
   script call arguments with the wrong allocator. Fixed in `patches/commonlibsf.patch`.
   *Bot-tested* (`papyrus`).
+- **Host game-thread time in co-op cut by about 75%** (from 260–395 to 70–93 ms per
+  second). A check for new engine saves listed the saves folder several times per frame;
+  it now runs 4 times per second. The key mirror and the gravity guard skip per-run work
+  too. Found with a new dev-build section profiler (`TaskProfile` log line).
+  *Bot-tested*: follow, loot and takeoff runs pass after the change (no twin: nothing
+  is switched off).
 - **Docs:** [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (versions, load order,
   other mods) and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) (players, frame rate,
   bandwidth, tick rate, all measured). New log lines for both: `NetStats` and

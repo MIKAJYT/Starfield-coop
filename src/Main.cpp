@@ -78,6 +78,7 @@
 #include <windows.h>
 #include <MinHook.h>
 #include "Diag/PerfStats.h"
+#include "Diag/TaskProfile.h"
 
 // noexcept helper - C2712 forbids __try in functions with C++ unwind objects.
 // BSFixedString constructed/passed OUTSIDE __try to avoid the same restriction.
@@ -480,13 +481,27 @@ struct TaskTimer
             PLOG_DIAG("[PULSAR] TaskStats {:.0f}s ({}): {:.0f} runs/s, avg {:.3f} ms, max {:.2f} ms, game-thread time {:.1f} ms per second"sv,
                       secs, Pulsar::Network::GetSingleton().IsFullyConnected() ? "co-op" : "solo",
                       s_runs / secs, s_sumUs / 1000.0 / s_runs, s_maxUs / 1000.0, s_sumUs / 1000.0 / secs);
+#ifndef PULSAR_HARDENED
+            PLOG_INFO("[PULSAR] TaskProfile {:.0f}s: {}"sv, secs, Pulsar::Diag::FormatSections(Profile().Take(8), secs));
+#endif
             s_windowStart = end;
             s_runs = s_sumUs = s_maxUs = 0;
         }
     }
 
+    // Time per section of the task (PROF / PROF_CALL, include/Diag/TaskProfile.h).
+    static Pulsar::Diag::SectionProfiler& Profile() { return Pulsar::Diag::TaskProfile(); }
+
     std::uint64_t m_start;
 };
+
+Pulsar::Diag::SectionProfiler& Pulsar::Diag::TaskProfile()
+{
+    static SectionProfiler s_profile;
+    return s_profile;
+}
+
+std::uint64_t Pulsar::Diag::TaskProfileNowUs() { return TaskTimer::NowUs(); }
 
 static void NetworkLoop()
 {
@@ -981,7 +996,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
             taskInterface->AddPermanentTask([]() {
                 TaskTimer taskTimer;     // TaskStats log line (docs/PERFORMANCE.md)
                 // Deferred hooks (need player to exist)
-                Pulsar::Debug::InstallDeferredHooks();
+                PROF_CALL("Debug::InstallDeferredHooks", Pulsar::Debug::InstallDeferredHooks());
                 // LootSync TryLateInit removed 2026-04-25 - REL::ID(107155)
                 // crashes whether called at kPostLoad or game-thread tick.
                 // PlayerCharacter-exists gate was insufficient; singleton is
@@ -990,6 +1005,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
 
                 // Read player pitch from fCameraPitch (only works in game thread!)
                 {
+                    PROF("CameraPitch");
                     auto* pitchPlayer = RE::PlayerCharacter::GetSingleton();
                     if (pitchPlayer) {
                         float camP = 0.0f;
@@ -1003,6 +1019,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
 
                 // Phase I - drive Cell3DAttach loadMenu observation. Cheap.
                 {
+                    PROF("Cell3DAttach/LoadMenu");
                     const bool curLoadMenu = SafeIsLoadMenuOpen();
                     Pulsar::Cell3DAttach::SetLoadMenuState(curLoadMenu);
 
@@ -1100,6 +1117,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                     Pulsar::Network::GetSingleton().IsConnected() &&
                     !Pulsar::Cell3DAttach::IsQuiet())
                 {
+                    PROF("HostSendPosition");
                     static uint64_t s_lastHostSend = 0;
                     uint64_t hpNow = GetTickCount64();
                     if (hpNow - s_lastHostSend >= 16) {
@@ -1134,6 +1152,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 // For connect-time this also helps - never teleport while engine
                 // is actively streaming a cell.
                 if (!g_config.isHost) {
+                    PROF("ClientApplyTeleport");
                     bool inLoadMenu   = SafeIsLoadMenuOpen();
                     auto lastLoadTick = Pulsar::WorldSync::GetLastLoadCompletedTick();
                     auto suspendedAt  = Pulsar::HookGuard::GetSuspendedAtTick();
@@ -1306,32 +1325,33 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                     }
                 }
 
-                Pulsar::CellDiag::Tick(g_config.isHost);
-                Pulsar::Coop::GravityGuard::Tick(g_config.isHost);
-                Pulsar::TransitSync::Tick();
-                Pulsar::Lobby::TickApplyProfile();   // Teil 2C: apply staged profile-in once
-                Pulsar::Lobby::TickAutoSave();        // auto-save: drain capture request (game thread)
-                Pulsar::Lobby::TickCleanProfileCapture(); // A unification: maintain clean DB profile pre-bridge
+                PROF_CALL("CellDiag::Tick", Pulsar::CellDiag::Tick(g_config.isHost));
+                PROF_CALL("Coop::GravityGuard::Tick", Pulsar::Coop::GravityGuard::Tick(g_config.isHost));
+                PROF_CALL("TransitSync::Tick", Pulsar::TransitSync::Tick());
+                PROF_CALL("Lobby::TickApplyProfile", Pulsar::Lobby::TickApplyProfile());   // Teil 2C: apply staged profile-in once
+                PROF_CALL("Lobby::TickAutoSave", Pulsar::Lobby::TickAutoSave());        // auto-save: drain capture request (game thread)
+                PROF_CALL("Lobby::TickCleanProfileCapture", Pulsar::Lobby::TickCleanProfileCapture()); // A unification: maintain clean DB profile pre-bridge
                 // Native Scaleform LobbyMenu removed: blocked (no loadable SWF),
                 // replaced by the external PulsarLobby.exe companion tool. The
                 // TryRegisterMenuOnce()/ToggleLobbyMenu()/F7 path is dead - dropped.
-                TickPostApplyMenuDump();
-                Pulsar::TransitSync::TickFollowHotkey(g_config.hotkeyAutoFollow);
-                Pulsar::TransitSync::TickFollowApply();
-                Pulsar::TransitSync::TickAutoRegroup(g_config.autoRegroupInSpace);
-                Pulsar::Coop::PartnerFollower::Tick(g_config.coopPartnerCountsAsFollower);
-                Pulsar::Coop::TraitAliases::Tick(g_config.coopTraitNpcsForPartner);
-                Pulsar::SpaceSync::FastTravel::TickManualBridgeHotkey(g_config.hotkeyManualBridge);
+                PROF_CALL("TickPostApplyMenuDump", TickPostApplyMenuDump());
+                PROF_CALL("TransitSync::TickFollowHotkey", Pulsar::TransitSync::TickFollowHotkey(g_config.hotkeyAutoFollow));
+                PROF_CALL("TransitSync::TickFollowApply", Pulsar::TransitSync::TickFollowApply());
+                PROF_CALL("TransitSync::TickAutoRegroup", Pulsar::TransitSync::TickAutoRegroup(g_config.autoRegroupInSpace));
+                PROF_CALL("Coop::PartnerFollower::Tick", Pulsar::Coop::PartnerFollower::Tick(g_config.coopPartnerCountsAsFollower));
+                PROF_CALL("Coop::TraitAliases::Tick", Pulsar::Coop::TraitAliases::Tick(g_config.coopTraitNpcsForPartner));
+                PROF_CALL("SpaceSync::FastTravel::TickManualBridgeHotkey", Pulsar::SpaceSync::FastTravel::TickManualBridgeHotkey(g_config.hotkeyManualBridge));
 
                 // Solo testing aid: F9 toggles an AI teammate (refused while connected).
-                Pulsar::Buddy::Tick(g_config.hotkeyBuddy, g_config.buddyBaseFormID);
+                PROF_CALL("Buddy::Tick", Pulsar::Buddy::Tick(g_config.hotkeyBuddy, g_config.buddyBaseFormID));
 
                 // Automated co-op QA bot: inert without PulsarTestBot.ini, absent in Release.
-                Pulsar::TestBot::Tick();
+                PROF_CALL("TestBot::Tick", Pulsar::TestBot::Tick());
 
                 // Teil 1 profile - F10 = save loadout snapshot, F11 = restore it.
                 // (edge-triggered). Demo: F10, drop/sell items, F11 -> items return.
                 {
+                    PROF("HotkeySaveCharacter");
                     static bool s_f10Down = false;
                     const bool now = (GetAsyncKeyState(g_config.hotkeySaveCharacter) & 0x8000) != 0;
                     if (now && !s_f10Down) {
@@ -1342,6 +1362,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 }
 
                 {
+                    PROF("HotkeyRestoreCharacter");
                     static bool s_f11Down = false;
                     const bool now = (GetAsyncKeyState(g_config.hotkeyRestoreCharacter) & 0x8000) != 0;
                     if (now && !s_f11Down) {
@@ -1555,28 +1576,28 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                         s_diffKeyDown = false;
                     }
                 }
-                Pulsar::SpaceSync::TickFollowApply();
-                Pulsar::TakeoffProbe::Tick();
-                Pulsar::DockSync::Tick();
-                Pulsar::SpaceFlightProbe::Tick();
-                Pulsar::FlightSync::Tick();
-                Pulsar::ShipCombatSync::Tick();   // ship-combat sync (slice1 read/log)
-                Pulsar::NPCShipProbe::Tick();
-                Pulsar::CellContentSync::Tick();
-                Pulsar::Forms::TickProbe(g_config.isHost);
-                Pulsar::Forms::DrainPending();
-                Pulsar::InventorySync::TickPreBridgeSnapshot();
-                Pulsar::InventorySync::DrainPending();
+                PROF_CALL("SpaceSync::TickFollowApply", Pulsar::SpaceSync::TickFollowApply());
+                PROF_CALL("TakeoffProbe::Tick", Pulsar::TakeoffProbe::Tick());
+                PROF_CALL("DockSync::Tick", Pulsar::DockSync::Tick());
+                PROF_CALL("SpaceFlightProbe::Tick", Pulsar::SpaceFlightProbe::Tick());
+                PROF_CALL("FlightSync::Tick", Pulsar::FlightSync::Tick());
+                PROF_CALL("ShipCombatSync::Tick", Pulsar::ShipCombatSync::Tick());   // ship-combat sync (slice1 read/log)
+                PROF_CALL("NPCShipProbe::Tick", Pulsar::NPCShipProbe::Tick());
+                PROF_CALL("CellContentSync::Tick", Pulsar::CellContentSync::Tick());
+                PROF_CALL("Forms::TickProbe", Pulsar::Forms::TickProbe(g_config.isHost));
+                PROF_CALL("Forms::DrainPending", Pulsar::Forms::DrainPending());
+                PROF_CALL("InventorySync::TickPreBridgeSnapshot", Pulsar::InventorySync::TickPreBridgeSnapshot());
+                PROF_CALL("InventorySync::DrainPending", Pulsar::InventorySync::DrainPending());
                 // L.7 V3 - periodic capture (rate-limited 5s) so the
                 // cache is always fresh when OnSaveReceived fires. Also
                 // force-captures on the false→true player-ready transition
                 // so a connect attempted right after save-load already has
                 // a populated cache. Cheap when player not ready.
-                Pulsar::InventorySync::DirectRestore::TickPeriodicCapture();
+                PROF_CALL("InventorySync::DirectRestore::TickPeriodicCapture", Pulsar::InventorySync::DirectRestore::TickPeriodicCapture());
                 // V4.2 - deferred post-restore inventory diff (+5s/+10s).
                 // No-op until a restore arms it. Catches other sync modules
                 // re-applying host state after our restore completes.
-                Pulsar::InventorySync::DirectRestore::TickPostRestoreWatch();
+                PROF_CALL("InventorySync::DirectRestore::TickPostRestoreWatch", Pulsar::InventorySync::DirectRestore::TickPostRestoreWatch());
                 // V4.5 - F9 diagnostic: dump live inventory (formIDs + counts +
                 // raw dataSize) on demand. Fire while the inventory menu shows
                 // host "ghosts" to prove whether they are in the container or
@@ -1592,11 +1613,12 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                         s_dumpKeyDown = false;
                     }
                 }
-                Pulsar::NPCSync::OnGameThreadTick();
-                Pulsar::Coop::Mortality::OnGameThreadTick();
-                Pulsar::Coop::KillXp::OnGameThreadTick();   // drain shared kill-XP
-                Pulsar::Coop::CombatTaming::Tick();         // tame combat AI in co-op
+                PROF_CALL("NPCSync::OnGameThreadTick", Pulsar::NPCSync::OnGameThreadTick());
+                PROF_CALL("Coop::Mortality::OnGameThreadTick", Pulsar::Coop::Mortality::OnGameThreadTick());
+                PROF_CALL("Coop::KillXp::OnGameThreadTick", Pulsar::Coop::KillXp::OnGameThreadTick());   // drain shared kill-XP
+                PROF_CALL("Coop::CombatTaming::Tick", Pulsar::Coop::CombatTaming::Tick());         // tame combat AI in co-op
                 if (!g_config.isHost) {
+                    PROF("ClientApplyPending");
                     auto _lastLoadTickCS = Pulsar::WorldSync::GetLastLoadCompletedTick();
                     auto _suspAtCS       = Pulsar::HookGuard::GetSuspendedAtTick();
                     auto _nowTickCS      = ::GetTickCount64();
@@ -1609,31 +1631,31 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                         Pulsar::InventorySync::OnLoadCompleted();
                     }
                 }
-                Pulsar::VehicleSync::OnGameThreadTick();
-                Pulsar::WorldSync::Loot::DrainPendingPickups();
-                Pulsar::WorldSync::Loot::TickContainerPolling();
-                Pulsar::WorldSync::Loot::TickKeySync();   // key/keycard mirror
-                Pulsar::QuestSync::Reward::Tick();          // quest rewards for everyone
-                Pulsar::Coop::TakeoffVote::Tick();           // takeoff ready vote
-                Pulsar::UI::HudMessage::Tick();              // on-screen messages (worker thread)
-                Pulsar::WorldSync::Door::DrainPending();
-                Pulsar::WorldSync::Lock::DrainPending();
-                Pulsar::WorldSync::Grab::Tick();
-                Pulsar::WorldSync::Grab::DrainPending();
+                PROF_CALL("VehicleSync::OnGameThreadTick", Pulsar::VehicleSync::OnGameThreadTick());
+                PROF_CALL("WorldSync::Loot::DrainPendingPickups", Pulsar::WorldSync::Loot::DrainPendingPickups());
+                PROF_CALL("WorldSync::Loot::TickContainerPolling", Pulsar::WorldSync::Loot::TickContainerPolling());
+                PROF_CALL("WorldSync::Loot::TickKeySync", Pulsar::WorldSync::Loot::TickKeySync());   // key/keycard mirror
+                PROF_CALL("QuestSync::Reward::Tick", Pulsar::QuestSync::Reward::Tick());          // quest rewards for everyone
+                PROF_CALL("Coop::TakeoffVote::Tick", Pulsar::Coop::TakeoffVote::Tick());           // takeoff ready vote
+                PROF_CALL("UI::HudMessage::Tick", Pulsar::UI::HudMessage::Tick());              // on-screen messages (worker thread)
+                PROF_CALL("WorldSync::Door::DrainPending", Pulsar::WorldSync::Door::DrainPending());
+                PROF_CALL("WorldSync::Lock::DrainPending", Pulsar::WorldSync::Lock::DrainPending());
+                PROF_CALL("WorldSync::Grab::Tick", Pulsar::WorldSync::Grab::Tick());
+                PROF_CALL("WorldSync::Grab::DrainPending", Pulsar::WorldSync::Grab::DrainPending());
 
-                Pulsar::WorldSync::Acti::DrainPending();
-                Pulsar::DialogSync::DrainPending();
-                Pulsar::SpawnSync::DrainPending();   // enable host-spawned NPCs
+                PROF_CALL("WorldSync::Acti::DrainPending", Pulsar::WorldSync::Acti::DrainPending());
+                PROF_CALL("DialogSync::DrainPending", Pulsar::DialogSync::DrainPending());
+                PROF_CALL("SpawnSync::DrainPending", Pulsar::SpawnSync::DrainPending());   // enable host-spawned NPCs
 
                 // BISECT TEST DISABLED - C++-spawned clone writes PulsarSpawn=2.0
                 // to the GLOBs, which starves the Papyrus-driven client clone
                 // (RemotePlayerManager). Only re-enable when the Papyrus path is
                 // off, or after CloneManager takes over the RemotePlayer role.
 
-                Pulsar::RemotePlayer::GetRemotePlayerManager().ProcessPending();
+                PROF_CALL("RemotePlayer::GetRemotePlayerManager.ProcessPending", Pulsar::RemotePlayer::GetRemotePlayerManager().ProcessPending());
 
                 // Legacy: interactions (drop sync etc.)
-                Pulsar::Companion::GetInteractionManager().ProcessPending();
+                PROF_CALL("Companion::GetInteractionManager.ProcessPending", Pulsar::Companion::GetInteractionManager().ProcessPending());
 
                 // Bone sync: send bone transforms at ~20fps (game thread safe).
                 // Gate on IsQuiet() + death/teardown like the position sends -
@@ -1642,6 +1664,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 // this path had NO transition gate at all.
                 if (Pulsar::Network::GetSingleton().IsConnected()
                     && !Pulsar::Cell3DAttach::IsQuiet()) {
+                    PROF("BoneSync");
                     static uint64_t s_lastBoneSend = 0;
                     static Pulsar::BoneSync::BoneCache s_gameBoneCache;
                     static bool s_boneLogOnce = false;
@@ -1684,10 +1707,11 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 // safe. Weapon send + apply stay gated off via EquipSync::kSyncWeapons
                 // (EquipSync.h) until a safe weapon graph re-init exists. The send
                 // only transmits ARMO; the apply skips DoEquipWeapon.
-                Pulsar::RemotePlayer::EquipSync::TickSendLocalEquipment();
+                PROF_CALL("RemotePlayer::EquipSync::TickSendLocalEquipment", Pulsar::RemotePlayer::EquipSync::TickSendLocalEquipment());
 
                 // Sarah Morgan tracking (host only, every 2s) - reference for animation variables
                 if (g_config.isHost) {
+                    PROF("HostSarahTracking");
                     static uint64_t s_lastSarahLog = 0;
                     static constexpr RE::TESFormID SARAH_REF_ID = 0x00005986;
                     uint64_t sarahNow = GetTickCount64();
@@ -1755,6 +1779,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 }
 
                 if (!g_config.isHost) {
+                    PROF("ClientSend");
                     // Client: send handshake + profile + position to host
                     ClientSendHandshake();
                     Pulsar::WorldSync::ProcessPending();

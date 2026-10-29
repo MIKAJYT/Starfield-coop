@@ -28,6 +28,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include "Diag/TaskProfile.h"
 
 using namespace std::string_view_literals;
 
@@ -1343,7 +1344,7 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
 
 void TickFollowApply()
 {
-    Pulsar::SpaceSync::FastTravel::Tick();
+    PROF_CALL("SpaceSync/FastTravel::Tick", Pulsar::SpaceSync::FastTravel::Tick());
 
     // L.2 V1 Step A v2 - F8 hotkey: call engine's TakeoffMenu_Launch fire-
     // helper FUN_141679470 directly. Sets up proper lambda dispatcher
@@ -1376,14 +1377,14 @@ void TickFollowApply()
 
     // host auto-fires the save-bridge when it enters space (auto-F8) so
     // the client co-locates into the host's space position without a manual F8.
-    TickHostAutoSpaceBridge();
+    PROF_CALL("SpaceSync/TickHostAutoSpaceBridge", TickHostAutoSpaceBridge());
 
     // L.3 V1 - host broadcasts ship pos/rot at 30Hz while in space.
-    TickShipPosSend();
+    PROF_CALL("SpaceSync/TickShipPosSend", TickShipPosSend());
 
     // L.3 V1 - game-thread drain of pending ship-pos (avoid network-thread
     // race-corruption observed on save-load).
-    TickShipPosApply();
+    PROF_CALL("SpaceSync/TickShipPosApply", TickShipPosApply());
 
     // L.2 V2 JCC revert disabled (Apply not called). Code archived above.
     // L.6 V1/V2/V2.1/V2.2 (2026-05-02) - all dock-sync attempts removed; V3

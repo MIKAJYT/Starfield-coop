@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include "Diag/TaskProfile.h"
 
 // L.7 V8: fast-travel save-bridge re-enabled. The original v6 disabled it
 // because the bridge fired during the client's initial save-load window -
@@ -761,6 +762,8 @@ namespace autosave_checker_ {
     // Cleared on fire or after kManualForceTimeoutMs.
     extern std::atomic<std::uint64_t> g_manualForceArmedMs;
     inline constexpr std::uint64_t    kManualForceTimeoutMs = 30000;
+    // How often TickAutosaveChecker lists the saves folder for a new save.
+    inline constexpr std::uint64_t    kSaveScanIntervalMs = 250;
 
     // L.7 in-space POI fix: set when SpaceshipSink fires a real travel
     // event (FarTravel / GravJump). Hosts POI-traveling within space keep
@@ -1055,18 +1058,18 @@ static void TickLandingDiagProbe(); // L.7 landing-cinematic instrumentation
 
 void Tick()
 {
-    TickDeltaProbe();
-    TickHostPFTArrivalPoll();
+    PROF_CALL("FastTravel/TickDeltaProbe", TickDeltaProbe());
+    PROF_CALL("FastTravel/TickHostPFTArrivalPoll", TickHostPFTArrivalPoll());
     // L.7 2.0 - TickHostPFTDeferredSend, TickPendingTransition disabled.
     // 2.1 - TickLandingTracker forces an engine save shortly after the
     // host actually lands (IsInSpace 1→0 + 10s settle), without waiting
     // for the host-exits-ship engine autosave.
     // diag probe runs alongside tracker while armed (1Hz log).
-    TickLandingDiagProbe();
-    TickLandingTracker();
-    TickAutosaveChecker();
-    TickPendingBridgeRetry();
-    TickClientPFTApply();
+    PROF_CALL("FastTravel/TickLandingDiagProbe", TickLandingDiagProbe());
+    PROF_CALL("FastTravel/TickLandingTracker", TickLandingTracker());
+    PROF_CALL("FastTravel/TickAutosaveChecker", TickAutosaveChecker());
+    PROF_CALL("FastTravel/TickPendingBridgeRetry", TickPendingBridgeRetry());
+    PROF_CALL("FastTravel/TickClientPFTApply", TickClientPFTApply());
 }
 
 // V14.2 - SEH-safe IsInSpace probe. Engine's flag is the cleanest test
@@ -1974,6 +1977,15 @@ static void TickAutosaveChecker()
         }
     }
 
+    // Listing the saves folder costs ~0.65 ms, and this runs every SFSE task run (300-400
+    // per second): it was 70% of the host's co-op game-thread time (run 20261029-182711).
+    // A save found up to kSaveScanIntervalMs late changes nothing; its transfer takes ~11 s.
+    {
+        static std::uint64_t s_lastScanMs = 0;
+        const auto nowMs = ::GetTickCount64();
+        if (nowMs - s_lastScanMs < autosave_checker_::kSaveScanIntervalMs) return;
+        s_lastScanMs = nowMs;
+    }
     const std::string newest = Pulsar::SaveScanner::GetMostRecentSavePath();
     if (newest.empty() || newest == autosave_checker_::g_lastSeenSavePath) {
         return;  // no new save written

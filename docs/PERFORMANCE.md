@@ -47,18 +47,32 @@ the second copy of the game costs the frames (85 → about 40).
 **PULSAR's own game-thread cost** (time spent in its per-frame work, measured by the
 plugin itself):
 
-| Situation | Host | Client |
-|---|---|---|
-| Solo (not connected) | 29–50 ms per second | 24–57 ms per second |
-| Co-op, Akila City | **260–355 ms per second** (about 9 ms per frame at 38 fps) | 66–104 ms per second |
-| Co-op, ship and space | 320–395 ms per second | 66–82 ms per second |
+| Situation | Host before the fix | Host now | Client now |
+|---|---|---|---|
+| Solo (not connected) | 29–50 ms per second | – | 24–57 ms per second |
+| Co-op, Akila City | 260–355 ms per second (about 9 ms per frame at 38 fps) | **70–89 ms per second** (about 2 ms per frame) | 73–93 ms per second |
+| Co-op, ship and space | 320–395 ms per second | **79–93 ms per second** | 62–82 ms per second |
 
-**The host's co-op cost misses the 2 ms per frame target by far.** It didn't cost
-frame rate here, which suggests the GPU (shared by two games) was the limit, so the
-game thread had time to spare. **Derived, not measured:** on a
-PC where the CPU (game thread) is the limit, the host could lose up to about a third of
-its frame rate. What uses the time is not yet profiled; NPC sync is the first suspect,
-because it is the largest stream the host sends (below).
+"Now": runs 20261029-183804 (Akila City), -184239 (loot, Akila City) and -184826
+(takeoff), all PASS. These are dev builds, which also time each section; the release
+build doesn't, so it costs slightly less.
+
+**What the host's time went to** (section profile, run 20261029-182711): 70% of it was
+one check that lists the saves folder to notice when the engine writes a save
+(`FastTravel/TickAutosaveChecker`, about 0.65 ms each time). PULSAR's task runs 300–480
+times per second (several times per frame), and the check ran every time. It now runs
+4 times per second, which changes nothing a player sees (a save transfer takes 11 s).
+Two smaller fixes in the same pass: the key mirror walked the whole inventory on every
+run (now only when a key arrived or its 2-second scan is due), and the gravity guard
+built a string on every run.
+
+**Now both players are at or near the 2 ms per frame target.** The largest remaining
+section is the partner's clone animation (`RemotePlayerManager::ProcessPending`,
+about 32–37 ms per second on the host); it runs as often as the task, several times per
+frame, and is left as it is because changing its rate needs its own animation testing.
+The frame rate didn't change in these runs, because the shared GPU is the limit here.
+**Derived, not measured:** before the fix, a host whose CPU is the limit could have lost
+up to about a third of its frame rate; now about a tenth at most.
 
 Not measured: a real two-PC session, one game per PC; frame rate in combat; long
 sessions.
@@ -121,6 +135,9 @@ Every co-op session logs, in `PULSAR.log` (release builds too):
 - `TaskStats 10s (solo|co-op): … runs/s, avg … ms, max … ms, game-thread time … ms per
   second` every 10 s: PULSAR's game-thread cost. "runs/s" is not a frame rate: SFSE runs
   plugin tasks each time an engine function runs, several times per frame.
+- Dev builds only: `TaskProfile 10s: …` right after it, the eight sections of the task
+  that took longest. Add a section with `PROF("name")` (rest of the block) or
+  `PROF_CALL("name", call())` from `include/Diag/TaskProfile.h`.
 
 The frame rate comes from the test harness (test copies only): `Frames 10s: … fps
 (frame p50 … ms, p95 … ms, max … ms …)` in the harness log, counted at

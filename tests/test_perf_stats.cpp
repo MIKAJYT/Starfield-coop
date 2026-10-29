@@ -76,3 +76,25 @@ TEST(PerfStats, P95PicksTheSlowFrames)
     CHECK(w.frameMsP95 > 49.9 && w.frameMsP95 < 50.1);
     CHECK(w.frameMsMax > 49.9);
 }
+
+#include "Diag/SectionProfiler.h"
+
+TEST(PerfStats, SectionsSortedByTimeAndReset)
+{
+    Pulsar::Diag::SectionProfiler p;
+    static const char* const kNpc = "NPCSync";
+    static const char* const kLoot = "Loot";
+    for (int i = 0; i < 10; ++i) p.Add(kNpc, 1000);
+    p.Add(kLoot, 3000);
+    p.Add(kLoot, 500);
+
+    auto top = p.Take(5);
+    CHECK(top.size() == 2);
+    CHECK(top[0].name == kNpc && top[0].us == 10000 && top[0].calls == 10);
+    CHECK(top[1].name == kLoot && top[1].maxUs == 3000);
+    CHECK(Pulsar::Diag::FormatSections(top, 10.0).find("NPCSync 1.0 ms/s (1/s, max 1.00 ms)") != std::string::npos);
+
+    CHECK(p.Take(5).empty());
+    p.Add(kLoot, 7);
+    CHECK(p.Take(1).size() == 1);
+}
