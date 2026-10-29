@@ -59,7 +59,7 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
 |---|---|---|---|
 | SFSE, Address Library, ideally Community Patch; load order and incompatibilities | done (docs) | COMPATIBILITY.md. Community Patch untested. | 1 (patch test in 7) |
 | Target FPS, max players, bandwidth and tick rate | done (docs) | PERFORMANCE.md, measured. | 1 |
-| Private sessions, direct P2P, no relay, no port forwarding | partial | Join codes (`DirectSession = 1`): LAN, STUN hole punching and UPnP, reply code when needed, session secret in the key exchange. Bot: join by code PASS, stale-code twin FAIL. Not yet tested: a real STUN server, a real router's UPnP, two homes. The launcher can't show codes yet (needs the .NET SDK). | 2 |
+| Private sessions, direct P2P, no relay, no port forwarding | partial | Join codes (`DirectSession = 1`): LAN, STUN hole punching and UPnP, reply code when needed, session secret in the key exchange. Bot: join by code PASS, stale-code twin FAIL. STUN checked against the real servers (public address found, port kept). Launcher card "Play with friends, no server": host gets a code to copy, friend pastes it, reply codes go both ways; the reply-code handover is bot-tested, the launcher screen itself is not. Not yet tested: a router's UPnP (owner declined for now), a connection between two homes. | 2 |
 
 ## Phases
 

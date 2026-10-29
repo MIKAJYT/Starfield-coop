@@ -40,6 +40,9 @@ TEST(JoinCode, HostCodeRoundTrip)
     const auto c = SampleHost();
     const auto text = JC::Encode(c);
     CHECK(text.rfind("PSR-", 0) == 0);
+    // Pinned: the launcher's C# reader (lobby/pulsar/Services/JoinCodeText.cs) is tested
+    // against this same text (lobby/companion.tests/JoinCodeTextTests.cs).
+    CHECK(text == "PSR-040T1-8D2ME-JAB9N-7N2MT-NAXCN-PQAY0-R1R2M-0250Y-C41CP-03H0Z-4240Y-B01RG-E7K1J-BA0");
     const auto d = JC::Decode(text);
     CHECK(d.has_value());
     CHECK(d->kind == JC::Kind::kHost);

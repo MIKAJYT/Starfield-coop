@@ -222,6 +222,70 @@
                 </StackPanel>
             </Border>
 
+            <!-- Play with friends, no server: join codes. The game connects host to player
+                 directly (LAN, hole punching, UPnP); no lobby, relay or port forwarding. -->
+            <Border Background="{DynamicResource CardBackgroundFillColorDefaultBrush}"
+                    CornerRadius="8" Padding="16" Margin="0,0,0,16">
+                <StackPanel Spacing="10">
+                    <TextBlock Classes="FieldLabel" Text="Play with friends, no server" />
+                    <TextBlock Text="Private game connected straight from your PC to your friends' PCs. No lobby, no relay, no port forwarding."
+                               Opacity="0.6" FontSize="12" TextWrapping="Wrap" />
+
+                    <Button HorizontalAlignment="Stretch"
+                            Content="Host and get a join code"
+                            Command="{Binding HostWithCodeCommand}" />
+
+                    <Border IsVisible="{Binding HasMyJoinCode}"
+                            Background="{DynamicResource ControlFillColorDefaultBrush}"
+                            CornerRadius="6" Padding="12,10">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="Send this join code to your friends:" Opacity="0.7" FontSize="12" />
+                            <Grid ColumnDefinitions="*,Auto">
+                                <SelectableTextBlock Grid.Column="0"
+                                                     Text="{Binding MyJoinCode}"
+                                                     FontFamily="Consolas,monospace" FontSize="14" FontWeight="Bold"
+                                                     VerticalAlignment="Center" TextWrapping="Wrap" />
+                                <Button Grid.Column="1" Content="Copy" Click="OnCopyJoinCode" VerticalAlignment="Center" />
+                            </Grid>
+                            <TextBlock Text="Only if a friend sends you a reply code:" Opacity="0.7" FontSize="12" Margin="0,6,0,0" />
+                            <Grid ColumnDefinitions="*,Auto">
+                                <TextBox Grid.Column="0" Text="{Binding FriendReplyCode}" Watermark="Reply code (PSR-...)" />
+                                <Button Grid.Column="1" Margin="8,0,0,0" MinWidth="100"
+                                        Content="Send to game"
+                                        Command="{Binding SendReplyCodeCommand}" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <Separator Margin="0,4" />
+
+                    <TextBlock Classes="FieldLabel" Text="Join with a friend's join code" />
+                    <Grid ColumnDefinitions="*,Auto">
+                        <TextBox Grid.Column="0" Text="{Binding DirectJoinCode}" Watermark="Join code (PSR-...)" />
+                        <Button Grid.Column="1" Margin="8,0,0,0" MinWidth="100"
+                                Content="Join"
+                                Command="{Binding JoinWithDirectCodeCommand}" />
+                    </Grid>
+
+                    <Border IsVisible="{Binding HasMyReplyCode}"
+                            Background="{DynamicResource ControlFillColorDefaultBrush}"
+                            CornerRadius="6" Padding="12,10">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="Send this reply code to the host:" Opacity="0.7" FontSize="12" />
+                            <Grid ColumnDefinitions="*,Auto">
+                                <SelectableTextBlock Grid.Column="0"
+                                                     Text="{Binding MyReplyCode}"
+                                                     FontFamily="Consolas,monospace" FontSize="14" FontWeight="Bold"
+                                                     VerticalAlignment="Center" TextWrapping="Wrap" />
+                                <Button Grid.Column="1" Content="Copy" Click="OnCopyReplyCode" VerticalAlignment="Center" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="{Binding DirectStatus}" TextWrapping="Wrap" FontSize="12" Opacity="0.85" />
+                </StackPanel>
+            </Border>
+
             <!-- Advanced: play directly on a LAN or by IP (port-forward for internet). Tucked
                  away so the common code/public-list flow stays front and centre. -->
             <Expander Header="Play on LAN or by IP (advanced)" Margin="0,0,0,16">

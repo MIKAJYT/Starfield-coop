@@ -29,6 +29,13 @@ number here means the code for that milestone is in, not that the goal is met.
   *Bot-tested* (`-JoinByCode` PASS, `-StaleJoinCode` twin FAIL) on one PC through the LAN
   address; STUN, UPnP and a connection between two homes are not tested yet. Status of
   every spec item: [docs/SPEC-STATUS.md](docs/SPEC-STATUS.md).
+- **Launcher: "Play with friends, no server".** Host gets a join code to copy; a friend
+  pastes it and clicks Join; if a reply code is needed, it shows up on the friend's side and
+  the host pastes it into "Send to game" (`PULSAR_ReplyCodeIn.txt`). The launcher checks a
+  code for typos before starting the game (`Services/JoinCodeText.cs`, 8 C# tests pinned to
+  the same sample code as the C++ test). A lobby or by-IP launch now switches a leftover
+  join-code session in `PULSAR.ini` off. *Reply-code handover bot-tested* (this session's
+  code accepted, another session's refused); the launcher screen itself not tried.
 
 ## Unreleased - phase 1 of the co-op spec
 

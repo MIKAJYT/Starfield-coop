@@ -16,7 +16,9 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <thread>
 
@@ -73,6 +75,7 @@ namespace Pulsar::Network::Direct {
             std::uint64_t                      replyUntilMs = 0;
             std::uint64_t                      replyNextPunch = 0;
             int                                lastPasteKey = 0;
+            std::uint64_t                      nextReplyFileCheck = 0;
 
             // Client.
             std::vector<JC::Endpoint>          targets;
@@ -457,6 +460,20 @@ namespace Pulsar::Network::Direct {
                 Publish(text, false, "PULSAR_JoinCode.txt",
                         s.cfg.clipboard ? "Co-op: join code copied to the clipboard. Send it to your friends."
                                         : "Co-op: your join code is in PULSAR_JoinCode.txt. Send it to your friends.");
+            }
+
+            // The launcher hands a reply code over as PULSAR_ReplyCodeIn.txt (read once, deleted).
+            if (now >= s.nextReplyFileCheck) {
+                s.nextReplyFileCheck = now + 1000;
+                const std::string path = Pulsar::GetPluginDir() + "PULSAR_ReplyCodeIn.txt";
+                std::ifstream in(path);
+                if (in) {
+                    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                    in.close();
+                    std::error_code ec;
+                    std::filesystem::remove(path, ec);
+                    SubmitReply(text);
+                }
             }
 
             // F2 (HotkeyPasteReplyCode): take a reply code from the clipboard.

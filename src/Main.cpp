@@ -1869,6 +1869,11 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
         if (ho.found) {
             PLOG_INFO("[PULSAR] [LobbyHandoff] role={} host={}:{} v{}"sv,
                       ho.role, ho.hostIP, ho.port, ho.version);
+            // The launcher's lobby or by-IP flow wins over a join-code session left in
+            // PULSAR.ini from an earlier game (DirectSession / JoinCode).
+            g_config.directSession = false;
+            g_config.joinCode.clear();
+            g_config.replyCode.clear();
             if (ho.role == "client") {
                 g_config.isHost = false;
                 if (!ho.hostIP.empty()) g_config.hostIP = ho.hostIP;

@@ -61,6 +61,28 @@ public partial class PlayView : UserControl
         }
     }
 
+    private async void OnCopyJoinCode(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not PlayViewModel vm || string.IsNullOrEmpty(vm.MyJoinCode)) return;
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard != null)
+        {
+            await clipboard.SetTextAsync(vm.MyJoinCode);
+            vm.Shell.Log("Join code copied.");
+        }
+    }
+
+    private async void OnCopyReplyCode(object? sender, RoutedEventArgs e)
+    {
+        if (DataContext is not PlayViewModel vm || string.IsNullOrEmpty(vm.MyReplyCode)) return;
+        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+        if (clipboard != null)
+        {
+            await clipboard.SetTextAsync(vm.MyReplyCode);
+            vm.Shell.Log("Reply code copied.");
+        }
+    }
+
     private async void OnCopyInvite(object? sender, RoutedEventArgs e)
     {
         if (DataContext is not PlayViewModel vm) return;

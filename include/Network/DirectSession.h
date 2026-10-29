@@ -10,7 +10,8 @@
 // Client: from the join code, punches toward and connects to every host endpoint at once
 // and keeps the first that answers. If none does within a few seconds, it publishes a
 // reply code (its own public endpoint); once the host enters it (F2 pastes it from the
-// clipboard, or ReplyCode in PULSAR.ini) the host punches toward the client too.
+// clipboard, the launcher writes PULSAR_ReplyCodeIn.txt, or ReplyCode in PULSAR.ini) the
+// host punches toward the client too.
 //
 // The session secret is mixed into the encryption key exchange, so only someone with the
 // code can finish a connection.

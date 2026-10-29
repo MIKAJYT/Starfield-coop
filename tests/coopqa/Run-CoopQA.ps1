@@ -532,6 +532,51 @@ function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clien
     }
     return @{ H = $hostRun; C = $clientRun }
 }
+# Join codes as the DLL makes them (include/Network/JoinCode.h): "PSR-" + Crockford base32
+# of [version][kind][secret 16 | tag 4][count][count x via, ip 4, port 2][CRC-16 big endian].
+$JoinAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+function Get-Crc16([byte[]]$b, [int]$n) {
+    $crc = 0xFFFF
+    for ($i = 0; $i -lt $n; $i++) {
+        $crc = $crc -bxor ([int]$b[$i] -shl 8)
+        for ($k = 0; $k -lt 8; $k++) { $crc = if ($crc -band 0x8000) { (($crc -shl 1) -bxor 0x1021) -band 0xFFFF } else { ($crc -shl 1) -band 0xFFFF } }
+    }
+    return $crc
+}
+function ConvertFrom-JoinCode([string]$text) {
+    $s = ($text.ToUpperInvariant() -replace '[\s-]', '')
+    if (-not $s.StartsWith("PSR")) { return $null }
+    $out = New-Object System.Collections.Generic.List[byte]; $acc = 0; $bits = 0
+    foreach ($ch in $s.Substring(3).ToCharArray()) {
+        $v = $JoinAlphabet.IndexOf($ch); if ($v -lt 0) { return $null }
+        $acc = (($acc -shl 5) -bor $v) -band 0xFFFFFF; $bits += 5
+        if ($bits -ge 8) { $out.Add([byte](($acc -shr ($bits - 8)) -band 0xFF)); $bits -= 8 }
+    }
+    $b = $out.ToArray()
+    if ($b.Length -lt 9) { return $null }
+    if ((Get-Crc16 $b ($b.Length - 2)) -ne (([int]$b[$b.Length - 2] -shl 8) -bor $b[$b.Length - 1])) { return $null }
+    return ,$b
+}
+function ConvertTo-JoinCode([byte[]]$body) {
+    $crc = Get-Crc16 $body $body.Length
+    $b = [byte[]]($body + @([byte](($crc -shr 8) -band 0xFF), [byte]($crc -band 0xFF)))
+    $raw = New-Object System.Text.StringBuilder; $acc = 0; $bits = 0
+    foreach ($x in $b) {
+        $acc = (($acc -shl 8) -bor $x) -band 0xFFFFFF; $bits += 8
+        while ($bits -ge 5) { [void]$raw.Append($JoinAlphabet[($acc -shr ($bits - 5)) -band 31]); $bits -= 5 }
+    }
+    if ($bits -gt 0) { [void]$raw.Append($JoinAlphabet[($acc -shl (5 - $bits)) -band 31]) }
+    $t = "PSR"; for ($i = 0; $i -lt $raw.Length; $i++) { if ($i % 5 -eq 0) { $t += "-" }; $t += $raw[$i] }
+    return $t
+}
+# A reply code for the session of a host code: [1][2][secret 0..3][1][via 2][203.0.113.9][port].
+function New-ReplyCodeFor([string]$hostCode, [bool]$wrongSession = $false) {
+    $h = ConvertFrom-JoinCode $hostCode
+    if (-not $h -or $h[1] -ne 1) { return $null }
+    $tag = [byte[]]$h[2..5]; if ($wrongSession) { $tag[0] = $tag[0] -bxor 0xFF }
+    return ConvertTo-JoinCode ([byte[]](@([byte]1, [byte]2) + $tag + @([byte]1, [byte]2, [byte]203, [byte]0, [byte]113, [byte]9, [byte]0xEA, [byte]0x61)))
+}
+
 function Invoke-ScorerSelfTest {
     $cases = @(
         @{ Name = "good run";                Run = (New-Run);                          Expect = "PASS" },
@@ -600,6 +645,15 @@ function Invoke-ScorerSelfTest {
     if (-not $ok) { $bad++ }
     Write-Host ("{0,-28} expected {1,-7} got {2,-7} {3}" -f "npc match: rotated guard", "1 wrong", "$($wrong.Count) wrong", $(if ($ok) { "ok" } else { "MISMATCH" }))
     $cases += @{ Name = "npc match" }
+    # The same sample the C++ (tests/test_join_code.cpp) and C# tests pin.
+    $sample = "PSR-040T1-8D2ME-JAB9N-7N2MT-NAXCN-PQAY0-R1R2M-0250Y-C41CP-03H0Z-4240Y-B01RG-E7K1J-BA0"
+    $sb = ConvertFrom-JoinCode $sample
+    $ok = $sb -and $sb.Length -eq 42 -and $sb[1] -eq 1 -and $sb[2] -eq 0xA0 -and $sb[18] -eq 3 -and (ConvertTo-JoinCode ([byte[]]$sb[0..39])) -eq $sample
+    $r1 = New-ReplyCodeFor $sample; $r2 = New-ReplyCodeFor $sample $true; $rb = if ($r1) { ConvertFrom-JoinCode $r1 } else { $null }
+    $ok = $ok -and $rb -and $rb[1] -eq 2 -and $rb[2] -eq 0xA0 -and $rb[5] -eq 0xA3 -and $r2 -and $r2 -ne $r1 -and -not (ConvertFrom-JoinCode ($sample.Substring(0, 10) + "X" + $sample.Substring(11)))
+    if (-not $ok) { $bad++ }
+    Write-Host ("{0,-28} expected {1,-7} got {2,-7} {3}" -f "join code helpers", "ok", $(if ($ok) { "ok" } else { "bad" }), $(if ($ok) { "ok" } else { "MISMATCH" }))
+    $cases += @{ Name = "join code" }
     # Only the count goes down the pipeline (anything else would be captured with it).
     Write-Host $(if ($bad -eq 0) { "SELFTEST: OK ($($cases.Count) cases)" } else { "SELFTEST: FAILED ($bad of $($cases.Count))" })
     return $bad
@@ -838,7 +892,7 @@ try {
 
     $hostSeen = New-Object System.Collections.Generic.List[object]; $clientSeen = New-Object System.Collections.Generic.List[object]
     if ($s) { $hostSeen.Add($s) }
-    $lastLog = Get-Date; $clientStart = NowWallMs; $lowRam = 0
+    $lastLog = Get-Date; $clientStart = NowWallMs; $lowRam = 0; $replyChecked = $false
     $hs = $s; $cs = $null
     while ($true) {
         Start-Sleep -Seconds 1
@@ -874,11 +928,26 @@ try {
                 $(if ($hs) { $hs.inWorld } else { "-" }), $(if ($hs) { $hs.connected } else { "-" }), $(if ($hs) { $hs.cloneVisible } else { "-" }), $(if ($hs) { $hs.acted } else { "-" }), $(if ($hs) { $hs.playerCell } else { "-" }),
                 $(if ($cs) { $cs.inWorld } else { "-" }), $(if ($cs) { $cs.connected } else { "-" }), $(if ($cs) { $cs.cloneVisible } else { "-" }), $(if ($cs) { $cs.playerCell } else { "-" }), (FreeGB))
         }
+        if ($JoinByCode -and -not $StaleJoinCode -and -not $replyChecked -and $cs -and $cs.connected) {
+            # The launcher's reply-code handover (PULSAR_ReplyCodeIn.txt): another session's
+            # code must be refused, this session's accepted.
+            $replyChecked = $true
+            $inFile = Join-Path $Instances "$HostSlot\game\Data\SFSE\Plugins\PULSAR_ReplyCodeIn.txt"
+            Write-PrivateFile $inFile ((New-ReplyCodeFor $code $true) + "`r`n"); Start-Sleep -Seconds 3
+            Write-PrivateFile $inFile ((New-ReplyCodeFor $code) + "`r`n"); Start-Sleep -Seconds 3
+        }
         if ($JoinByCode -and (Read-SharedLines $clientLog 'uses a different join code')) {
             $score.Result = "FAIL"; $score.Reasons.Add("the host did not accept the client's join code (wrong session secret)")
         }
         if ($JoinByCode -and $score.Result -eq "PASS" -and -not (Read-SharedLines $clientLog 'connected directly to the host through')) {
             $score.Result = "FAIL"; $score.Reasons.Add("the client never logged a direct connection by join code")
+        }
+        if ($JoinByCode -and -not $StaleJoinCode -and $score.Result -eq "PASS") {
+            $hostLog = Join-Path $Instances "$HostSlot\profile\Documents\My Games\Starfield\SFSE\Logs\PULSAR.log"
+            if (-not $replyChecked) { $score.Result = "ERROR"; $score.Reasons.Add("the reply-code handover was never tried") }
+            elseif (-not (Read-SharedLines $hostLog 'reply code is for another session')) { $score.Result = "FAIL"; $score.Reasons.Add("the host did not refuse another session's reply code") }
+            elseif (-not (Read-SharedLines $hostLog 'reply code accepted')) { $score.Result = "FAIL"; $score.Reasons.Add("the host did not accept this session's reply code from PULSAR_ReplyCodeIn.txt") }
+            elseif (Test-Path -LiteralPath (Join-Path $Instances "$HostSlot\game\Data\SFSE\Plugins\PULSAR_ReplyCodeIn.txt")) { $score.Result = "FAIL"; $score.Reasons.Add("the host left PULSAR_ReplyCodeIn.txt in place") }
         }
         if ($score.Result -ne "PENDING") { $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }; break }
     }
