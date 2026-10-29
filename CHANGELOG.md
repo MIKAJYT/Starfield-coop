@@ -43,6 +43,11 @@ number here means the code for that milestone is in, not that the goal is met.
   too. Found with a new dev-build section profiler (`TaskProfile` log line).
   *Bot-tested*: follow, loot and takeoff runs pass after the change (no twin: nothing
   is switched off).
+- **F8 no longer fires a leftover takeoff-launch debug path** unless `DevHotkeys = 1`.
+  F8 is the regroup key, and every press also fired the engine's takeoff launch event,
+  past the takeoff vote's hold. A bot run that presses F8 mid-vote (`-F8DuringVote`)
+  passed with and without the change: the engine ignored that event, so no bug was
+  shown. A defensive change, not a demonstrated fix.
 - **Docs:** [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (versions, load order,
   other mods) and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) (players, frame rate,
   bandwidth, tick rate, all measured). New log lines for both: `NetStats` and

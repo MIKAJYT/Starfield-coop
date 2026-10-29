@@ -61,6 +61,7 @@ namespace Pulsar::TestBot
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
             bool        takeoffPartnerOutside = false;  // takeoff: the client leaves the ship first, so the vote must move it aboard
+            bool        takeoffF8DuringVote = false;    // takeoff: the pilot "presses" F8 (regroup key) while the vote waits
         };
 
         // Loot scenario progress (host). The kill happens at the usual act time;
@@ -93,6 +94,7 @@ namespace Pulsar::TestBot
             std::uint64_t voteSeenAtMs = 0;      // client: the takeoff request arrived (tick)
             std::uint64_t voteSeenWallMs = 0;
             std::uint64_t voteReadyWallMs = 0;   // client: answered ready
+            std::uint64_t f8AtWallMs = 0;        // host: F8 pressed during the vote (TakeoffF8DuringVote)
             int           notifySent = 0;        // message check: test messages sent
         };
         State s_state;
@@ -136,6 +138,7 @@ namespace Pulsar::TestBot
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
                 else if (key == "takeoffpartneroutside") s.takeoffPartnerOutside = (value == "1" || value == "true");
+                else if (key == "takeofff8duringvote") s.takeoffF8DuringVote = (value == "1" || value == "true");
             }
             if (s.stateFile.empty()) s.enabled = false;
             return s;
@@ -670,10 +673,21 @@ namespace Pulsar::TestBot
                               s_state.takeoffSeatInfo.c_str(), sh.seated ? 1 : 0, fired ? 1 : 0);
                 s_state.actionInfo = msg;
                 s_state.takeoffStep = 3;
+                s_state.takeoffSatAtMs = a_now;
                 s_state.acted = true;
                 s_state.actedAtWallMs = WallMs();
                 Trace(msg);
                 PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+                return;
+            }
+            // TakeoffF8DuringVote: 3 s into the vote (the client answers after 10 s), the
+            // pilot presses F8, the regroup key, through the real key handler.
+            if (s_state.takeoffStep == 3 && s_state.cfg.takeoffF8DuringVote && !s_state.f8AtWallMs &&
+                a_now - s_state.takeoffSatAtMs >= 3000) {
+                Pulsar::SpaceSync::PressF8ForTest();
+                s_state.f8AtWallMs = WallMs();
+                Trace("takeoff: pressed F8 during the vote");
+                PLOG_INFO("[PULSAR] TestBot: takeoff: pressed F8 during the vote"sv);
             }
         }
     }
@@ -792,7 +806,8 @@ namespace Pulsar::TestBot
         const bool takeoffDue = s_state.cfg.takeoffPartnerOutside
             ? (connected && s_state.firstCloneSeenMs && now - s_state.firstCloneSeenMs >= s_state.cfg.moveAfterMs)
             : (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs);
-        if (isHost && s_state.cfg.scenario == "takeoff" && !s_state.acted && me.valid &&
+        const bool f8Pending = s_state.takeoffStep == 3 && s_state.cfg.takeoffF8DuringVote && !s_state.f8AtWallMs;
+        if (isHost && s_state.cfg.scenario == "takeoff" && (!s_state.acted || f8Pending) && me.valid &&
             (s_state.takeoffStep != 0 || takeoffDue)) {
             TickTakeoff(player, me, now);
         }
@@ -913,7 +928,8 @@ namespace Pulsar::TestBot
             j += c;
             j += ",\"vote\":{\"state\":\"" + std::string(Pulsar::Coop::TakeoffVote::StateForTest()) + "\"";
             j += ",\"seenAtWallMs\":" + std::to_string(s_state.voteSeenWallMs);
-            j += ",\"readyAtWallMs\":" + std::to_string(s_state.voteReadyWallMs) + "}";
+            j += ",\"readyAtWallMs\":" + std::to_string(s_state.voteReadyWallMs);
+            j += ",\"f8AtWallMs\":" + std::to_string(s_state.f8AtWallMs) + "}";
             j += ",\"exitInfo\":\"" + s_state.partnerExitInfo + "\"";
         }
         if (s_state.cfg.scenario == "reward") {

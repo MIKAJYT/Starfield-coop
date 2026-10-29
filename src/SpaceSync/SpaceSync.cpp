@@ -102,6 +102,7 @@ namespace {
     // If yes, the BSTEventSource SendEvent path is viable for receiver-trigger.
     // If no, we need direct FUN_14213b6f0(ship) call instead.
     static bool g_lastF8Down = false;
+    static std::atomic<bool> g_simulatedF8{ false };   // PressF8ForTest
 
     // ---- V2 Auto-Follow state -----------------------------------------------
     // Set when peer's space event arrives (network thread). Drained by
@@ -1349,10 +1350,18 @@ void TickFollowApply()
     // L.2 V1 Step A v2 - F8 hotkey: call engine's TakeoffMenu_Launch fire-
     // helper FUN_141679470 directly. Sets up proper lambda dispatcher
     // internally → Notify works correctly.
+    // Dev hotkeys only: F8 is also the regroup key (HotkeyManualBridge), and this fires
+    // the launch as a received one, past the takeoff vote's hold. With the takeoff menu
+    // open (the pilot waiting for the vote) that took off without the partner.
     {
         bool down = (::GetAsyncKeyState(VK_F8) & 0x8000) != 0;
-        if (down && !g_lastF8Down) {
-            DebugFireTakeoffMenuLaunch();
+        const bool simulated = g_simulatedF8.exchange(false, std::memory_order_acq_rel);
+        if (simulated || (down && !g_lastF8Down)) {
+            if (Pulsar::GetConfig().devHotkeys) {
+                DebugFireTakeoffMenuLaunch();
+            } else {
+                PLOG_INFO("[PULSAR] F8: takeoff-launch debug key is off (DevHotkeys = 0)"sv);
+            }
         }
         g_lastF8Down = down;
     }
@@ -1460,6 +1469,11 @@ void TickFollowApply()
 }  // namespace Pulsar::SpaceSync
 
 namespace Pulsar::SpaceSync {
+
+void PressF8ForTest()
+{
+    g_simulatedF8.store(true, std::memory_order_release);
+}
 
 void OpenTakeoffMenuForTest()
 {

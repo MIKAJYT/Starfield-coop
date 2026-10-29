@@ -36,6 +36,10 @@ namespace Pulsar::SpaceSync {
     // take the ship off.
     void OpenTakeoffMenuForTest();
 
+    // Test bot: act as if F8 was pressed, on the next TickFollowApply (the raw-F8
+    // takeoff-launch debug key, which only runs with DevHotkeys = 1).
+    void PressF8ForTest();
+
     // Takeoff ready vote: re-fire the launch the vote held; the sink lets it
     // through. False if the engine helper threw.
     bool ReleaseHeldLaunch();
