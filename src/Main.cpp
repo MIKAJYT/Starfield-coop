@@ -77,6 +77,7 @@
 #include <atomic>
 #include <windows.h>
 #include <MinHook.h>
+#include "Diag/PerfStats.h"
 
 // noexcept helper - C2712 forbids __try in functions with C++ unwind objects.
 // BSFixedString constructed/passed OUTSIDE __try to avoid the same restriction.
@@ -449,6 +450,43 @@ static void InstallPlayerCtrlHook()
         PLOG_WARN("[PULSAR] MovementHandler hook failed: {}"sv, static_cast<int>(status));
     }
 }
+
+// Times PULSAR's SFSE task: PULSAR's game-thread cost. The task runs several times per
+// frame (run 20261029-174449: 300-770 runs/s), so it can't count frames; the test
+// harness counts those at Present. Logs every 10 s, in solo play too, so a solo session
+// gives the baseline.
+struct TaskTimer
+{
+    static std::uint64_t NowUs()
+    {
+        static const std::int64_t s_freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+        LARGE_INTEGER c;
+        QueryPerformanceCounter(&c);
+        return static_cast<std::uint64_t>(c.QuadPart / s_freq * 1'000'000 + c.QuadPart % s_freq * 1'000'000 / s_freq);
+    }
+
+    TaskTimer() : m_start(NowUs()) {}
+    ~TaskTimer()
+    {
+        static std::uint64_t s_windowStart = 0, s_runs = 0, s_sumUs = 0, s_maxUs = 0;
+        const auto end = NowUs();
+        const auto us = end - m_start;
+        ++s_runs;
+        s_sumUs += us;
+        s_maxUs = (std::max)(s_maxUs, us);
+        if (!s_windowStart) s_windowStart = m_start;
+        if (end - s_windowStart >= 10'000'000) {
+            const double secs = (end - s_windowStart) / 1e6;
+            PLOG_DIAG("[PULSAR] TaskStats {:.0f}s ({}): {:.0f} runs/s, avg {:.3f} ms, max {:.2f} ms, game-thread time {:.1f} ms per second"sv,
+                      secs, Pulsar::Network::GetSingleton().IsFullyConnected() ? "co-op" : "solo",
+                      s_runs / secs, s_sumUs / 1000.0 / s_runs, s_maxUs / 1000.0, s_sumUs / 1000.0 / secs);
+            s_windowStart = end;
+            s_runs = s_sumUs = s_maxUs = 0;
+        }
+    }
+
+    std::uint64_t m_start;
+};
 
 static void NetworkLoop()
 {
@@ -941,6 +979,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
         if (taskInterface) {
             // Both sides need: CompanionManager (Vasco = other player) + network position sending
             taskInterface->AddPermanentTask([]() {
+                TaskTimer taskTimer;     // TaskStats log line (docs/PERFORMANCE.md)
                 // Deferred hooks (need player to exist)
                 Pulsar::Debug::InstallDeferredHooks();
                 // LootSync TryLateInit removed 2026-04-25 - REL::ID(107155)

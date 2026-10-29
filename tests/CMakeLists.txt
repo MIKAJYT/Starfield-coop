@@ -44,6 +44,7 @@ add_executable(
   test_match_policy.cpp
   test_reward_ledger.cpp
   test_takeoff_vote.cpp
+  test_perf_stats.cpp
   test_stage_journal.cpp
   test_config.cpp
   test_follower_bonus.cpp
@@ -80,7 +81,7 @@ set_target_properties(pulsar_test_harness PROPERTIES OUTPUT_NAME PulsarTestHarne
 target_compile_features(pulsar_test_harness PRIVATE cxx_std_23)
 target_compile_options(pulsar_test_harness PRIVATE /W4 /utf-8 /EHsc /permissive- /Zc:__cplusplus)
 target_compile_definitions(pulsar_test_harness PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(pulsar_test_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(pulsar_test_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(pulsar_test_harness PRIVATE minhook::minhook shell32 ole32 user32)
 
 # Test-only stand-in for steam_api64.dll: a fake ISteamRemoteStorage v016 that

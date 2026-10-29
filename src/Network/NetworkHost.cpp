@@ -27,6 +27,7 @@
 #include "SpaceSync/FlightSync.h"
 #include "Network/VersionCompat.h"
 #include "Network/KeyExchange.h"
+#include "Diag/PerfStats.h"
 #include "Plugin.h"
 #include "SpaceSync/ShipCombatSync.h"
 #include "SpaceSync/SpaceSync.h"
@@ -65,6 +66,7 @@ namespace Pulsar::Network
     static std::atomic<uint64_t> s_pktRecv{0};
     static std::atomic<uint64_t> s_pktRecvPos{0};
     static uint64_t s_lastPktLog{0};
+    static Pulsar::Diag::TrafficStats g_traffic;   // NetStats log line
 
     // ── P2P hole-punch rendezvous (set by the ENet intercept, read by Update) ──
     // Peer endpoint is packed (ip<<16 | port) into ONE atomic so the reader never
@@ -568,6 +570,35 @@ namespace Pulsar::Network
                       s_pktSent.load(), s_pktRecv.load(), s_pktRecvPos.load());
         }
 
+        // Bandwidth (docs/PERFORMANCE.md): every 10 s while connected, the payload by
+        // packet type and ENet's own wire totals (headers, acks, encryption included).
+        {
+            static uint64_t s_lastNetStats = 0;
+            if (!m_peer || !IsFullyConnected()) {
+                s_lastNetStats = 0;
+            } else if (!s_lastNetStats) {
+                s_lastNetStats = now;
+                std::lock_guard lock(m_enetMutex);
+                if (m_host) m_host->totalSentData = m_host->totalReceivedData = m_host->totalSentPackets = m_host->totalReceivedPackets = 0;
+                g_traffic.Take(0);
+            } else if (now - s_lastNetStats >= 10000) {
+                const double secs = (now - s_lastNetStats) / 1000.0;
+                s_lastNetStats = now;
+                uint64_t up = 0, down = 0, upDg = 0, downDg = 0;
+                {
+                    std::lock_guard lock(m_enetMutex);
+                    if (m_host) {
+                        up = m_host->totalSentData;          down = m_host->totalReceivedData;
+                        upDg = m_host->totalSentPackets;     downDg = m_host->totalReceivedPackets;
+                        m_host->totalSentData = m_host->totalReceivedData = m_host->totalSentPackets = m_host->totalReceivedPackets = 0;
+                    }
+                }
+                PLOG_DIAG("[PULSAR] NetStats {:.0f}s: wire up {:.1f} KB/s ({:.0f} datagrams/s), down {:.1f} KB/s ({:.0f} datagrams/s); payload {}"sv,
+                          secs, up / 1024.0 / secs, upDg / secs, down / 1024.0 / secs, downDg / secs,
+                          Pulsar::Diag::FormatTraffic(g_traffic.Take(6), secs));
+            }
+        }
+
         // Host: poll for fresh quicksave and send when file size has stabilized
         if (m_quicksavePending && m_isHost && m_peer) {
             uint64_t now = GetTickCount64();
@@ -698,6 +729,7 @@ namespace Pulsar::Network
     void NetworkHost::EncSend(int a_channel, const uint8_t* a_data, size_t a_len, bool a_reliable)
     {
         if (!m_peer) return;
+        g_traffic.CountSent(a_data, a_len);
         const enet_uint32 flags = a_reliable ? ENET_PACKET_FLAG_RELIABLE : enet_uint32{0};
 
         // Read the e2e/ready flags and, if the key isn't ready yet, queue the plaintext
@@ -1118,6 +1150,7 @@ namespace Pulsar::Network
             localPkt.dataLength = static_cast<enet_uint32>(plain.size());
             a_packet = &localPkt;
         }
+        if (a_packet) g_traffic.CountReceived(a_packet->data, a_packet->dataLength);
 
         // PKT_VOICE - proximity voice frame (own framing, unreliable ch2). High
         // frequency; handled + returned before the diagnostic logging and the

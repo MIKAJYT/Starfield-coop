@@ -7,10 +7,41 @@ ramisotti13-eng. Both players must run the same version.
 - *Tested:* covered by the automated tests (`pulsar_tests.exe`, no game needed).
 - *Not tested in game:* builds and passes the automated tests, but nobody has
   played it yet. Treat these as fixes to verify, not proven fixes.
+- *Bot-tested:* passed an automated co-op run with two real game copies on one PC
+  (`tests/coopqa/Run-CoopQA.ps1`, see [docs/TESTING.md](docs/TESTING.md)), and its twin
+  run (the feature switched off) failed, so the test can tell the difference. Not
+  played by people yet.
 
 The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
+
+## Unreleased - phase 1 of the co-op spec
+
+- **Doors move only the player who uses them.** A load door the host uses no
+  longer pulls the client along; takeoff, landing and fast travel are unchanged.
+  Setting: `CoopDoorFollow` (default `0`). *Bot-tested* (`door`).
+- **Instanced enemy loot.** Each player loots their own copy of a dead enemy's
+  items. Setting: `CoopInstancedEnemyLoot` (default `1`). *Bot-tested* (`loot`).
+- **Quest rewards for everyone.** Items and credits a quest gives one player are
+  given to the other too, once, unless their own copy of the quest already gave them.
+  Setting: `CoopQuestRewards` (default `1`). *Bot-tested* (`reward`). Quest XP and
+  weapon mods on reward weapons are not shared yet.
+- **Takeoff ready vote.** When the pilot launches, the ship waits until every partner
+  presses F3 (`HotkeyTakeoffReady`), moves a partner who is outside back aboard, then
+  takes off. Unanswered for 60 s: cancelled. Settings: `CoopTakeoffVote` (default `1`),
+  `CoopVoteMessages`. *Bot-tested* (`takeoff`, also with the partner outside the ship).
+- **On-screen messages** for the vote, vehicles and the AI buddy, through one safe
+  path (`UI/HudMessage`). Fixes a client crash when a message was shown. *Bot-tested*
+  for the vote messages; the vehicle and buddy messages were not triggered by a bot.
+- **Papyrus calls from C++ could crash the game.** The local CommonLibSF patch freed
+  script call arguments with the wrong allocator. Fixed in `patches/commonlibsf.patch`.
+  *Bot-tested* (`papyrus`).
+- **Docs:** [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) (versions, load order,
+  other mods) and [docs/PERFORMANCE.md](docs/PERFORMANCE.md) (players, frame rate,
+  bandwidth, tick rate, all measured). New log lines for both: `NetStats` and
+  `TaskStats` in `PULSAR.log` every 10 s; the test harness logs the frame rate.
+  *Stats tested* (`test_perf_stats.cpp`).
 
 ## Unreleased - gravity guard, bridge restore retry
 

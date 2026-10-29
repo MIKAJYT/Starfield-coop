@@ -76,7 +76,11 @@ $diagAllow = @(
     '[PULSAR] co-op: the host refused this connection', # version mismatch (client side)
     '[PULSAR] co-op: replayed ',                        # quest stages missed while disconnected
     '[PULSAR] co-op: out of sync with the host in space', # automatic regroup
-    '[PULSAR] co-op: refused entering the host''s vehicle' # SharedVehicleRide
+    '[PULSAR] co-op: refused entering the host''s vehicle', # SharedVehicleRide
+    # Performance numbers only (docs/PERFORMANCE.md): bandwidth by packet type ID and
+    # PULSAR's game-thread time, so players can report them.
+    '[PULSAR] NetStats ',
+    '[PULSAR] TaskStats '
 )
 
 $fail = $false

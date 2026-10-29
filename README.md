@@ -31,6 +31,10 @@ Scope is deliberately narrow: **two players, Starfield 1.16.244 on Steam, with
 SFSE.** More players, a dedicated server, or compatibility with every other mod
 are not goals.
 
+Exact versions, the load order and what is known about other mods:
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Players, frame rate, bandwidth and
+tick rate, as measured: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## Roadmap
 
 These are milestones, not dates. Some single bugs may take longer than a whole

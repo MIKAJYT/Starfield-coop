@@ -26,10 +26,13 @@
 // both folders. Decisions live in HarnessPolicy.h (tested by pulsar_tests).
 
 #include "HarnessPolicy.h"
+#include "Diag/PerfStats.h"
 
 #include <Windows.h>
 #include <ShlObj.h>
 #include <MinHook.h>
+
+#include <dxgi1_2.h>
 
 #include <atomic>
 #include <cstdarg>
@@ -44,6 +47,7 @@
 #include <set>
 #include <share.h>
 #include <string>
+#include <thread>
 
 using namespace Pulsar::TestHarness;
 // ShlObj.h declares a COM interface named Folder; use an alias for ours.
@@ -545,6 +549,142 @@ namespace {
     }
 }
 
+// ─── Frame counter (docs/PERFORMANCE.md) ───
+// Counts the game's real frames at IDXGISwapChain::Present / Present1 and logs the
+// frame rate every 10 s. PULSAR's SFSE task runs several times per frame, so it can't
+// count frames; this test-only hook keeps a render hook out of the shipped plugin.
+// The game goes through NVIDIA Streamline's interposer, which wraps DXGI objects in
+// proxies (a dummy swap chain made here crashed in sl.common.dll, run 20261029-175220).
+// So nothing is created: the system dxgi.dll's factory functions are hooked at preload,
+// the factory's swap-chain creation when a factory appears, and Present on the real
+// swap chain it returns. Only Presents on the newest swap chain are counted.
+namespace {
+    using CreateFactoryFn  = HRESULT(WINAPI*)(REFIID, void**);
+    using CreateFactory2Fn = HRESULT(WINAPI*)(UINT, REFIID, void**);
+    using CreateForHwndFn  = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2*, IUnknown*, HWND, const DXGI_SWAP_CHAIN_DESC1*,
+                                                         const DXGI_SWAP_CHAIN_FULLSCREEN_DESC*, IDXGIOutput*, IDXGISwapChain1**);
+    using PresentFn  = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+    using Present1Fn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain1*, UINT, UINT, const DXGI_PRESENT_PARAMETERS*);
+    CreateFactoryFn            g_origFactory1 = nullptr;
+    CreateFactory2Fn           g_origFactory2 = nullptr;
+    CreateForHwndFn            g_origForHwnd  = nullptr;
+    PresentFn                  g_origPresent  = nullptr;
+    Present1Fn                 g_origPresent1 = nullptr;
+    std::once_flag             g_hookForHwndOnce, g_hookPresentOnce;
+    std::atomic<void*>         g_gameChain{ nullptr };
+    std::atomic<std::uint32_t> g_chains{ 0 };
+    std::mutex                 g_framesMutex;
+    Pulsar::Diag::FrameStats   g_frames;
+    std::atomic<std::uint64_t> g_presentCalls{ 0 }, g_present1Calls{ 0 }, g_otherCalls{ 0 };
+
+    std::uint64_t NowUs()
+    {
+        static const std::int64_t s_freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+        LARGE_INTEGER c;
+        QueryPerformanceCounter(&c);
+        return static_cast<std::uint64_t>(c.QuadPart / s_freq * 1'000'000 + c.QuadPart % s_freq * 1'000'000 / s_freq);
+    }
+
+    void CountFrame(void* a_chain, UINT a_flags, std::atomic<std::uint64_t>& a_calls)
+    {
+        if (a_flags & DXGI_PRESENT_TEST) return;
+        if (a_chain != g_gameChain.load(std::memory_order_relaxed)) { g_otherCalls.fetch_add(1, std::memory_order_relaxed); return; }
+        a_calls.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lk(g_framesMutex);
+        g_frames.Record(NowUs(), 0);
+    }
+
+    HRESULT STDMETHODCALLTYPE Hook_Present(IDXGISwapChain* a_sc, UINT a_sync, UINT a_flags)
+    {
+        CountFrame(a_sc, a_flags, g_presentCalls);
+        return g_origPresent(a_sc, a_sync, a_flags);
+    }
+
+    HRESULT STDMETHODCALLTYPE Hook_Present1(IDXGISwapChain1* a_sc, UINT a_sync, UINT a_flags, const DXGI_PRESENT_PARAMETERS* a_p)
+    {
+        CountFrame(a_sc, a_flags, g_present1Calls);
+        return g_origPresent1(a_sc, a_sync, a_flags, a_p);
+    }
+
+    HRESULT STDMETHODCALLTYPE Hook_CreateForHwnd(IDXGIFactory2* a_f, IUnknown* a_dev, HWND a_hwnd, const DXGI_SWAP_CHAIN_DESC1* a_desc,
+                                                 const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* a_fs, IDXGIOutput* a_out, IDXGISwapChain1** a_chain)
+    {
+        const HRESULT hr = g_origForHwnd(a_f, a_dev, a_hwnd, a_desc, a_fs, a_out, a_chain);
+        if (SUCCEEDED(hr) && a_chain && *a_chain) {
+            g_gameChain.store(*a_chain);
+            const auto n = g_chains.fetch_add(1) + 1;
+            Log("frame counter: swap chain %u created (%ux%u)", n, a_desc ? a_desc->Width : 0, a_desc ? a_desc->Height : 0);
+            std::call_once(g_hookPresentOnce, [&] {
+                void** vt = *reinterpret_cast<void***>(*a_chain);
+                const bool ok =
+                    MH_CreateHook(vt[8], reinterpret_cast<LPVOID>(&Hook_Present), reinterpret_cast<LPVOID*>(&g_origPresent)) == MH_OK &&
+                    MH_CreateHook(vt[22], reinterpret_cast<LPVOID>(&Hook_Present1), reinterpret_cast<LPVOID*>(&g_origPresent1)) == MH_OK &&
+                    MH_EnableHook(vt[8]) == MH_OK && MH_EnableHook(vt[22]) == MH_OK;
+                Log("frame counter: Present hook %s", ok ? "installed" : "FAILED");
+            });
+        }
+        return hr;
+    }
+
+    void HookFactory(void* a_factory)
+    {
+        if (!a_factory) return;
+        std::call_once(g_hookForHwndOnce, [&] {
+            IDXGIFactory2* f2 = nullptr;
+            if (FAILED(static_cast<IUnknown*>(a_factory)->QueryInterface(IID_PPV_ARGS(&f2))) || !f2) {
+                Log("frame counter: factory has no IDXGIFactory2 - no Frames lines");
+                return;
+            }
+            void** vt = *reinterpret_cast<void***>(f2);
+            const bool ok = MH_CreateHook(vt[15], reinterpret_cast<LPVOID>(&Hook_CreateForHwnd), reinterpret_cast<LPVOID*>(&g_origForHwnd)) == MH_OK &&
+                            MH_EnableHook(vt[15]) == MH_OK;   // IDXGIFactory2::CreateSwapChainForHwnd
+            f2->Release();
+            Log("frame counter: factory hook %s", ok ? "installed" : "FAILED");
+        });
+    }
+
+    HRESULT WINAPI Hook_CreateDXGIFactory1(REFIID a_iid, void** a_out)
+    {
+        const HRESULT hr = g_origFactory1(a_iid, a_out);
+        if (SUCCEEDED(hr) && a_out) HookFactory(*a_out);
+        return hr;
+    }
+
+    HRESULT WINAPI Hook_CreateDXGIFactory2(UINT a_flags, REFIID a_iid, void** a_out)
+    {
+        const HRESULT hr = g_origFactory2(a_flags, a_iid, a_out);
+        if (SUCCEEDED(hr) && a_out) HookFactory(*a_out);
+        return hr;
+    }
+
+    void StartFrameCounter()
+    {
+        if (!LoadLibraryW(L"dxgi.dll")) { Log("frame counter: dxgi.dll not loaded - no Frames lines"); return; }
+        const bool ok =
+            MH_CreateHookApi(L"dxgi", "CreateDXGIFactory1", reinterpret_cast<LPVOID>(&Hook_CreateDXGIFactory1),
+                             reinterpret_cast<LPVOID*>(&g_origFactory1)) == MH_OK &&
+            MH_CreateHookApi(L"dxgi", "CreateDXGIFactory2", reinterpret_cast<LPVOID>(&Hook_CreateDXGIFactory2),
+                             reinterpret_cast<LPVOID*>(&g_origFactory2)) == MH_OK &&
+            MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
+        Log("frame counter: dxgi factory hooks %s", ok ? "installed" : "FAILED");
+        if (!ok) return;
+        std::thread([] {
+            for (;;) {
+                Sleep(10000);
+                Pulsar::Diag::FrameStats::Window w;
+                {
+                    std::lock_guard lk(g_framesMutex);
+                    w = g_frames.Take();
+                }
+                if (!w.frames) continue;
+                Log("Frames 10s: %.1f fps (frame p50 %.1f ms, p95 %.1f ms, max %.1f ms, %zu frames; Present %llu, Present1 %llu, other chains %llu)",
+                    w.fps, w.frameMsP50, w.frameMsP95, w.frameMsMax, w.frames,
+                    g_presentCalls.exchange(0), g_present1Calls.exchange(0), g_otherCalls.exchange(0));
+            }
+        }).detach();
+    }
+}
+
 extern "C" __declspec(dllexport) bool SFSEPlugin_Preload(const void* /*sfse*/)
 {
     std::ifstream ini(OwnDirectory() + "PulsarTestHarness.ini");
@@ -595,6 +735,8 @@ extern "C" __declspec(dllexport) bool SFSEPlugin_Preload(const void* /*sfse*/)
         Log("working-set cap %u MB: %s (lastError=%lu)", g_settings.maxWorkingSetMB, ok ? "set" : "FAILED",
             ok ? 0ul : GetLastError());
     }
+
+    StartFrameCounter();
 
     if (g_settings.blockCloudWrites) {
         if (!ExeImportsDll("steam_api64.dll")) {
