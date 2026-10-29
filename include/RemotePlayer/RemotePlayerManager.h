@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 #include "Animation/BoneSync.h"
 #include "Network/PacketTypes.h"
@@ -97,6 +98,11 @@ namespace Pulsar::RemotePlayer
         uint32_t GetRemoteCellID() const { return m_remoteCellID.load(std::memory_order_acquire); }
 
         bool IsSpawned() const { return m_spawned; }
+        // 2-4 players: an extra figure is a player other than the first partner; it
+        // spawns by PlaceAtMe from C++ instead of the PULSAR.esp script.
+        void SetExtra(uint8_t a_playerId);
+        bool IsExtra() const { return m_extra; }
+        uint8_t PlayerId() const { return m_playerId; }
         // True if spawn is already in-flight (pending, delayed, or done) - prevents re-triggering
         bool IsSpawnPending() const { return m_spawned || m_delayedSpawnAt > 0 || m_pendingForceRespawn.load() || m_pendingSpawn.load(); }
         bool IsGlobsResolved() const { return m_globsResolved; }
@@ -146,6 +152,22 @@ namespace Pulsar::RemotePlayer
         void DoEquipWeapon();
         void DoEquipArmor();
         void FindSpawnedActor();
+        void ConfigureFoundActor(uint32_t formID);
+        void DoSpawnExtra();
+        void FindExtraSpawnedActor();
+        void DoDespawnExtra();
+
+        bool                         m_extra = false;
+        uint8_t                      m_playerId = 0;
+        std::unordered_set<uint32_t> m_preSpawn;            // actors near the player before PlaceAtMe
+        std::atomic<uint32_t>        m_placedFormID{ 0 };    // the reference PlaceAtMe returned (VM callback)
+        // Per-figure animation state (was file-static when there was one figure).
+        uint64_t m_forceAnimUntil = 0;        // force-animation bypass window
+        bool     m_cloneSneaking = false;
+        int32_t  m_cloneJumpState = 0;
+        uint64_t m_syntheticFallAt = 0;       // scheduled synthetic JumpFall fire tick
+        uint64_t m_landReassertUntil = 0;     // jump landing watchdog window
+        uint64_t m_lastLandReassertMs = 0;
         void FindLookMarker();
 
         // Bone sync (thread-safe pending buffer)
@@ -258,5 +280,14 @@ namespace Pulsar::RemotePlayer
         RemotePositionData  m_targetPosData{};
     };
 
-    RemotePlayerManager& GetRemotePlayerManager();
+    RemotePlayerManager& GetRemotePlayerManager();   // the first partner's figure
+
+    // 2-4 players: the figure of any remote player (the first partner's is the one
+    // above), which player is the first partner, every figure's actor, and the game-
+    // thread tick of the extra figures.
+    RemotePlayerManager& GetRemotePlayerFigure(uint8_t a_playerId);
+    void    SetFirstPartner(uint8_t a_playerId);
+    uint8_t FirstPartner();
+    bool    IsFigureActor(RE::Actor* a_actor);
+    void    ProcessExtraFigures();
 }

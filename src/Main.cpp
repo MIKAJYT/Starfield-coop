@@ -1653,6 +1653,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 // off, or after CloneManager takes over the RemotePlayer role.
 
                 PROF_CALL("RemotePlayer::GetRemotePlayerManager.ProcessPending", Pulsar::RemotePlayer::GetRemotePlayerManager().ProcessPending());
+                PROF_CALL("RemotePlayer::ProcessExtraFigures", Pulsar::RemotePlayer::ProcessExtraFigures());   // players 2-4
 
                 // Legacy: interactions (drop sync etc.)
                 PROF_CALL("Companion::GetInteractionManager.ProcessPending", Pulsar::Companion::GetInteractionManager().ProcessPending());

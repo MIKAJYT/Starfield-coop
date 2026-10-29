@@ -39,6 +39,7 @@
 #include <cmath>
 #include <unordered_set>
 #include <MinHook.h>
+#include "Papyrus/GameCalls.h"
 
 using namespace std::string_view_literals;
 
@@ -60,10 +61,46 @@ namespace Pulsar::RemotePlayer
         return g_remotePlayerManager;
     }
 
+    // 2-4 players: the first partner's figure is g_remotePlayerManager; every other
+    // remote player has an extra figure, indexed by player ID.
+    static RemotePlayerManager g_extraFigures[4];
+    static std::atomic<uint8_t> g_firstPartnerId{ 0 };
+
+    void SetFirstPartner(uint8_t a_playerId) { g_firstPartnerId.store(a_playerId, std::memory_order_release); }
+    uint8_t FirstPartner() { return g_firstPartnerId.load(std::memory_order_acquire); }
+
+    RemotePlayerManager& GetRemotePlayerFigure(uint8_t a_playerId)
+    {
+        if (a_playerId >= 4 || a_playerId == FirstPartner()) return g_remotePlayerManager;
+        auto& f = g_extraFigures[a_playerId];
+        if (!f.IsExtra()) f.SetExtra(a_playerId);
+        return f;
+    }
+
+    bool IsFigureActor(RE::Actor* a_actor)
+    {
+        if (!a_actor) return false;
+        if (a_actor == g_remotePlayerManager.GetRemoteActor()) return true;
+        for (auto& f : g_extraFigures)
+            if (f.IsExtra() && a_actor == f.GetRemoteActor()) return true;
+        return false;
+    }
+
+    void ProcessExtraFigures()
+    {
+        for (auto& f : g_extraFigures)
+            if (f.IsExtra()) f.ProcessPending();
+    }
+
+    void RemotePlayerManager::SetExtra(uint8_t a_playerId)
+    {
+        m_extra = true;
+        m_playerId = a_playerId;
+    }
+
     // --- EvaluatePackage hook via MinHook (blocks AI on clone) ---
     using EvaluatePackage_t = void(__fastcall*)(RE::Actor*, bool, bool);
     static EvaluatePackage_t s_origEvaluatePackage = nullptr;
-    static RE::Actor* s_hookCloneActor = nullptr;
     static bool s_mhInitialized = false;
 
     // also block the PLAYER-clone's engine AI-eval in proc cells (static
@@ -129,7 +166,7 @@ namespace Pulsar::RemotePlayer
     static bool IsRemoteOwnedActor(RE::Actor* a_actor)
     {
         if (!a_actor) return false;
-        if (a_actor == s_hookCloneActor) return true;
+        if (IsFigureActor(a_actor)) return true;
         __try {
             return Pulsar::NPCSync::IsRemoteOwned(a_actor->formID);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -174,7 +211,7 @@ namespace Pulsar::RemotePlayer
                 // (now weapon-synced) gun. Gated for instant revert if the April
                 // silent-death returns (then Layer-1 StopCombat carries it). Only the
                 // player-clone - NPC clones keep their existing proc-cell behavior.
-                if (a_this == s_hookCloneActor &&
+                if (IsFigureActor(a_this) &&
                     g_blockPlayerCloneAiInProc.load(std::memory_order_relaxed)) {
                     return;  // block - no AI eval for the player clone
                 }
@@ -224,7 +261,6 @@ namespace Pulsar::RemotePlayer
     // NOTE: Skyrim Together uses thread_local, but Starfield dispatches actions on
     // different threads than the caller. Using atomic instead.
     std::atomic<bool> g_forceAnimation{false};
-    static uint64_t s_forceAnimUntil = 0;  // timer for g_forceAnimation bypass window
 
     // Pitch bone overlay state (Phase 0: sinus test, later: network pitch)
     static BoneSync::BoneCache s_clonePitchBoneCache;
@@ -787,7 +823,7 @@ namespace Pulsar::RemotePlayer
             // to start (engine queued ActionGetUp) but then immediately get
             // cancelled, which is why the clone looked like it was floating
             // in front of the FURN instead of sitting in it.
-            if (actor == s_hookCloneActor &&
+            if (IsFigureActor(actor) &&
                 Pulsar::VehicleSync::IsCloneSeated(actor)) {
                 return s_origPerformAction(actionData);
             }
@@ -853,7 +889,7 @@ namespace Pulsar::RemotePlayer
 
         // Log ALL actor actions for fire tracking (player + Sarah + any NPC)
         auto* player = RE::PlayerCharacter::GetSingleton();
-        if (actor != s_hookCloneActor) {
+        if (!IsFigureActor(actor)) {
             RE::BGSAction* anyAction = *reinterpret_cast<RE::BGSAction**>(
                 reinterpret_cast<uintptr_t>(actionData) + 0x18);
             if (anyAction) {
@@ -1595,7 +1631,7 @@ namespace Pulsar::RemotePlayer
 
     void RemotePlayerManager::ProcessPending()
     {
-        if (!m_globsResolved) {
+        if (!m_globsResolved && !m_extra) {
             ResolveGlobs();
         }
 
@@ -1722,7 +1758,7 @@ namespace Pulsar::RemotePlayer
                 m_graphKickstartDrawAt = 0;
                 g_forceAnimation = true;
                 m_remoteActor->DrawWeaponMagicHands(true);
-                s_forceAnimUntil = kNow + 300;
+                m_forceAnimUntil = kNow + 300;
                 // 2026-04-20: bumped 500→2000ms. Log showed that 500ms was
                 // too short - engine didn't register drawn-state before our
                 // holster, so the holster became a non-transition and the
@@ -1735,7 +1771,7 @@ namespace Pulsar::RemotePlayer
                 m_graphKickstartHolsterAt = 0;
                 g_forceAnimation = true;
                 m_remoteActor->DrawWeaponMagicHands(false);
-                s_forceAnimUntil = kNow + 300;
+                m_forceAnimUntil = kNow + 300;
                 m_graphKickstartDone = true;
                 PLOG_INFO("[PULSAR] GraphKickstart: holster fired (graph init complete)"sv);
             }
@@ -1753,7 +1789,7 @@ namespace Pulsar::RemotePlayer
             if (m_remoteActor && !Pulsar::Coop::Mortality::IsRemoteDowned()) {
                 g_forceAnimation = true;
                 m_remoteActor->DrawWeaponMagicHands(false);  // stage 1: holster (reset graph)
-                s_forceAnimUntil = now + 500;
+                m_forceAnimUntil = now + 500;
                 m_pendingRedrawDrawAt = now + 250;           // stage 2 scheduled
                 m_weaponDrawn = false;
                 m_weaponDrawTarget = false;
@@ -1768,7 +1804,7 @@ namespace Pulsar::RemotePlayer
                 SafeForceWeaponSheathedState(m_remoteActor);
                 g_forceAnimation = true;
                 m_remoteActor->DrawWeaponMagicHands(true);   // stage 2: real 0->drawn transition
-                s_forceAnimUntil = now + 500;
+                m_forceAnimUntil = now + 500;
                 m_weaponDrawn = true;
                 m_weaponDrawTarget = true;
                 PLOG_INFO("[PULSAR] Deferred weapon re-draw complete (holster->draw) weapon=0x{:08X}"sv,
@@ -1844,7 +1880,7 @@ namespace Pulsar::RemotePlayer
             }
         }
 
-        if (m_hasPosition && m_globsResolved) {
+        if (m_hasPosition && (m_globsResolved || m_extra)) {
             DoSetPosition();
         }
 
@@ -1859,9 +1895,9 @@ namespace Pulsar::RemotePlayer
         // g_forceAnimUntil is namespace-level (see top of namespace)
         {
             uint64_t now = GetTickCount64();
-            if (s_forceAnimUntil > 0 && now >= s_forceAnimUntil) {
+            if (m_forceAnimUntil > 0 && now >= m_forceAnimUntil) {
                 g_forceAnimation = false;
-                s_forceAnimUntil = 0;
+                m_forceAnimUntil = 0;
             }
         }
 
@@ -1911,7 +1947,7 @@ namespace Pulsar::RemotePlayer
                     m_weaponDrawn = m_weaponDrawTarget;
                     g_forceAnimation = true;
                     m_remoteActor->DrawWeaponMagicHands(m_weaponDrawn);
-                    s_forceAnimUntil = now + 500;
+                    m_forceAnimUntil = now + 500;
                     PLOG_INFO("[PULSAR] Forced DrawWeaponMagicHands({})"sv, m_weaponDrawn);
                 }
             }
@@ -1940,15 +1976,14 @@ namespace Pulsar::RemotePlayer
         // Sneak sync - force crouch/stand based on sender state
         if (m_remoteActor && m_hasPosition && !skipCloneGraphOps) {
             bool wantSneak = (UnpackAnimFlags(m_targetPosData.animFlags).iSyncRelaxReadySneak == 2);
-            static bool s_cloneSneaking = false;
 
-            if (wantSneak != s_cloneSneaking) {
-                s_cloneSneaking = wantSneak;
+            if (wantSneak != m_cloneSneaking) {
+                m_cloneSneaking = wantSneak;
                 RE::BSFixedString eventName(wantSneak ? "SneakStart" : "SneakStop");
                 g_forceAnimation = true;
                 SafeNotifyAnimGraph(m_remoteActor, eventName);
                 uint64_t now = GetTickCount64();
-                s_forceAnimUntil = now + 200;
+                m_forceAnimUntil = now + 200;
                 PLOG_INFO("[PULSAR] Forced sneak: {}"sv, wantSneak ? "crouch" : "stand");
             }
         }
@@ -1958,14 +1993,10 @@ namespace Pulsar::RemotePlayer
         // rapid transitions (JumpUp→JumpFall in ~50ms, or short jumps where
         // 2→0 ground-reset happened within the cooldown window). Result:
         // fall animation stuck after landing, freeze-in-air mid-jump. The
-        // netJump != s_cloneJumpState check already dedupes same-state
+        // netJump != m_cloneJumpState check already dedupes same-state
         // packets, so no event spam without the cooldown.
         if (m_remoteActor && m_hasPosition && !skipCloneGraphOps) {
             int32_t netJump = m_targetPosData.vars.iSyncJumpState;
-            static int32_t s_cloneJumpState = 0;
-            static uint64_t s_syntheticFallAt = 0;  // scheduled synthetic JumpFall fire tick
-            static uint64_t s_landReassertUntil = 0;   // #clone-jump landing watchdog window
-            static uint64_t s_lastLandReassertMs = 0;
 
             uint64_t now = GetTickCount64();
 
@@ -1976,15 +2007,15 @@ namespace Pulsar::RemotePlayer
             // (tucked legs) → visual "Klumpen/ball" until landing.
             // Fix: if state 2 doesn't arrive within 250ms of state 1, fire
             // JumpFall synthetically so the clone's graph transitions properly.
-            if (s_syntheticFallAt > 0 && now >= s_syntheticFallAt) {
-                s_syntheticFallAt = 0;
+            if (m_syntheticFallAt > 0 && now >= m_syntheticFallAt) {
+                m_syntheticFallAt = 0;
                 // Only fire if we're still in "up" state - if state already
                 // transitioned to 2 or 0, real path already fired JumpFall/Down.
-                if (s_cloneJumpState == 1 && m_remoteActor) {
+                if (m_cloneJumpState == 1 && m_remoteActor) {
                     g_forceAnimation = true;
                     RE::BSFixedString eF("JumpFall");
                     SafeNotifyAnimGraph(m_remoteActor, eF);
-                    s_forceAnimUntil = now + 700;
+                    m_forceAnimUntil = now + 700;
                     PLOG_INFO("[PULSAR] Synthetic JumpFall fired (state 2 missing)"sv);
                 }
             }
@@ -1997,14 +2028,14 @@ namespace Pulsar::RemotePlayer
             // grounded for a short window after landing, re-assert grounded a few
             // times (rate-limited) so a missed transition self-corrects. JumpDown on
             // an already-grounded graph is a no-op, so clean landings are unaffected.
-            if (s_landReassertUntil > 0 && now < s_landReassertUntil &&
-                netJump == 0 && s_cloneJumpState == 0 && m_remoteActor &&
-                (now - s_lastLandReassertMs) >= 120) {
-                s_lastLandReassertMs = now;
+            if (m_landReassertUntil > 0 && now < m_landReassertUntil &&
+                netJump == 0 && m_cloneJumpState == 0 && m_remoteActor &&
+                (now - m_lastLandReassertMs) >= 120) {
+                m_lastLandReassertMs = now;
                 g_forceAnimation = true;
                 RE::BSFixedString eD("JumpDown");
                 SafeNotifyAnimGraph(m_remoteActor, eD);
-                s_forceAnimUntil = now + 150;
+                m_forceAnimUntil = now + 150;
                 RE::BSTSmartPointer<RE::BSAnimationGraphManager> gMgr;
                 if (SafeGetAnimGraphManager(m_remoteActor, gMgr) && gMgr &&
                     gMgr->graphs.size() > 0) {
@@ -2014,14 +2045,14 @@ namespace Pulsar::RemotePlayer
                         ForceSetGraphIntDirect(graph.get(), vt[0x20], "iSyncJumpState", 0);
                     }
                 }
-            } else if (s_landReassertUntil > 0 &&
-                       (now >= s_landReassertUntil || netJump != 0)) {
-                s_landReassertUntil = 0;   // window elapsed or a new jump started
+            } else if (m_landReassertUntil > 0 &&
+                       (now >= m_landReassertUntil || netJump != 0)) {
+                m_landReassertUntil = 0;   // window elapsed or a new jump started
             }
 
-            if (netJump != s_cloneJumpState) {
-                int32_t prevJump = s_cloneJumpState;
-                s_cloneJumpState = netJump;
+            if (netJump != m_cloneJumpState) {
+                int32_t prevJump = m_cloneJumpState;
+                m_cloneJumpState = netJump;
 
                 // iSyncJumpState: 0=grounded, 1=jumpup/takeoff, 2=falling,
                 // 3=boostpack active (confirmed via T124 host-diag: sequence
@@ -2033,9 +2064,9 @@ namespace Pulsar::RemotePlayer
                     g_forceAnimation = true;
                     RE::BSFixedString e1("JumpUp");
                     SafeNotifyAnimGraph(m_remoteActor, e1);
-                    s_forceAnimUntil = now + 1500;
+                    m_forceAnimUntil = now + 1500;
                     // Schedule synthetic JumpFall in case state 2 never arrives
-                    s_syntheticFallAt = now + 250;
+                    m_syntheticFallAt = now + 250;
                     PLOG_INFO("[PULSAR] Forced jump: JumpUp (state={} prev={})"sv, netJump, prevJump);
                 } else if (netJump == 3) {
                     // #clone-jump (2026-06-25): planet jumps engage the boostpack, so
@@ -2048,30 +2079,30 @@ namespace Pulsar::RemotePlayer
                     g_forceAnimation = true;
                     RE::BSFixedString e1("JumpUp");
                     SafeNotifyAnimGraph(m_remoteActor, e1);
-                    s_forceAnimUntil = now + 1500;
-                    if (s_syntheticFallAt == 0) s_syntheticFallAt = now + 400;
+                    m_forceAnimUntil = now + 1500;
+                    if (m_syntheticFallAt == 0) m_syntheticFallAt = now + 400;
                     PLOG_INFO("[PULSAR] Forced jump: boost-as-JumpUp (state={} prev={})"sv, netJump, prevJump);
                 } else if (netJump == 2) {
                     // Fall phase - real state 2 received, cancel synthetic.
                     // Also covers boost-descent (3→2 when boost ends).
-                    s_syntheticFallAt = 0;
+                    m_syntheticFallAt = 0;
                     g_forceAnimation = true;
                     // #clone-jump - boost is now treated as JumpUp (no boost pose), so
                     // the descent is a plain fall; no BoostDown needed.
                     RE::BSFixedString e1("JumpFall");
                     SafeNotifyAnimGraph(m_remoteActor, e1);
-                    s_forceAnimUntil = now + 700;
+                    m_forceAnimUntil = now + 700;
                     PLOG_INFO("[PULSAR] Forced jump: JumpFall (state={} prev={})"sv, netJump, prevJump);
                 } else if (netJump == 0 && (prevJump == 2 || prevJump == 1 || prevJump == 3)) {
                     // Landing - cancel any pending synthetic fall.
-                    s_syntheticFallAt = 0;
+                    m_syntheticFallAt = 0;
                     g_forceAnimation = true;
                     RE::BSFixedString e1("JumpDown");
                     SafeNotifyAnimGraph(m_remoteActor, e1);
-                    s_forceAnimUntil = now + 400;
+                    m_forceAnimUntil = now + 400;
                     // #clone-jump - arm the landing watchdog so a JumpDown that didn't
                     // take (graph still in fall) is re-asserted over the next ~600ms.
-                    s_landReassertUntil = now + 600;
+                    m_landReassertUntil = now + 600;
                     PLOG_INFO("[PULSAR] Forced jump: JumpDown (state={} prev={})"sv, netJump, prevJump);
                 }
 
@@ -2115,13 +2146,15 @@ namespace Pulsar::RemotePlayer
             }
         }
 
-        // Check if Papyrus has finished spawning
-        if (m_globSpawn && m_globSpawn->value == 2.0f && !m_remoteActor) {
+        // Check if Papyrus has finished spawning (an extra figure: PlaceAtMe from C++)
+        if (m_extra && m_spawned && !m_remoteActor) {
+            FindExtraSpawnedActor();
+        } else if (m_globSpawn && m_globSpawn->value == 2.0f && !m_remoteActor) {
             FindSpawnedActor();
         }
 
         // Resolve LookAt marker (spawned by Papyrus after clone)
-        if (m_remoteActor && !m_lookMarker) {
+        if (!m_extra && m_remoteActor && !m_lookMarker) {
             FindLookMarker();
         }
 
@@ -2184,6 +2217,7 @@ namespace Pulsar::RemotePlayer
 
     void RemotePlayerManager::DoSpawn()
     {
+        if (m_extra) { DoSpawnExtra(); return; }
         if (!m_globsResolved || m_spawned) return;
 
         m_globSpawn->value = 1.0f;
@@ -2198,6 +2232,7 @@ namespace Pulsar::RemotePlayer
 
     void RemotePlayerManager::DoDespawn()
     {
+        if (m_extra) { DoDespawnExtra(); return; }
         if (!m_globSpawn) return;
 
         // release our owned headlamp light on the clone WHILE it is still
@@ -2232,7 +2267,6 @@ namespace Pulsar::RemotePlayer
         s_directCtrlVtable = nullptr;
         s_directCtrlEnabled = false;
         s_movCtrlProbed = false;
-        s_hookCloneActor = nullptr;
 
         // Clear FormHi/Lo so FindSpawnedActor won't pick up stale save-state FormIDs
         if (m_globFormHi) m_globFormHi->value = 0.0f;
@@ -2303,6 +2337,17 @@ namespace Pulsar::RemotePlayer
         m_remoteActor = form->As<RE::Actor>();
         if (m_remoteActor) {
             m_globSpawn->value = 3.0f;
+            ConfigureFoundActor(formID);
+        } else {
+            PLOG_WARN("[PULSAR] FormID 0x{:08X} is not an Actor"sv, formID);
+        }
+    }
+
+    // Make a freshly spawned figure ours: cosmetic shots, protected, AI and action hooks,
+    // a character controller. Shared by the first partner's figure and extra figures.
+    void RemotePlayerManager::ConfigureFoundActor(uint32_t formID)
+    {
+        {
             m_spawned = true;
             // F.2-v2 crash fix: the equip apply (DoEquipWeapon/Armor) touches the
             // clone's anim graph; running it on a freshly-respawned clone whose
@@ -2342,7 +2387,6 @@ namespace Pulsar::RemotePlayer
                     RE::Actor::BOOL_FLAGS::kAttackingDisabled,
                     RE::Actor::BOOL_FLAGS::kEssential,
                     RE::Actor::BOOL_FLAGS::kProtected);
-                s_hookCloneActor = m_remoteActor;
                 // Both hooks installed; pass-through branches for proc-cell clone
                 // are wrapped in SEH (IsActorInProcCell) to tolerate cell-transition
                 // races.
@@ -2354,8 +2398,7 @@ namespace Pulsar::RemotePlayer
                     RE::Actor::BOOL_FLAGS::kEssential,
                     RE::Actor::BOOL_FLAGS::kProtected);
 
-                // Install hooks to block AI + ALL actions on clone
-                s_hookCloneActor = m_remoteActor;
+                // Install hooks to block AI + ALL actions on clone (IsFigureActor)
                 InstallEvalPackageHook();
                 InstallPerformActionHook();
 
@@ -2410,9 +2453,134 @@ namespace Pulsar::RemotePlayer
                     }
                 }
             }
-        } else {
-            PLOG_WARN("[PULSAR] FormID 0x{:08X} is not an Actor"sv, formID);
         }
+    }
+
+    // -- figures of players 2-4 (extra): PlaceAtMe from C++, like the solo buddy --
+
+    // The player's leveled actor base: what PulsarRemoteControl.DoSpawn places
+    // (Game.GetPlayer().GetLeveledActorBase()). PlaceAtMe of the plain player NPC_ record
+    // returns None (run 20261029-224410). Asked from Papyrus once, then cached.
+    static std::atomic<uint32_t> g_leveledBaseID{ 0 };
+    static std::atomic<bool>     g_leveledBaseAsked{ false };
+
+    static RE::TESNPC* PlayerLeveledBase(RE::PlayerCharacter* a_player)
+    {
+        if (const auto id = g_leveledBaseID.load(std::memory_order_acquire)) {
+            auto* form = RE::TESForm::LookupByID(id);
+            return form ? form->As<RE::TESNPC>() : nullptr;
+        }
+        if (!g_leveledBaseAsked.exchange(true)) {
+            auto* vm = GameCalls::VM();
+            auto self = GameCalls::ObjectFor(static_cast<RE::Actor*>(a_player));
+            const bool ok = GameCalls::CallMethodForResult(vm, self, "GetLeveledActorBase", {},
+                [](const RE::BSScript::Variable& a_result) {
+                    auto* npc = a_result.is<RE::BSScript::Object>() ? RE::BSScript::UnpackVariable<RE::TESNPC>(a_result) : nullptr;
+                    PLOG_INFO("[PULSAR] [Players] player's leveled actor base: 0x{:08X}"sv, npc ? npc->formID : 0u);
+                    if (npc) g_leveledBaseID.store(npc->formID, std::memory_order_release);
+                    else g_leveledBaseAsked.store(false, std::memory_order_release);   // ask again
+                });
+            if (!ok) g_leveledBaseAsked.store(false, std::memory_order_release);
+        }
+        return nullptr;   // not known yet: the next tick tries again
+    }
+
+    void RemotePlayerManager::DoSpawnExtra()
+    {
+        if (m_spawned) return;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* base = player ? PlayerLeveledBase(player) : nullptr;
+        if (!base) {
+            m_delayedSpawnAt.store(GetTickCount64() + 250);   // retry once the base is known
+            return;
+        }
+        m_preSpawn.clear();
+        GameCalls::ForEachHighActor([this](RE::Actor* a) { m_preSpawn.insert(a->formID); });
+        auto* vm = GameCalls::VM();
+        auto self = GameCalls::ObjectFor(static_cast<RE::Actor*>(player));
+        // PlaceAtMe(akFormToPlace, aiCount, abForcePersist, abInitiallyDisabled, abDeleteWhenAble,
+        //           akOffsetValues, akAliasToFill, abSnapOffsetToNavmesh): Starfield takes all 8
+        // from a C++ dispatch (5 gave "Incorrect number of arguments", run 20261029-224410).
+        // Its return value is the new reference; the VM hands it to the callback.
+        m_placedFormID.store(0, std::memory_order_release);
+        auto* placed = &m_placedFormID;
+        const bool ok = GameCalls::CallMethodForResult(vm, self, "PlaceAtMe",
+            { GameCalls::Arg(static_cast<RE::TESForm*>(base)), GameCalls::Arg(std::int32_t(1)),
+              GameCalls::Arg(true), GameCalls::Arg(false), GameCalls::Arg(false),
+              RE::BSScript::Variable{}, RE::BSScript::Variable{}, GameCalls::Arg(true) },   // akOffsetValues, akAliasToFill, abSnapOffsetToNavmesh
+            [placed, id = m_playerId](const RE::BSScript::Variable& a_result) {
+                const bool isObj = a_result.is<RE::BSScript::Object>();
+                const bool isNone = a_result.is<std::nullptr_t>();
+                RE::TESObjectREFR* ref = isObj ? RE::BSScript::UnpackVariable<RE::TESObjectREFR>(a_result) : nullptr;
+                PLOG_INFO("[PULSAR] [Players] figure of player {}: PlaceAtMe returned object={} none={} ref=0x{:08X}"sv,
+                          id, isObj, isNone, ref ? ref->formID : 0u);
+                if (ref) placed->store(ref->formID, std::memory_order_release);
+            });
+        PLOG_INFO("[PULSAR] [Players] figure of player {}: PlaceAtMe dispatched={}"sv, m_playerId, ok);
+        if (!ok) return;
+        m_spawned = true;
+        m_lerpInit = false;
+        m_spawnRequestTime = GetTickCount64();
+        m_spawnTimeoutWarned = false;
+    }
+
+    void RemotePlayerManager::FindExtraSpawnedActor()
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* base = player ? PlayerLeveledBase(player) : nullptr;
+        if (!base) return;
+        RE::Actor* found = nullptr;
+        // The reference PlaceAtMe returned, or else a new actor with the player's base nearby.
+        if (const auto placedID = m_placedFormID.load(std::memory_order_acquire)) {
+            auto* form = RE::TESForm::LookupByID(placedID);
+            found = form ? form->As<RE::Actor>() : nullptr;
+            if (!found) PLOG_WARN("[PULSAR] [Players] figure of player {}: PlaceAtMe returned 0x{:08X}, not an actor"sv, m_playerId, placedID);
+        }
+        if (!found) GameCalls::ForEachHighActor([&](RE::Actor* a) {
+            if (found || a == player || m_preSpawn.count(a->formID)) return;
+            if ((a->formID & 0xFF000000u) != 0xFF000000u) return;   // placed refs are dynamic
+            if (IsFigureActor(a)) return;                             // another player's figure
+            auto* npc = a->GetNPC();
+            if (npc && npc->formID == base->formID) found = a;
+        });
+        if (found) {
+            m_remoteActor = found;
+            PLOG_DIAG("[PULSAR] co-op: the figure of player {} is here"sv, m_playerId);
+            ConfigureFoundActor(found->formID);
+            return;
+        }
+        if (GetTickCount64() - m_spawnRequestTime > 10000) {
+            PLOG_WARN("[PULSAR] [Players] figure of player {}: spawned actor not found within 10 s - retrying"sv, m_playerId);
+            m_spawned = false;   // the next position packet spawns again
+        }
+    }
+
+    void RemotePlayerManager::DoDespawnExtra()
+    {
+        if (m_remoteActor) {
+            Pulsar::FlashlightSync::ReleaseForClone(m_remoteActor);
+            auto* vm = GameCalls::VM();
+            auto self = GameCalls::ObjectFor(m_remoteActor);
+            const bool dis = GameCalls::CallMethod(vm, self, "DisableNoWait", { GameCalls::Arg(false) });
+            const bool del = GameCalls::CallMethod(vm, self, "Delete", {});
+            PLOG_INFO("[PULSAR] [Players] figure of player {} removed (DisableNoWait={} Delete={})"sv, m_playerId, dis, del);
+        }
+        m_remoteActor = nullptr;
+        m_spawned = false;
+        m_hasPosition = false;
+        m_hasBones = false;
+        m_lerpInit = false;
+        m_boneCache.resolved = false;
+        m_currentWeaponFormID = 0;
+        m_currentArmorCount = 0;
+        m_weaponDrawn = false;
+        m_weaponDrawTarget = false;
+        m_weaponDrawChangeTime = 0;
+        m_pendingRedraw = 0;
+        m_pendingRedrawDrawAt = 0;
+        m_graphKickstartDrawAt = 0;
+        m_graphKickstartHolsterAt = 0;
+        m_graphKickstartDone = false;
     }
 
     // --- Movement Controller: IMovementDirectControl ---
@@ -2633,7 +2801,7 @@ namespace Pulsar::RemotePlayer
         if (m_weaponDrawn) {
             g_forceAnimation = true;
             m_remoteActor->DrawWeaponMagicHands(false);  // holster old weapon NOW
-            s_forceAnimUntil = GetTickCount64() + 300;
+            m_forceAnimUntil = GetTickCount64() + 300;
             m_weaponDrawn = false;       // mark as holstered
             m_weaponDrawTarget = false;  // prevent normal draw code from triggering early
             m_pendingRedraw = GetTickCount64() + 800;
@@ -2721,7 +2889,7 @@ namespace Pulsar::RemotePlayer
 
     void RemotePlayerManager::DoSetPosition()
     {
-        if (!m_globsResolved) return;
+        if (!m_globsResolved && !m_extra) return;
 
         // Phase I - drop position applies while we're mid cell-transition.
         // Stale incoming PKT_POSITION (with peer's pre-transition coords)
@@ -2837,7 +3005,7 @@ namespace Pulsar::RemotePlayer
             }
 
             // One-time probe of Movement Controller interfaces (reset on despawn)
-            if (!s_movCtrlProbed) {
+            if (!m_extra && !s_movCtrlProbed) {
                 s_movCtrlProbed = true;
                 ProbeMovementController(m_remoteActor);
             }
@@ -2952,7 +3120,7 @@ namespace Pulsar::RemotePlayer
                     }
                 }
             }
-            s_clonePitchActor = m_remoteActor;
+            if (!m_extra) s_clonePitchActor = m_remoteActor;
 
             // Fix A: position is now applied (clone snaps to its synced spot
             // immediately after a respawn instead of clinging to the player's head).
@@ -2967,7 +3135,7 @@ namespace Pulsar::RemotePlayer
             // During jump (iSyncJumpState != 0), set speed to 0 so locomotion doesn't override jump anim
             // 2026-04-19: Proc-cell skip removed - original crash source was NPCSync,
             // not DirectControl. DirectControl has its own SEH wrapper below.
-            if (s_directCtrlEnabled && s_directCtrlVtable) {
+            if (!m_extra && s_directCtrlEnabled && s_directCtrlVtable) {
                 float netSpeed = m_targetPosData.vars.speed;
                 if (m_targetPosData.vars.iSyncJumpState != 0) {
                     netSpeed = 0.0f;  // Let jump animation play without locomotion interference
@@ -3115,7 +3283,7 @@ namespace Pulsar::RemotePlayer
                                     *reinterpret_cast<void**>(rd + 0x28) = s_aoVr.get();
                                     g_forceAnimation = true;
                                     SafeCallPerformAction(s_origPerformAction, rd);
-                                    s_forceAnimUntil = GetTickCount64() + 500;
+                                    m_forceAnimUntil = GetTickCount64() + 500;
                                     PLOG_INFO("[PULSAR] Fired ActionSightedRelease (timer expired)"sv);
                                 }
                             }
@@ -3264,7 +3432,8 @@ namespace Pulsar::RemotePlayer
             }
         }
 
-        // Write GLOBs
+        // Write GLOBs (the PULSAR.esp script's fallback; an extra figure has none)
+        if (m_extra) return;
         m_globPosX->value  = targetX;
         m_globPosY->value  = targetY;
         m_globPosZ->value  = targetZ;

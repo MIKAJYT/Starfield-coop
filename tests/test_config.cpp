@@ -58,6 +58,8 @@ TEST(Config, MaxPlayers)
     CHECK_EQ(Parse("MaxPlayers = 2\n").maxPlayers, 2u);
     CHECK_EQ(Parse("MaxPlayers = 9\n").maxPlayers, 4u);   // out of range: default kept
     CHECK_EQ(Parse("MaxPlayers = 1\n").maxPlayers, 4u);
+    CHECK(Parse("").extraPlayerFigures);
+    CHECK(!Parse("ExtraPlayerFigures = 0\n").extraPlayerFigures);
 }
 
 TEST(Config, DirectSessionSettings)

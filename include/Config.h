@@ -162,6 +162,9 @@ namespace Pulsar
         //      CopyCodeToClipboard = 0, HotkeyPasteReplyCode = F2 (0 = off)
         // Players in a session, the host included (2-4). ini: MaxPlayers = 4
         std::uint32_t maxPlayers         = 4;
+        // Show players 3 and 4 as figures of their own (0: only the first partner's figure).
+        // ini: ExtraPlayerFigures = 0
+        bool        extraPlayerFigures   = true;
         bool        directSession        = false;
         std::string joinCode;
         std::string replyCode;

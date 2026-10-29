@@ -901,6 +901,23 @@ namespace Pulsar::TestBot
         j += std::string(",\"cloneVisible\":") + (cloneVisible ? "true" : "false");
         j += std::string(",\"cloneCell\":\"") + cloneCellBuf + "\"";
         j += ",\"clone\":[" + Num(cl.x) + "," + Num(cl.y) + "," + Num(cl.z) + "]";
+        // 2-4 players: the figures of players other than the first partner.
+        j += ",\"localId\":" + std::to_string(Pulsar::Network::GetSingleton().LocalPlayerId());
+        j += ",\"figures\":[";
+        {
+            bool firstFig = true;
+            for (std::uint8_t id = 0; id < 4; ++id) {
+                if (id == Pulsar::RemotePlayer::FirstPartner()) continue;
+                auto& fig = Pulsar::RemotePlayer::GetRemotePlayerFigure(id);
+                if (!fig.IsExtra()) continue;
+                const ActorSnap fs = Snap(fig.GetRemoteActor());
+                if (!fs.valid) continue;
+                j += std::string(firstFig ? "" : ",") + "{\"id\":" + std::to_string(id) + ",\"pos\":[" + Num(fs.x) + "," +
+                     Num(fs.y) + "," + Num(fs.z) + "],\"has3D\":" + (fs.has3D ? "true" : "false") + "}";
+                firstFig = false;
+            }
+        }
+        j += "]";
         j += ",\"scenario\":\"" + s_state.cfg.scenario + "\"";
         j += std::string(",\"acted\":") + (s_state.acted ? "true" : "false");
         j += ",\"actedAtWallMs\":" + std::to_string(s_state.actedAtWallMs);

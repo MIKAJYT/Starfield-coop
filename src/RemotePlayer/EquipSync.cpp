@@ -196,6 +196,6 @@ namespace Pulsar::RemotePlayer::EquipSync
 
         PLOG_INFO("[PULSAR] F.2v2 equip RX: {} items (slot {})"sv,
                   hdr.itemCount, hdr.playerSlot);
-        GetRemotePlayerManager().RequestEquipV2(std::move(entries));
+        GetRemotePlayerFigure(Network::NetworkHost::CurrentSender()).RequestEquipV2(std::move(entries));   // the sender's figure
     }
 }  // namespace Pulsar::RemotePlayer::EquipSync

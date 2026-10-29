@@ -3,6 +3,7 @@
 
 #include "Network/NetworkHost.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "Papyrus/GameCalls.h"
 #include "UI/HudMessage.h"
 
 #include <RE/P/ProcessLists.h>
@@ -20,6 +21,8 @@ using namespace std::string_view_literals;
 namespace Pulsar::Buddy {
 
     namespace {
+        using namespace Pulsar::GameCalls;
+
 
         constexpr std::uint64_t kFindTimeoutMs   = 10000;  // spawn is async on the VM
         constexpr std::uint64_t kFollowPeriodMs  = 2000;
@@ -39,45 +42,6 @@ namespace Pulsar::Buddy {
         bool                              g_teammateLogged = false;
         std::unordered_set<std::uint32_t> g_preSpawn;          // high actors before PlaceAtMe
 
-        RE::BSScript::IVirtualMachine* VM()
-        {
-            auto* game = RE::GameVM::GetSingleton();
-            return game ? game->GetVM() : nullptr;
-        }
-
-        // Script object for a form (binds one if the form has none yet).
-        template <class T>
-        RE::BSTSmartPointer<RE::BSScript::Object> ObjectFor(T* a_form)
-        {
-            RE::BSScript::Variable v;
-            RE::BSScript::PackVariable(v, a_form);
-            if (!v.is<RE::BSScript::Object>()) return nullptr;
-            return RE::BSScript::get<RE::BSScript::Object>(v);
-        }
-
-        bool CallMethod(RE::BSScript::IVirtualMachine* a_vm,
-                        const RE::BSTSmartPointer<RE::BSScript::Object>& a_self,
-                        const char* a_func,
-                        std::vector<RE::BSScript::Variable> a_args)
-        {
-            if (!a_vm || !a_self) return false;
-            auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
-                args.resize(static_cast<std::uint32_t>(a_args.size()));
-                for (std::uint32_t i = 0; i < a_args.size(); ++i) args[i] = a_args[i];
-                return true;
-            };
-            RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback;
-            return a_vm->DispatchMethodCall(a_self, RE::BSFixedString(a_func), argFn, callback, 0);
-        }
-
-        template <class T>
-        RE::BSScript::Variable Arg(T a_val)
-        {
-            RE::BSScript::Variable v;
-            RE::BSScript::PackVariable(v, a_val);
-            return v;
-        }
-
         // On-screen message (UI/HudMessage; a Papyrus DispatchStaticCall of
         // Debug.Notification faulted and ended the game, run 20261028-214018).
         void Notify(const char* a_msg)
@@ -95,56 +59,12 @@ namespace Pulsar::Buddy {
             return (npc && npc->formID == g_baseID) ? actor : nullptr;
         }
 
-        // ── high-process actor walk (same guarded pattern as CoopMortality) ──
-
-        RE::Actor* ResolveHighActor(RE::ProcessLists* a_pl, std::uint32_t a_i)
-        {
-            RE::NiPointer<RE::Actor> sp = a_pl->highActorHandles[a_i].get();
-            return sp.get();
-        }
-
-        RE::Actor* SafeResolveHighActor(RE::ProcessLists* a_pl, std::uint32_t a_i)
-        {
-            __try { return ResolveHighActor(a_pl, a_i); }
-            __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
-        }
-
-        bool SafeReadRawHandle(RE::ProcessLists* a_pl, std::uint32_t a_i, std::uint32_t& a_h)
-        {
-            __try {
-                auto* base = reinterpret_cast<std::uint32_t*>(a_pl->highActorHandles.data());
-                if (!base) return false;
-                a_h = base[a_i];
-                return true;
-            } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-        }
-
-        std::uint32_t SafeHighActorCount(RE::ProcessLists* a_pl)
-        {
-            __try { return static_cast<std::uint32_t>(a_pl->highActorHandles.size()); }
-            __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
-        }
-
         bool SafeReadBoolBits(RE::Actor* a_actor, std::uint32_t& a_bits)
         {
             __try {
                 a_bits = *reinterpret_cast<std::uint32_t*>(reinterpret_cast<std::uint8_t*>(a_actor) + 0x208);
                 return true;
             } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-        }
-
-        template <class F>
-        void ForEachHighActor(F&& a_fn)
-        {
-            auto* pl = RE::ProcessLists::GetSingleton();
-            if (!pl) return;
-            std::uint32_t count = SafeHighActorCount(pl);
-            if (count > 512) count = 512;
-            for (std::uint32_t i = 0; i < count; ++i) {
-                std::uint32_t raw = 0;
-                if (!SafeReadRawHandle(pl, i, raw) || raw == 0 || raw == 0xFFFFFFFFu) continue;
-                if (auto* a = SafeResolveHighActor(pl, i)) a_fn(a);
-            }
         }
 
         float Distance(const RE::NiPoint3& a, const RE::NiPoint3& b)
@@ -171,9 +91,11 @@ namespace Pulsar::Buddy {
             auto* vm = VM();
             auto self = ObjectFor(static_cast<RE::Actor*>(a_player));
             // PlaceAtMe(akFormToPlace, aiCount, abForcePersist, abInitiallyDisabled,
-            // abDeleteWhenAble) - the same 5-argument call PulsarRemoteControl uses.
+            // abDeleteWhenAble, akOffsetValues, akAliasToFill, abSnapOffsetToNavmesh): a C++
+            // dispatch must pass all 8 (5 is refused, run 20261029-224410).
             const bool ok = CallMethod(vm, self, "PlaceAtMe",
-                { Arg(static_cast<RE::TESForm*>(base)), Arg(std::int32_t(1)), Arg(true), Arg(false), Arg(false) });
+                { Arg(static_cast<RE::TESForm*>(base)), Arg(std::int32_t(1)), Arg(true), Arg(false), Arg(false),
+                  RE::BSScript::Variable{}, RE::BSScript::Variable{}, Arg(true) });
             PLOG_INFO("[PULSAR] Buddy: PlaceAtMe(base=0x{:08X}) dispatched={}"sv, base->formID, ok);
             if (!ok) {
                 Notify("PULSAR buddy: spawn failed (see PULSAR.log)");

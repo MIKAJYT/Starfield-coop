@@ -274,6 +274,12 @@ namespace Pulsar
                 if (n >= 2 && n <= 4) cfg.maxPlayers = static_cast<std::uint32_t>(n);
                 PLOG_INFO("[PULSAR] Config: MaxPlayers = {}"sv, cfg.maxPlayers);
             }
+            else if (keyLower == "extraplayerfigures" || keyLower == "extra_player_figures") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.extraPlayerFigures = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: ExtraPlayerFigures = {}"sv, cfg.extraPlayerFigures);
+            }
             else if (keyLower == "directsession" || keyLower == "direct_session") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

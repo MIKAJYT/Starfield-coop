@@ -93,6 +93,11 @@ $diagAllow = @(
     '[PULSAR] co-op: the router opened a port',
     '[PULSAR] co-op: the router did not open a port',
     '[PULSAR] co-op: the other side uses a different join code',
+    # 2-4 players (phase 3): who is in the session.
+    '[PULSAR] co-op: refused a player - the session is full',
+    '[PULSAR] co-op: player ',
+    '[PULSAR] co-op: you are player ',
+    '[PULSAR] co-op: the figure of player ',
     '[PULSAR] NetStats ',
     '[PULSAR] TaskStats '
 )

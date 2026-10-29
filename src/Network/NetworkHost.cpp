@@ -1207,7 +1207,10 @@ namespace Pulsar::Network
             return;
         }
         PeerSlot& slot = *slotPtr;
-        if (!m_peer) m_peer = a_peer;   // the first partner (see IsPrimary)
+        if (!m_peer) {                  // the first partner (see IsPrimary)
+            m_peer = a_peer;
+            RemotePlayer::SetFirstPartner(slot.id);
+        }
         if (!m_isHost) m_localPlayerId.store(0xFF, std::memory_order_release);   // until the roster
 
         // Configure peer timeout: detect dead connections.
@@ -1364,10 +1367,13 @@ namespace Pulsar::Network
         }
         // Data about a player (their figure, gear, vote ...) is applied only from the first
         // partner until each player has a figure of their own; world data from everyone.
-        if (!fromPrimary && Routing::ClassOf(a_packet->data[0]) == Routing::Class::kPlayer) {
+        const uint8_t pt = a_packet->data[0];
+        const bool figureData = Pulsar::GetConfig().extraPlayerFigures &&
+                                (pt == PKT_POSITION || pt == PKT_BONES || pt == PKT_EQUIP_V2 || pt == PKT_FIRE);
+        if (!fromPrimary && !figureData && Routing::ClassOf(pt) == Routing::Class::kPlayer) {
             static std::atomic<uint64_t> s_otherPlayerDrops{ 0 };
             if ((s_otherPlayerDrops.fetch_add(1) & 0x3FF) == 0)
-                PLOG_INFO("[PULSAR] [Players] player {} data 0x{:02X} not applied yet (one partner figure)"sv,
+                PLOG_INFO("[PULSAR] [Players] player {} data 0x{:02X} not applied yet (first partner only)"sv,
                           sender, a_packet->data[0]);
             return;
         }
@@ -1852,7 +1858,8 @@ namespace Pulsar::Network
             // seeing the client. Force a clean respawn here (despawn + fresh spawn
             // at the client's now-co-located position + biped re-attach).
             if (m_isHost) {
-                RemotePlayer::GetRemotePlayerManager().RequestForceRespawn();
+                if (IsPrimary(slot) || Pulsar::GetConfig().extraPlayerFigures)   // ExtraPlayerFigures = 0: first partner only
+                    RemotePlayer::GetRemotePlayerFigure(slot.id).RequestForceRespawn();
                 PLOG_INFO(
                     "[PULSAR] [] client LOAD_COMPLETE → host force-respawn "
                     "clone-of-client (refresh stale/invisible clone)"sv);
@@ -1967,10 +1974,10 @@ namespace Pulsar::Network
             if (reader.Read(pos)) {
                 if (pos.x == 0.0f && pos.y == 0.0f && pos.z == 0.0f) break;
 
-                auto& remoteMgr = RemotePlayer::GetRemotePlayerManager();
+                auto& remoteMgr = RemotePlayer::GetRemotePlayerFigure(CurrentSender());
 
                 // Client: teleport player to host ONCE on first connect
-                if (!m_isHost && !m_clientTeleported) {
+                if (!m_isHost && !m_clientTeleported && CurrentSender() == Routing::kHostId) {
                     m_pendingTeleport = { pos.x, pos.y, pos.z, pos.rotX, pos.rotY, pos.rotZ };
                     m_hasPendingTeleport = true;
                     m_clientTeleported = true;
@@ -1988,7 +1995,7 @@ namespace Pulsar::Network
                 // During WorldSync (save loading), the client is at the main menu - globs aren't
                 // available yet, DoDespawn/DoSpawn are no-ops, causing an infinite storm.
                 // WorldSync::ProcessPending triggers ForceRespawn itself at LOADED state.
-                if (!remoteMgr.IsSpawnPending() && remoteMgr.IsGlobsResolved()) {
+                if (!remoteMgr.IsSpawnPending() && (remoteMgr.IsGlobsResolved() || remoteMgr.IsExtra())) {
                     remoteMgr.RequestForceRespawn();
                 }
 
@@ -2019,15 +2026,15 @@ namespace Pulsar::Network
         case PKT_BONES: {
             BoneData bones{};
             if (reader.Read(bones)) {
-                auto& remoteMgr = RemotePlayer::GetRemotePlayerManager();
+                auto& remoteMgr = RemotePlayer::GetRemotePlayerFigure(CurrentSender());
                 remoteMgr.RequestSetBones(bones);
             }
             break;
         }
-        case PKT_FIRE: {
+        case PKT_FIRE: {   // the sender's figure
             FireData fire{};
             if (reader.Read(fire)) {
-                auto& remoteMgr = RemotePlayer::GetRemotePlayerManager();
+                auto& remoteMgr = RemotePlayer::GetRemotePlayerFigure(CurrentSender());
                 remoteMgr.RequestFire(fire.actionFormID);
             }
             break;
@@ -2103,8 +2110,15 @@ namespace Pulsar::Network
         if (m_isHost && next) {
             PLOG_DIAG("[PULSAR] co-op: player {} left ({} players in the session)"sv, leftId, PlayerCount());
             SendRoster();
-            if (!wasPrimary) return;          // the first partner and its figure stay
-            m_peer = next->peer;              // the next player's figure spawns from its packets
+            if (!wasPrimary) {                // the first partner stays; only this player's figure goes
+                RemotePlayer::GetRemotePlayerFigure(leftId).RequestDespawn();
+                return;
+            }
+            // The next player becomes the first partner: its extra figure goes, the
+            // first-partner figure respawns for it from its next position packet.
+            RemotePlayer::GetRemotePlayerFigure(next->id).RequestDespawn();
+            m_peer = next->peer;
+            RemotePlayer::SetFirstPartner(next->id);
             RemotePlayer::GetRemotePlayerManager().RequestDespawn();
             return;
         }
@@ -2137,9 +2151,13 @@ namespace Pulsar::Network
         // runs on the game thread (TickAutoSave), safe-point gated + debounced.
         Pulsar::Lobby::RequestAutoSave();
 
-        // Despawn clone so it's clean for reconnect
+        // Despawn clone so it's clean for reconnect (and every other player's figure)
         auto& remoteMgr = RemotePlayer::GetRemotePlayerManager();
         remoteMgr.RequestDespawn();
+        for (uint8_t id = 0; id < Routing::kMaxPlayers; ++id) {
+            auto& fig = RemotePlayer::GetRemotePlayerFigure(id);
+            if (fig.IsExtra()) fig.RequestDespawn();
+        }
 
         if (m_isHost) {
             Companion::GetCompanionManager().RequestEnableAI();

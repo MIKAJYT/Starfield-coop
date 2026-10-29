@@ -23,7 +23,7 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
 | Spaceflight: launch, cruise, manual flight, docking, station entry; ship position | partial | Launch done (vote). Flight input is mirrored to the partner. Ship position sync is switched off in the code (`kShipPosSyncEnabled = false`). Docking exists, rough. | 6 |
 | Quest/event sync: quest states, triggers, scripted events (doors, cutscenes, interactions) | partial | Quest stages, doors, locks, activators and dialogue exist. Cutscenes: missing. | 5 |
 | Stability: SFSE + Address Library, crash logging, installer/launcher, lobby UI, crash reports, character reset | partial | SFSE and Address Library yes. Crash guard absorbs known engine crashes, but no crash dumps or reports are written. The launcher (installer, lobby, character backup and reset) is the original C# tool. | 2 (launcher join codes), 7 (crash dumps and reports) |
-| Target: 2-4 players, PC Steam, clear versions | partial | Versions documented (COMPATIBILITY.md). **2 players only.** | 3 |
+| Target: 2-4 players, PC Steam, clear versions | partial | Versions documented (COMPATIBILITY.md). Up to 4 players connect (`MaxPlayers`); the host forwards between clients; every player has a figure on every screen. Bot-tested with 2 game copies plus a headless third player. Votes, rewards, loot and other per-player features still count only the first partner (phase 3c). | 3 |
 
 ## Loot, inventory and progression
 

@@ -66,6 +66,8 @@ param(
     # 2-4 players: once both copies see each other, a headless fake player joins as player 3
     # (tests\RelWithDebInfo\pulsar_fakepeer.exe). The two copies must play on undisturbed.
     [switch]$ThirdPlayer,
+    # Debugging: Papyrus script logs in the test copies (Documents\My Games\Starfield\Logs\Script).
+    [switch]$PapyrusLog,
     [switch]$StaleJoinCode,
     # Extra PULSAR.ini lines for both copies ("Key = value", separated by ";"), for bisects.
     [string]$ExtraIni = "",
@@ -732,6 +734,7 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
         $custom = $custom.Replace("sStartingConsoleCommand=load PulsarQA_Start`r`n", "sStartingConsoleCommand=load PulsarQA_Start`r`nfMasterFilePreLoadMB=0`r`nbPreloadLinkedAreas=0`r`n")
         $custom += "`r`n" + ($LowMemoryIni -replace '(?s)^\[Archive\].*?\r\n\r\n', '')
     }
+    if ($PapyrusLog) { $custom += "`r`n[Papyrus]`r`nbEnableLogging=1`r`nbEnableTrace=1`r`nbLoadDebugInformation=1`r`n" }
     Write-PrivateFile (Join-Path $mg "StarfieldCustom.ini") $custom
     $saves = Join-Path $mg "Saves"
     New-Item -ItemType Directory -Force $saves | Out-Null
@@ -951,7 +954,28 @@ try {
                 elseif (-not ($fakeLog -match 'SAVE_TRANSFER')) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never got its save") }
                 elseif (-not ($fakeLog -match '\b(FROM|0xA8)=')) { $score.Result = "FAIL"; $score.Reasons.Add("player 3 never got player 1's packets forwarded") }
                 elseif ($saves -ne 1) { $score.Result = "FAIL"; $score.Reasons.Add("the client got $saves saves - player 3's join made it reload") }
-                else { W "third player: joined, got its own save, receives player 1's packets; the client loaded 1 save" }
+                else {
+                    # Player 3 (ID 2) walks a 2 m circle near the host: on both copies its own
+                    # figure must be there (3D loaded), near the host, and moving.
+                    $figWhy = @()
+                    foreach ($side in @(@("host", $hostSeen, "player"), @("client", $clientSeen, "clone"))) {
+                        $recent = @($side[1] | Sort-Object wallMs | Select-Object -Last 15)
+                        $pts = @(foreach ($smp in $recent) {
+                            if (-not ($smp.PSObject.Properties.Name -contains 'figures')) { continue }
+                            $f = @($smp.figures | Where-Object { $_.id -eq 2 -and $_.has3D }) | Select-Object -First 1
+                            if ($f) { [pscustomobject]@{ x = [double]$f.pos[0]; y = [double]$f.pos[1]; rx = [double]$smp.($side[2])[0]; ry = [double]$smp.($side[2])[1] } }
+                        })
+                        if ($pts.Count -lt 5) { $figWhy += "$($side[0]): player 3's figure seen in $($pts.Count) of the last $($recent.Count) samples"; continue }
+                        $far = @($pts | Where-Object { [math]::Sqrt(($_.x - $_.rx) * ($_.x - $_.rx) + ($_.y - $_.ry) * ($_.y - $_.ry)) -gt 8 }).Count
+                        $spanX = ($pts | Measure-Object x -Maximum -Minimum); $spanY = ($pts | Measure-Object y -Maximum -Minimum)
+                        $moved = [math]::Max($spanX.Maximum - $spanX.Minimum, $spanY.Maximum - $spanY.Minimum)
+                        if ($far -gt 0) { $figWhy += "$($side[0]): player 3's figure more than 8 m from the host in $far samples" }
+                        elseif ($moved -lt 1) { $figWhy += ("{0}: player 3's figure did not move ({1:N1} m)" -f $side[0], $moved) }
+                        else { W ("third player: {0} sees player 3's figure near the host, moving {1:N1} m" -f $side[0], $moved) }
+                    }
+                    if ($figWhy.Count) { $score.Result = "FAIL"; foreach ($w in $figWhy) { $score.Reasons.Add($w) } }
+                    else { W "third player: joined, got its own save, receives player 1's packets; the client loaded 1 save" }
+                }
             }
         }
         if ($JoinByCode -and -not $StaleJoinCode -and -not $replyChecked -and $cs -and $cs.connected) {
