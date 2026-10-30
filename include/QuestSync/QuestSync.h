@@ -55,4 +55,15 @@ namespace Pulsar::QuestSync {
     bool                       StartForTest(std::uint32_t a_id);
     std::vector<std::uint32_t> StoppedQuestsForTest(const char* a_hint, std::size_t a_max, std::size_t& a_seen);
 
+    // Test bot, missions: running story-manager quests whose editor ID starts
+    // with a_prefix (lowest first); stop one here without telling the peer;
+    // host: advance a stage (Papyrus SetStage, current + 10 / 5 / 1 / ...);
+    // read a quest's stage through Papyrus (Refresh queues, Cached returns the
+    // last answer, -1 none yet).
+    std::vector<std::uint32_t> RunningStoryQuestsForTest(const char* a_prefix, std::size_t a_max);
+    bool                       StopQuietlyForTest(std::uint32_t a_id);
+    bool                       AdvanceStageForTest(std::uint32_t a_id);
+    void                       RefreshStageForTest(std::uint32_t a_id);
+    int                        CachedStageForTest(std::uint32_t a_id);
+
 }  // namespace Pulsar::QuestSync

@@ -195,6 +195,14 @@ namespace Pulsar
         // (bot twin). ini: CoopQuestStartSync = 0
         bool        coopQuestStartSync = true;
 
+        // Mission bridge (owner's spec, joint missions): mission-board missions are
+        // story-manager quests with targets picked at random per machine, which no
+        // script can start. When the host sets a stage in one the client doesn't
+        // run (it accepted the mission), the client asks for the host's save, which
+        // holds the mission with the host's targets. 0 = the stage is dropped (bot
+        // twin). ini: CoopMissionBridge = 0
+        bool        coopMissionBridge = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

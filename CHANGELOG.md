@@ -32,8 +32,15 @@ number here means the code for that milestone is in, not that the goal is met.
   skips quests that aren't running, so every stage of a quest picked up mid-session was
   lost on the client. Now the client starts the quest (Papyrus `Quest.Start`) and then
   applies the stage. *Bot-tested* (`quest`): the host starts City_AkilaLife05, the
-  client starts it 62 ms later; twin with the switch off never does. Mission-board
-  missions are started by the story manager with random targets and are not covered.
+  client starts it 62 ms later; twin with the switch off never does.
+- **Mission-board missions** (`CoopMissionBridge`, default 1). The story manager starts
+  them with targets picked at random per machine, and no script can start them on the
+  client. When the host sets a stage in one the client doesn't run (accepting it), the
+  client asks for the host's save, which holds the mission with the host's targets. One
+  loading screen for the client per accepted mission; browsing a board costs nothing.
+  *Bot-tested* (`mission`): the client lacks MB_Bounty01Far, the host moves it to stage
+  10, the client gets the host's save 2.3 s after asking and runs the mission at stage 10
+  with its own character restored; twin with the switch off stays without it.
 - **Space census bot** (`space`): after takeoff each bot lists everything in space
   around the ship and the launcher compares the lists. Groundwork for the station/POI
   mismatch; right after takeoff the test orbit is empty, so it needs a flight to a

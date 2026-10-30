@@ -71,11 +71,15 @@ param(
     # scene within 10 s (CoopSceneSync=1). -NoSceneSync: twin.
     # quest: the host starts a stopped Akila quest; the client must start the same quest
     # within 10 s (CoopQuestStartSync=1). -NoQuestStartSync: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest")][string]$Scenario = "follow",
+    # mission: the client stops a running mission-board quest quietly, then the host
+    # advances a stage in it; the client must get it back at the host's stage through
+    # the host's save (CoopMissionBridge=1). -NoMissionBridge: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
     [switch]$NoSceneSync,
     [switch]$NoQuestStartSync,
+    [switch]$NoMissionBridge,
     [switch]$NoAutoReconnect,
     [switch]$NoSharedWorldItems,
     [switch]$NoFriendlyFireGuard,
@@ -900,6 +904,47 @@ function Invoke-QuestScore {
     return $r
 }
 
+# ---- mission scenario ---------------------------------------------------------
+# Both bots pick the same running mission-board quest. The client stops it quietly
+# (a mission the host has and the client lacks); the host then advances a stage in
+# it. Within 120 s the client must run the quest again at the host's new stage.
+function Invoke-MissionScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never advanced a mission") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^mission: ([0-9A-F]{8}) found=1') { $r.Result = "ERROR"; $r.Reasons.Add("no mission to test: $($act.actionInfo)"); return $r }
+    $id = $Matches[1]; $t0 = [long]$act.actedAtWallMs
+    $before = @($hostList | Where-Object { $_.wallMs -lt $t0 -and $_.mission -and [int]$_.mission.stage -ge 0 }) | Select-Object -Last 1
+    $stopped = @($clientList | Where-Object { $_.wallMs -lt $t0 -and $_.mission -and $_.mission.id -eq $id -and [long]$_.mission.stoppedAtWallMs -gt 0 -and -not $_.mission.running })
+    if ($stopped.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("the client's copy of $id was never stopped before the host acted"); return $r }
+    $hostNow = @($hostList | Where-Object { $_.wallMs -ge $t0 + 5000 -and $_.mission -and [int]$_.mission.stage -ge 0 }) | Select-Object -Last 1
+    if (-not $hostNow) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no host stage after the advance") }
+        return $r
+    }
+    $hb = if ($before) { [int]$before.mission.stage } else { -1 }
+    $ha = [int]$hostNow.mission.stage
+    if ($ha -le $hb) {
+        if ($Final -or [long]$hostNow.wallMs -gt $t0 + 30000) { $r.Result = "ERROR"; $r.Reasons.Add("the host's stage of $id did not rise ($hb -> $ha)") }
+        return $r
+    }
+    $ok = @($clientList | Where-Object { $_.wallMs -ge $t0 -and $_.mission -and $_.mission.running -and [int]$_.mission.stage -eq $ha }) | Select-Object -First 1
+    $lastC = $clientList[-1]
+    $r.Details = "mission: $($act.actionInfo); host stage $hb -> $ha; client " + $(if ($ok) { "runs it at stage $ha from +$([long]$ok.wallMs - $t0) ms (loaded the host's save: $($ok.mission.loadedSincePick))" } else { "running=$($lastC.mission.running) stage=$($lastC.mission.stage)" })
+    if ($ok) { $r.Result = "PASS"; return $r }
+    if ($Final -or [long]$lastC.wallMs -gt $t0 + 120000) { $r.Result = "FAIL"; $r.Reasons.Add("the client does not run $id at the host's stage $ha (running=$($lastC.mission.running), stage=$($lastC.mission.stage))") }
+    return $r
+}
+
 # ---- takeoff scenario ---------------------------------------------------------
 # Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
 # sits in the pilot seat, opens the takeoff menu and asks for the launch. The
@@ -1204,6 +1249,21 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-MissionRun([bool]$acts = $true, [bool]$found = $true, [bool]$stops = $true, [bool]$rises = $true, [int]$clientBackAfter = 20000, [int]$clientStage = 20) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 30000; $id = "0002C0DE"
+    for ($i = 0; $i -lt 90; $i++) {
+        $t = $t0 + $i * 2000
+        $acted = $acts -and $t -ge $actAt
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true $acted $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if (-not $acts) { "" } elseif ($found) { "mission: $id found=1 MB_Test advance queued=1" } else { "mission: picked 00000000 - (0 running MB_ quests)" })
+        $hs | Add-Member mission ([pscustomobject]@{ id = $id; running = $true; stage = $(if ($rises -and $t -ge $actAt + 2000) { 20 } else { 10 }); stoppedAtWallMs = 0; loadedSincePick = $false })
+        $back = $clientBackAfter -ge 0 -and $acted -and $t -ge $actAt + $clientBackAfter
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member mission ([pscustomobject]@{ id = $id; running = ($back -or -not $stops); stage = $(if ($back) { $clientStage } else { 10 }); stoppedAtWallMs = $(if ($stops) { $t0 + 1000 } else { 0 }); loadedSincePick = $back })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
 function New-QuestRun([bool]$acts = $true, [bool]$found = $true, [bool]$hostRecords = $true, [int]$clientAfter = 1200) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 5000; $id = "0001B0B0"
     for ($i = 0; $i -lt 40; $i++) {
@@ -1401,12 +1461,20 @@ function Invoke-ScorerSelfTest {
         @{ Name = "quest: client too late";  Run = (New-QuestRun -clientAfter 20000);  Expect = "FAIL";    Quest = $true },
         @{ Name = "quest: host not recorded"; Run = (New-QuestRun -hostRecords $false); Expect = "ERROR";  Quest = $true },
         @{ Name = "quest: none startable";   Run = (New-QuestRun -found $false);       Expect = "ERROR";   Quest = $true },
-        @{ Name = "quest: never acted";      Run = (New-QuestRun -acts $false);        Expect = "TIMEOUT"; Quest = $true }
+        @{ Name = "quest: never acted";      Run = (New-QuestRun -acts $false);        Expect = "TIMEOUT"; Quest = $true },
+        @{ Name = "mission: client gets it"; Run = (New-MissionRun);                   Expect = "PASS";    Mission = $true },
+        @{ Name = "mission: client stays without"; Run = (New-MissionRun -clientBackAfter -1); Expect = "FAIL"; Mission = $true },
+        @{ Name = "mission: client old stage"; Run = (New-MissionRun -clientStage 10); Expect = "FAIL";   Mission = $true },
+        @{ Name = "mission: never stopped";  Run = (New-MissionRun -stops $false);     Expect = "ERROR";   Mission = $true },
+        @{ Name = "mission: stage not raised"; Run = (New-MissionRun -rises $false);   Expect = "ERROR";   Mission = $true },
+        @{ Name = "mission: no mission";     Run = (New-MissionRun -found $false);     Expect = "ERROR";   Mission = $true },
+        @{ Name = "mission: never acted";    Run = (New-MissionRun -acts $false);      Expect = "TIMEOUT"; Mission = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Mission")) { Invoke-MissionScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Quest")) { Invoke-QuestScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Scene")) { Invoke-SceneScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Space")) { Invoke-SpaceScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
@@ -1516,7 +1584,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $npcHealthValue = if ($NoNpcHealthSync) { 0 } else { 1 }
     $sceneSyncValue = if ($NoSceneSync) { 0 } else { 1 }
     $questStartValue = if ($NoQuestStartSync) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $missionBridgeValue = if ($NoMissionBridge) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -1727,6 +1796,7 @@ try {
                  elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "mission") { Invoke-MissionScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "quest") { Invoke-QuestScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "scene") { Invoke-SceneScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "space") { Invoke-SpaceScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }

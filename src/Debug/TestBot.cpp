@@ -155,6 +155,13 @@ namespace Pulsar::TestBot
             std::uint64_t sceneTryMs = 0;               // tick of the last start call
             std::uint64_t sceneTryWallMs = 0;
             std::string   sceneSearchInfo;
+            std::uint32_t missionId = 0;                // mission: the story-manager quest under test
+            bool          missionPicked = false;
+            bool          missionStopped = false;       // client: stopped it quietly
+            std::uint64_t missionStoppedWallMs = 0;
+            std::uint64_t missionPickedMs = 0;
+            std::uint64_t missionRefreshMs = 0;
+            std::uint64_t missionLoadAtPick = 0;        // last save load (tick) when picking
             std::uint64_t sepBridgeWallMs = 0;          // host: bridge fired
             std::uint64_t sepActMs = 0;
             int           sepBridgeTries = 0;
@@ -1403,6 +1410,62 @@ namespace Pulsar::TestBot
             }
         }
 
+        // Mission: both sides pick the same running mission-board quest (story
+        // manager, "MB_"); the client stops it quietly (the host has a mission the
+        // client lacks), and 30 s later the host advances a stage in it, as
+        // accepting a mission does. The client must end with the quest running at
+        // the host's stage (its targets come with the host's save).
+        if (s_state.cfg.scenario == "mission" && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            if (!s_state.missionPicked) {
+                s_state.missionPicked = true;
+                s_state.missionPickedMs = now;
+                s_state.missionLoadAtPick = Pulsar::WorldSync::GetLastLoadCompletedTick();
+                const auto mb = Pulsar::QuestSync::RunningStoryQuestsForTest("mb_", 20);
+                const auto all = Pulsar::QuestSync::RunningStoryQuestsForTest("", 30);
+                std::string names;
+                for (const auto id : all) {
+                    auto* f = RE::TESForm::LookupByID(id);
+                    const char* eid = f ? f->GetFormEditorID() : nullptr;
+                    names += (names.empty() ? "" : " ") + std::string(eid ? eid : "?");
+                }
+                PLOG_INFO("[PULSAR] TestBot: mission: {} running MB_ quests; running story quests: {}"sv, mb.size(), names);
+                s_state.missionId = mb.empty() ? 0 : mb.front();
+                char msg[200];
+                auto* f = s_state.missionId ? RE::TESForm::LookupByID(s_state.missionId) : nullptr;
+                std::snprintf(msg, sizeof(msg), "mission: picked %08X %s (%zu running MB_ quests)", s_state.missionId,
+                              f && f->GetFormEditorID() ? f->GetFormEditorID() : "-", mb.size());
+                Trace(msg);
+                if (!s_state.missionId) {
+                    s_state.actionInfo = msg;
+                    s_state.acted = true;
+                    s_state.actedAtWallMs = WallMs();
+                }
+            }
+            if (s_state.missionId && !isHost && !s_state.missionStopped) {
+                s_state.missionStopped = true;
+                s_state.missionStoppedWallMs = WallMs();
+                const bool q = Pulsar::QuestSync::StopQuietlyForTest(s_state.missionId);
+                Trace(q ? "mission: stopped it here quietly" : "mission: quiet stop not queued");
+            }
+            if (s_state.missionId && isHost && !s_state.acted && now - s_state.missionPickedMs >= 30000) {
+                const bool q = Pulsar::QuestSync::AdvanceStageForTest(s_state.missionId);
+                char msg[200];
+                auto* f = RE::TESForm::LookupByID(s_state.missionId);
+                std::snprintf(msg, sizeof(msg), "mission: %08X found=1 %s advance queued=%d", s_state.missionId,
+                              f && f->GetFormEditorID() ? f->GetFormEditorID() : "-", q ? 1 : 0);
+                s_state.actionInfo = msg;
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            }
+            if (s_state.missionId && now - s_state.missionRefreshMs >= 2000) {
+                s_state.missionRefreshMs = now;
+                Pulsar::QuestSync::RefreshStageForTest(s_state.missionId);
+            }
+        }
+
         // Quest (host): start stopped Akila quests (not main quest), one every 4 s,
         // until one runs here; the client must start the same quest. Shares the
         // scene loop's candidate fields.
@@ -1462,7 +1525,7 @@ namespace Pulsar::TestBot
             s_state.cfg.scenario != "friendlyfire" && s_state.cfg.scenario != "aim" &&
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
-            s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" &&
+            s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" && s_state.cfg.scenario != "mission" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1603,6 +1666,17 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "quest") {
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "mission") {
+            char c[220];
+            std::snprintf(c, sizeof(c),
+                          ",\"mission\":{\"id\":\"%08X\",\"running\":%s,\"stage\":%d,\"stoppedAtWallMs\":%llu,\"loadedSincePick\":%s}",
+                          s_state.missionId,
+                          s_state.missionId && Pulsar::QuestSync::IsRunningForTest(s_state.missionId) ? "true" : "false",
+                          s_state.missionId ? Pulsar::QuestSync::CachedStageForTest(s_state.missionId) : -1,
+                          static_cast<unsigned long long>(s_state.missionStoppedWallMs),
+                          s_state.missionPicked && Pulsar::WorldSync::GetLastLoadCompletedTick() != s_state.missionLoadAtPick ? "true" : "false");
+            j += c;
         }
         if (s_state.cfg.scenario == "space") {
             // Every 10 s while in space: "ID:BASE:TYPE:DIST_KM" for each reference.

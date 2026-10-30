@@ -7,6 +7,7 @@
 #include "EventTrace/EventTrace.h"
 #include "Papyrus/GameCalls.h"
 #include "QuestSync/StageJournal.h"
+#include "TransitSync/TransitSync.h"
 
 #include <REL/Relocation.h>
 #include <RE/T/TESForm.h>
@@ -122,6 +123,7 @@ namespace {
     static RE::TESQuest* SafeDerefQuestPtr(RE::TESQuest** pp) noexcept;
     static bool          SafeIsRunning(const RE::TESQuest* quest) noexcept;
     static void          RecordStart(std::uint32_t formID);
+    static bool          IsQuietStop(std::uint32_t formID);
 
     static void BroadcastStage(std::uint32_t questFormID, std::uint16_t stageID)
     {
@@ -252,6 +254,7 @@ namespace {
 
         std::uint32_t formID = SafeRawFormID(quest);
         if (!formID) return;
+        if (IsQuietStop(formID)) return;
 
         Pulsar::EventTrace::Trace("QUEST", "STOP quest=%s flag=%d",
             Pulsar::EventTrace::NameOf(formID).c_str(),
@@ -303,6 +306,23 @@ namespace {
         __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
     }
 
+    // TESQuest::startEventData (+0x330, CommonLibSF): set for quests the story
+    // manager starts (mission boards, ambient events). Papyrus Quest.Start
+    // refuses those ("event scoped quest outside of story manager", run
+    // 20261030-225533), and their aliases (the mission's targets) are picked at
+    // random per machine, so a client gets them from the host's save instead.
+    static bool SafeIsStoryQuest(const RE::TESQuest* quest) noexcept
+    {
+        if (!quest) return false;
+        __try { return *reinterpret_cast<void* const*>(reinterpret_cast<const std::uint8_t*>(quest) + 0x330) != nullptr; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    // Test bot: quests whose Stop must not be sent to the peer (the client bot
+    // stops a mission locally to play "the host has a mission the client lacks").
+    static std::mutex                        s_quietStopMutex;
+    static std::unordered_map<std::uint32_t, bool> s_quietStop;
+
     // TESQuest +0x114 bit 0: running (the stage worker skips a quest without it).
     static bool SafeIsRunning(const RE::TESQuest* quest) noexcept
     {
@@ -341,6 +361,12 @@ namespace {
     // Test bot: quests that started here (the Start hook), with wall time.
     static std::mutex                                        s_recentStartMutex;
     static std::deque<std::pair<std::uint32_t, std::uint64_t>> s_recentStarts;
+
+    static bool IsQuietStop(std::uint32_t formID)
+    {
+        std::lock_guard g(s_quietStopMutex);
+        return s_quietStop.count(formID) != 0;
+    }
 
     static void RecordStart(std::uint32_t formID)
     {
@@ -707,9 +733,27 @@ void DrainPending()
             PLOG_INFO("[PULSAR] QuestSync RX applied after start: quest=0x{:08X} stage={} ok={}"sv, p.id, p.stage, ok ? 1 : 0);
             continue;
         }
-        if (p.tried) {
-            PLOG_INFO("[PULSAR] QuestSync: quest=0x{:08X} did not start here (story-manager quest?), stage {} dropped"sv,
-                      p.id, p.stage == kNoStage ? -1 : static_cast<int>(p.stage));
+        // A quest no script can start here (Quest.Start said no: a story-manager
+        // quest, whose startEventData a stopped copy no longer has, run
+        // 20261031-000906), or one known to be a story-manager quest.
+        if (p.tried || SafeIsStoryQuest(quest)) {
+            // A mission-board or other story-manager quest: no script can start
+            // it, and its targets are random per machine. Browsing a board (a
+            // start alone) costs nothing; once the host sets a stage in it (the
+            // mission was accepted), take the host's save, which holds the
+            // quest with the host's targets.
+            if (p.stage == kNoStage) {
+                PLOG_INFO("[PULSAR] QuestSync: quest=0x{:08X} can't be started here (story-manager quest) - waiting for the host to use it"sv, p.id);
+            } else if (Pulsar::GetConfig().coopMissionBridge) {
+                char why[96];
+                std::snprintf(why, sizeof(why), "story-manager quest %08X stage %u (mission)", p.id, p.stage);
+                Pulsar::TransitSync::RequestHostBridgeFromClient(why);
+                PLOG_INFO("[PULSAR] QuestSync: quest=0x{:08X} stage={} is a story-manager quest not running here - asked the host for its save"sv,
+                          p.id, p.stage);
+            } else {
+                PLOG_INFO("[PULSAR] QuestSync: quest=0x{:08X} stage={} is a story-manager quest not running here - CoopMissionBridge = 0, dropped"sv,
+                          p.id, p.stage);
+            }
             continue;
         }
         StartViaPapyrus(quest, p.id, p.stage);
@@ -741,6 +785,100 @@ bool StartForTest(std::uint32_t a_id)
     auto* vm = Pulsar::GameCalls::VM();
     auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::TESQuest*>(form));
     return vm && obj && Pulsar::GameCalls::CallMethod(vm, obj, "Start", {});
+}
+
+std::vector<std::uint32_t> RunningStoryQuestsForTest(const char* a_prefix, std::size_t a_max)
+{
+    std::string pre = a_prefix ? a_prefix : "";
+    for (auto& c : pre) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    std::vector<std::uint32_t> out;
+    for (std::uint32_t id = 0x800; id < 0x00400000 && out.size() < a_max; ++id) {
+        auto* f = RE::TESForm::LookupByID(id);
+        if (!f || f->GetFormType() != RE::FormType::kQUST) continue;
+        auto* q = static_cast<RE::TESQuest*>(f);
+        if (!SafeIsRunning(q) || !SafeIsStoryQuest(q)) continue;
+        const char* eid = f->GetFormEditorID();
+        if (!eid) continue;
+        std::string low = eid;
+        for (auto& c : low) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        if (low.rfind(pre, 0) == 0) out.push_back(id);
+    }
+    return out;
+}
+
+bool StopQuietlyForTest(std::uint32_t a_id)
+{
+    auto* form = RE::TESForm::LookupByID(a_id);
+    if (!form || form->GetFormType() != RE::FormType::kQUST) return false;
+    {
+        std::lock_guard g(s_quietStopMutex);
+        s_quietStop[a_id] = true;
+    }
+    auto* vm = Pulsar::GameCalls::VM();
+    auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::TESQuest*>(form));
+    return vm && obj && Pulsar::GameCalls::CallMethod(vm, obj, "Stop", {});
+}
+
+namespace {
+    std::mutex                                         s_stageCacheMutex;
+    std::unordered_map<std::uint32_t, int>             s_stageCache;   // -1 unknown
+
+    // Papyrus SetStage(a_stages[a_i]); on false try the next one. The stage
+    // list of a mission is not known here, so the host tries a few likely ones.
+    void TrySetStage(RE::BSScript::IVirtualMachine* a_vm, RE::BSTSmartPointer<RE::BSScript::Object> a_obj,
+                     std::uint32_t a_id, std::vector<int> a_stages, std::size_t a_i)
+    {
+        if (a_i >= a_stages.size()) {
+            PLOG_INFO("[PULSAR] QuestSync test: quest=0x{:08X} took none of {} stages"sv, a_id, a_stages.size());
+            return;
+        }
+        const int st = a_stages[a_i];
+        Pulsar::GameCalls::CallMethodForResult(a_vm, a_obj, "SetStage", { Pulsar::GameCalls::Arg(st) },
+            [a_vm, a_obj, a_id, a_stages, a_i, st](const RE::BSScript::Variable& a_ok) {
+                const bool ok = a_ok.is<bool>() && RE::BSScript::get<bool>(a_ok);
+                PLOG_INFO("[PULSAR] QuestSync test: quest=0x{:08X} SetStage({}) = {}"sv, a_id, st, ok);
+                if (!ok) TrySetStage(a_vm, a_obj, a_id, a_stages, a_i + 1);
+            });
+    }
+}
+
+bool AdvanceStageForTest(std::uint32_t a_id)
+{
+    auto* form = RE::TESForm::LookupByID(a_id);
+    if (!form || form->GetFormType() != RE::FormType::kQUST) return false;
+    auto* vm = Pulsar::GameCalls::VM();
+    auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::TESQuest*>(form));
+    if (!vm || !obj) return false;
+    return Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetStage", {},
+        [vm, obj, a_id](const RE::BSScript::Variable& a_cur) {
+            const int cur = a_cur.is<std::int32_t>() ? RE::BSScript::get<std::int32_t>(a_cur) : 0;
+            std::vector<int> stages;
+            for (int d : { 10, 5, 1, 20, 15, 25, 50, 100 }) stages.push_back(cur + d);
+            PLOG_INFO("[PULSAR] QuestSync test: quest=0x{:08X} at stage {}, advancing"sv, a_id, cur);
+            TrySetStage(vm, obj, a_id, stages, 0);
+        });
+}
+
+void RefreshStageForTest(std::uint32_t a_id)
+{
+    auto* form = RE::TESForm::LookupByID(a_id);
+    if (!form || form->GetFormType() != RE::FormType::kQUST) return;
+    auto* vm = Pulsar::GameCalls::VM();
+    auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::TESQuest*>(form));
+    if (!vm || !obj) return;
+    Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetStage", {},
+        [a_id](const RE::BSScript::Variable& a_v) {
+            const int st = a_v.is<std::int32_t>() ? RE::BSScript::get<std::int32_t>(a_v) : -1;
+            std::lock_guard g(s_stageCacheMutex);
+            s_stageCache[a_id] = st;
+        });
+}
+
+int CachedStageForTest(std::uint32_t a_id)
+{
+    std::lock_guard g(s_stageCacheMutex);
+    auto it = s_stageCache.find(a_id);
+    return it == s_stageCache.end() ? -1 : it->second;
 }
 
 std::vector<std::uint32_t> StoppedQuestsForTest(const char* a_hint, std::size_t a_max, std::size_t& a_seen)

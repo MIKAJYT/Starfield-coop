@@ -387,6 +387,12 @@ namespace Pulsar
                 cfg.coopQuestStartSync = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopQuestStartSync = {}"sv, cfg.coopQuestStartSync);
             }
+            else if (keyLower == "coopmissionbridge" || keyLower == "coop_mission_bridge") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopMissionBridge = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopMissionBridge = {}"sv, cfg.coopMissionBridge);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);
