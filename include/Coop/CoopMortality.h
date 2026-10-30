@@ -23,6 +23,11 @@ namespace Pulsar::Coop::Mortality
     // equipment - the equip read/refresh disturbs the local bleedout pose.
     bool IsLocalDowned();
 
+    // No friendly fire: health of player a_id's figure on this screen, as the bot
+    // reads it (-1 = no figure). Figures put back to full health so far.
+    float FigureHealthForTest(std::uint8_t a_id);
+    std::uint32_t FigureHealsForTest();
+
     // called by ShipCombatSync when the (shared) ship's hull reaches 0.
     // The ship explodes but the player isn't killed (no death to intercept), so
     // route the local player into the downed state directly (sets local-downed +

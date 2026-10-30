@@ -34,6 +34,11 @@ namespace Pulsar::RemotePlayer
     // gates on this for attacker attribution.
     std::uint64_t GetLastLocalPlayerAttackMs();
 
+    // Jetpack sync, for the bot: boostpack starts the figures performed and how many the
+    // engine accepted.
+    std::uint32_t BoostStartsForTest();
+    std::uint32_t BoostStartsAcceptedForTest();
+
     // F.2-v2 - one resolved worn-equipment entry (receiver-local FormIDs).
     struct EquipV2Entry
     {
@@ -131,6 +136,7 @@ namespace Pulsar::RemotePlayer
         void InvalidateCloneOnSaveLoad();
         RE::Actor* GetRemoteActor() const { return m_remoteActor; }
         float GetNetSpeed() const { return m_targetPosData.speed; }
+        float GetNetPitch() const { return m_targetPosData.vars.lookPitch; }
         uint16_t GetAnimFlags() const { return m_targetPosData.animFlags; }
         // Proximity voice  - latest received peer position (net values),
         // same coordinate space as the local player's data.location.
@@ -166,6 +172,8 @@ namespace Pulsar::RemotePlayer
         bool     m_cloneSneaking = false;
         int32_t  m_cloneJumpState = 0;
         uint64_t m_syntheticFallAt = 0;       // scheduled synthetic JumpFall fire tick
+        uint64_t m_boostSince = 0;            // jetpack: the partner's jump state became "boost" (0 = not boosting)
+        bool     m_boostActive = false;       // jetpack: the figure's boostpack was started
         uint64_t m_landReassertUntil = 0;     // jump landing watchdog window
         uint64_t m_lastLandReassertMs = 0;
         void FindLookMarker();

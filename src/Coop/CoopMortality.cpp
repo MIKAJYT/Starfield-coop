@@ -1097,6 +1097,50 @@ namespace Pulsar::Coop::Mortality
         PLOG_INFO("[DOWNED] CoopMortality initialized"sv);
     }
 
+    // No friendly fire: put every figure back to full health, 10 times a second.
+    // A figure is protected and essential, so the engine never kills it, but a hit
+    // still takes its health down and at 0 it goes into bleedout on this screen
+    // while the real player is fine. A figure whose player is really downed is
+    // left alone: CoopMortality holds its bleedout pose.
+    static std::atomic<std::uint32_t> g_figureHeals{ 0 };
+
+    static void GuardFigureHealth(RE::ActorValueInfo* a_av)
+    {
+        if (!Pulsar::GetConfig().coopFriendlyFireGuard) return;
+        static std::uint64_t s_lastMs = 0;
+        const std::uint64_t now = ::GetTickCount64();
+        if (now - s_lastMs < 100) return;
+        s_lastMs = now;
+        for (std::uint8_t id = 0; id < 4; ++id) {
+            if (id == LocalId() || g_downedOf[id].load(std::memory_order_relaxed)) continue;
+            RE::Actor* fig = Pulsar::RemotePlayer::GetRemotePlayerFigure(id).GetRemoteActor();
+            if (!fig) continue;
+            float cur = 0.0f, max = 0.0f;
+            bool dead = false;
+            std::uint32_t bits = 0, flags = 0;
+            if (!SafeReadState(fig, a_av, cur, dead, bits, flags) || dead) continue;
+            if (!SafeReadMaxHealth(fig, a_av, max) || max <= 0.0f || cur >= max - 0.5f) continue;
+            if (SafeRaiseHealthTo(fig, a_av, max)) {
+                g_figureHeals.fetch_add(1, std::memory_order_relaxed);
+                PLOG_INFO("[FRIENDLY-FIRE] figure of player {} hit ({:.0f} of {:.0f}), health put back"sv,
+                          id, cur, max);
+            }
+        }
+    }
+
+    float FigureHealthForTest(std::uint8_t a_id)
+    {
+        auto* av = HealthAV();
+        RE::Actor* fig = a_id < 4 ? Pulsar::RemotePlayer::GetRemotePlayerFigure(a_id).GetRemoteActor() : nullptr;
+        float cur = -1.0f;
+        bool dead = false;
+        std::uint32_t bits = 0, flags = 0;
+        if (!av || !fig || !SafeReadState(fig, av, cur, dead, bits, flags)) return -1.0f;
+        return cur;
+    }
+
+    std::uint32_t FigureHealsForTest() { return g_figureHeals.load(std::memory_order_relaxed); }
+
     void OnGameThreadTick()
     {
         if (!g_inited) return;
@@ -1120,6 +1164,8 @@ namespace Pulsar::Coop::Mortality
         std::uint32_t rawFlags = 0;
 
         if (!SafeReadState(player, av, health, dead, rawBits, rawFlags)) return;
+
+        GuardFigureHealth(av);
 
         // ----------------------------------------------------------------
         // Way A - consume a queued medpack-revive request (set on the ENet

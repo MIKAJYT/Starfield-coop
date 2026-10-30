@@ -9,15 +9,15 @@ and in which phase it gets done. **Status** words:
 - **partial:** some of it exists; the gap is named.
 - **missing:** not started.
 
-Last updated 2026-10-29. Run IDs and details are in the working notes
+Last updated 2026-10-30. Run IDs and details are in the working notes
 (coop-anything `games/starfield/NOTES.md`).
 
 ## Core tech
 
 | Spec item | Status | Today | Phase |
 |---|---|---|---|
-| Host-authority netcode with stable lobby (create/join, reconnect) | partial | Host-authoritative for world state; NPC firing is not host-authoritative. Lobby and join codes go through the original author's lobby server and relay (funded until end of 2026). Reconnect after a short drop exists. | 2 (no relay, codes without a server), 4 (reconnect bot test) |
-| Full player sync: run, sprint, crouch, jump, jetpack, aim, animations, outfits | partial | Run, sprint, sneak, jump, look pitch, armor and weapons on the partner's figure exist. Jetpack: missing. Aim: only "aiming" on/off. | 4 |
+| Host-authority netcode with stable lobby (create/join, reconnect) | partial | Host-authoritative for world state; NPC firing is not host-authoritative. Lobby and join codes go through the original author's lobby server and relay (funded until end of 2026). Reconnect after a drop: bot `reconnect` (25 s network outage, back by itself in 31 s), twin `AutoReconnect = 0` fails. | 2 (no relay, codes without a server), 4 |
+| Full player sync: run, sprint, crouch, jump, jetpack, aim, animations, outfits | partial | Run, sprint, sneak, jump, armor and weapons on the partner's figure exist. Aim: the up/down pitch and the sights pose arrive (bot `aim`); the sights pose now ends with the aim (it lingered 8 s). Whether the figure's head visibly turns is not proven: the bot's head-bone reading stays fixed once a weapon is drawn, in both the run and its twin. Jetpack: the figure now fires its own boostpack while the partner boosts (`CoopJetpackSync`); the bot can't lift the host with the engine's boost actions, so this is untested. Players 3-4: no aim pitch (no look marker). | 4 (rest needs a person or a better bot) |
 | Combat sync: shooting, hits, damage, downed/death, revive, NPC damage | exists | Fire actions, NPC damage and deaths, downed and revive exist; loot kill tested. | 4 |
 | World/travel: fast travel, planet loading, POI/dungeon entry | partial | Each player fast travels alone, F8 regroups. Stations and POIs can differ between players in space (known bug). | 5 |
 | Spaceflight: launch, cruise, manual flight, docking, station entry; ship position | partial | Launch done (vote). Flight input is mirrored to the partner. Ship position sync is switched off in the code (`kShipPosSyncEnabled = false`). Docking exists, rough. | 6 |
@@ -30,7 +30,7 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
 | Spec item | Status | Today | Phase |
 |---|---|---|---|
 | Enemy loot: each player gets their own copy | done | Bot `loot`, twin fails. | 1 |
-| World items shared, first to take removes it for all | exists | Container takes and world pickups are mirrored. | 4 (bot test) |
+| World items shared, first to take removes it for all | done | Bot `pickup` (host takes a loose item, gone on the client), twin `CoopSharedWorldItems = 0` fails. Containers not bot-tested. | 4 |
 | Quest reward items for everyone | done | Bot `reward`, twin fails. Quest XP and weapon mods not yet. | 1, rest in 8 |
 | Separate inventories | exists | Each player's own character is restored over the host's save. | 4 (bot test) |
 | Separate skill trees | exists | Level, skills and perks are part of the restored character. | 4 (bot test) |
@@ -47,7 +47,7 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
 
 | Spec item | Status | Today | Phase |
 |---|---|---|---|
-| One team: shared objectives and rewards, no PvP, no player economy | partial | Quest stages and rewards shared; players can't hurt each other's figure. No player economy exists. Needs a bot check for friendly fire. | 4 |
+| One team: shared objectives and rewards, no PvP, no player economy | done | Quest stages and rewards shared. No friendly fire: bot `friendlyfire` (a lethal hit on the partner's figure, healed within 2.5 s, the real player untouched); twin `CoopFriendlyFireGuard = 0` fails (the figure stayed at -31 health, which used to put it into the downed pose on that screen). No player economy exists. | 4 |
 | Joint missions (faction missions, outpost defense, rescues) | partial | Rides on quest sync; untested per mission type. | 5 |
 | Shared outposts with team build/remove/storage permissions | missing | | 8 |
 | Ship roles, repair and damage systems | missing | | 6 |
@@ -76,6 +76,9 @@ Last updated 2026-10-29. Run IDs and details are in the working notes
    partner and one partner figure. Host becomes a hub for up to 3 clients, each with their
    own figure, vote, rewards and loot.
 4. **Bot tests for everything that "exists"**, then jetpack and aim sync, friendly fire off.
+   Done: friendly fire, world pickups, reconnect, aim (partly). Left: separate inventories and
+   skill trees, combat damage, jetpack and head pitch proof (need a bot that can fly and look,
+   or a person).
 5. **World and quests:** POI/station divergence, cutscenes, mission types.
 6. **Ships:** ship position sync, docking, crew roles (pilot, gunner, engineer), repair.
 7. **Stability:** crash dumps and reports, Community Patch test, launcher join codes.

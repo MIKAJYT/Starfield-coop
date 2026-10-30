@@ -139,6 +139,37 @@ namespace Pulsar
         // 0 = rewards stay with the player who got them. ini: CoopQuestRewards = 0
         bool        coopQuestRewards = true;
 
+        // No friendly fire (owner's spec, one team, no PvP): a player's figure on
+        // another player's screen takes no damage from anyone. Its health is put back
+        // every tick unless that player is really downed (then the figure shows it).
+        // Hits on a figure never reach the real player either way.
+        // 0 = figures keep the damage they take (bot twin). ini: CoopFriendlyFireGuard = 0
+        bool        coopFriendlyFireGuard = true;
+
+        // Aim sync: the partner's figure looks where the partner looks (head and
+        // weapon follow their up/down aim) and raises the weapon to the sights
+        // when they aim. 0 = the figure keeps a level head and the ready pose
+        // (bot twin). ini: CoopAimSync = 0
+        bool        coopAimSync = true;
+
+        // Jetpack sync: while the partner's boostpack fires (their jump state stays
+        // "boost" for 250 ms or more), their figure fires its boostpack too
+        // (ActionBoostpackStart / Stop), not only the jump pose. A plain jump's brief
+        // boost state stays a jump. 0 = jump pose only (bot twin). ini: CoopJetpackSync = 0
+        bool        coopJetpackSync = true;
+
+        // Shared world items (owner's spec): an item lying in the world is there once
+        // for everyone; the first player to take it removes it from every screen.
+        // 0 = a world pickup is not sent, the item stays on the other screens (bot
+        // twin). ini: CoopSharedWorldItems = 0
+        bool        coopSharedWorldItems = true;
+
+        // Reconnect after a dropped connection (owner's spec, stable lobby): a client
+        // whose connection drops (timeout, network loss) tries again 3 s later and
+        // every 5 s after that until the host answers. 0 = stay disconnected (bot
+        // twin). ini: AutoReconnect = 0
+        bool        autoReconnect = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

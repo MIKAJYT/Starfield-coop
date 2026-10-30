@@ -458,6 +458,33 @@ namespace Pulsar::RemotePlayer
         }
     }
 
+    // Jetpack sync: the boostpack actions, looked up by editor ID (Starfield.esm has
+    // ActionBoostpackStart and ActionBoostpackStop). Both pass the figure action filter
+    // (the "ActionBoost" prefix).
+    static std::atomic<std::uint32_t> g_boostStarts{ 0 }, g_boostStartsAccepted{ 0 };
+
+    std::uint32_t BoostStartsForTest() { return g_boostStarts.load(std::memory_order_relaxed); }
+    std::uint32_t BoostStartsAcceptedForTest() { return g_boostStartsAccepted.load(std::memory_order_relaxed); }
+
+    static bool PerformBoostAction(RE::Actor* a_figure, bool a_start)
+    {
+        static std::uint32_t s_startID = 0, s_stopID = 0;
+        if (!s_startID) {
+            auto* start = RE::TESForm::LookupByEditorID("ActionBoostpackStart");
+            auto* stop = RE::TESForm::LookupByEditorID("ActionBoostpackStop");
+            s_startID = start ? start->formID : 0xFFFFFFFFu;
+            s_stopID = stop ? stop->formID : 0xFFFFFFFFu;
+            PLOG_INFO("[PULSAR] Jetpack: ActionBoostpackStart {:08X}, ActionBoostpackStop {:08X}"sv, s_startID, s_stopID);
+        }
+        const std::uint32_t id = a_start ? s_startID : s_stopID;
+        if (!a_figure || id == 0xFFFFFFFFu) return false;
+        if (a_start) g_boostStarts.fetch_add(1, std::memory_order_relaxed);
+        g_forceAnimation = true;
+        const bool ok = PerformActionOnActor(a_figure, id);
+        if (a_start && ok) g_boostStartsAccepted.fetch_add(1, std::memory_order_relaxed);
+        return ok;
+    }
+
     // 2026-04-24: name-prefix whitelist for locomotion / pose actions.
     // Graph-var writes (FacingBackward, IsBoostPackActive, iSyncStrafeState,
     // TurnDeltaSmoothed, ...) need the engine's Action dispatch to trigger
@@ -2000,6 +2027,27 @@ namespace Pulsar::RemotePlayer
 
             uint64_t now = GetTickCount64();
 
+            // Jetpack: the partner's boostpack fires while their jump state is 3. A
+            // plain planet jump passes through 3 briefly (0->1->3->2->0), so only a
+            // boost held 250 ms starts the figure's own boostpack; the jump pose code
+            // below still runs for the start of it.
+            if (netJump == 3) {
+                if (m_boostSince == 0) m_boostSince = now;
+                if (!m_boostActive && Pulsar::GetConfig().coopJetpackSync && now - m_boostSince >= 250) {
+                    m_boostActive = true;
+                    const bool ok = PerformBoostAction(m_remoteActor, true);
+                    PLOG_INFO("[PULSAR] Jetpack: partner boosting, figure boostpack start ok={}"sv, ok ? 1 : 0);
+                }
+            } else {
+                m_boostSince = 0;
+                if (m_boostActive) {
+                    m_boostActive = false;
+                    const bool ok = PerformBoostAction(m_remoteActor, false);
+                    PLOG_INFO("[PULSAR] Jetpack: partner boost ended (state {}), figure boostpack stop ok={}"sv,
+                              netJump, ok ? 1 : 0);
+                }
+            }
+
             // 2026-04-20 City-vs-Planet log comparison showed:
             //   City host sends iSyncJumpState 0→1→2→0 (with weapon drawn).
             //   Planet host sends 0→1→0 (weapon holstered → graph skips state 2).
@@ -3209,14 +3257,19 @@ namespace Pulsar::RemotePlayer
                             // Use atomics - DoSetPosition runs on BSTaskPool threads concurrently.
                             // Non-atomic check+set causes every thread to fire ActionSightedRelease.
                             static std::atomic<uint64_t> s_lastShotTime{ 0 };
+                            // Aiming has its own short grace (bridges a flickering
+                            // flag). It used to refresh the shot timer, so the figure
+                            // held the sights 8 s after the partner lowered the
+                            // weapon (bot aim run 20261030-092819).
+                            static std::atomic<uint64_t> s_lastAimTime{ 0 };
                             static std::atomic<bool> s_inSighted{ false };
 
                             // Host RMB-aim trigger - 2026-04-25: any tick where host
                             // has iSyncSighted=1 and weapon is drawn, keep sighted
                             // timer fresh + fire ActionSighted once if not yet in.
                             bool hostSightedTick = UnpackAnimFlags(m_targetPosData.animFlags).hostSighted;
-                            if (hostSightedTick && m_weaponDrawn) {
-                                s_lastShotTime.store(GetTickCount64());
+                            if (hostSightedTick && m_weaponDrawn && Pulsar::GetConfig().coopAimSync) {
+                                s_lastAimTime.store(GetTickCount64());
                                 bool wasNotSighted = false;
                                 if (s_inSighted.compare_exchange_strong(wasNotSighted, true) &&
                                     m_remoteActor && s_origPerformAction) {
@@ -3265,9 +3318,11 @@ namespace Pulsar::RemotePlayer
                             //   (a) host aiming with RMB (hostSighted bit 11), or
                             //   (b) recent fire within 8s (kept for post-fire hold).
                             // Either path requires m_weaponDrawn to be true.
-                            bool hostSighted = UnpackAnimFlags(m_targetPosData.animFlags).hostSighted;
+                            bool hostSighted = Pulsar::GetConfig().coopAimSync &&
+                                               UnpackAnimFlags(m_targetPosData.animFlags).hostSighted;
                             bool wantSighted = m_weaponDrawn &&
-                                (hostSighted || (aimNow - s_lastShotTime.load() < 8000));
+                                (hostSighted || (aimNow - s_lastAimTime.load() < 500) ||
+                                 (aimNow - s_lastShotTime.load() < 8000));
 
                             // Transition sighted → ready: CAS ensures exactly one thread fires release
                             bool wasSighted = true;
@@ -3371,7 +3426,7 @@ namespace Pulsar::RemotePlayer
                         // as SetPosition cell-hashmap race (fixed by reverting to
                         // proc-cell-specific position writes).
                         if (m_lookMarker) {
-                            float pitch = -v.lookPitch;  // Negate: network value is inverted
+                            float pitch = Pulsar::GetConfig().coopAimSync ? -v.lookPitch : 0.0f;  // Negate: network value is inverted
                             float yaw   = m_lerpRotZ;
 
                             // Spherical coords with Bethesda forward: X=sin(yaw), Y=cos(yaw)

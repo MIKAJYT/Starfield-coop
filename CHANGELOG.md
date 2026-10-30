@@ -16,6 +16,23 @@ The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
 
+## Unreleased - full co-op spec, phase 4: tests for what exists, aim, jetpack, no friendly fire
+
+- **No friendly fire** (`CoopFriendlyFireGuard`, default 1). A hit on a partner's figure
+  took its health down and at 0 put it into the downed pose on that screen while the real
+  player was fine. Figures now get their health back at once (unless that player is really
+  downed). *Bot-tested* (`friendlyfire`); twin with the guard off fails.
+- **Reconnect** (`AutoReconnect`, default 1). *Bot-tested*: a 25 s network outage on the
+  client, the session comes back by itself 6 s after it ends; twin stays disconnected.
+- **Shared world items** (`CoopSharedWorldItems`, default 1). *Bot-tested*: an item the
+  host picks up disappears on the client; twin keeps it there.
+- **Aim**: the partner's figure left the sights pose 8 s after they stopped aiming; now
+  0.5 s. `CoopAimSync = 0` turns aim sync off. *Bot run*: pitch and sights pose arrive;
+  a visible head turn is not proven yet.
+- **Jetpack** (`CoopJetpackSync`, default 1): while the partner boosts (jump state "boost"
+  for 250 ms), their figure fires its own boostpack. *Not tested in game*: the bot's
+  boost actions animate but don't lift the player.
+
 ## Unreleased - full co-op spec, phase 3: 2-4 players
 
 - **Up to 4 players** (`MaxPlayers`, default 4). The host forwards each player's data to

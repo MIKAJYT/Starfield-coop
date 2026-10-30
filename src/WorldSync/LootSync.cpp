@@ -2039,7 +2039,7 @@ namespace {
         // World-pickup broadcast. SendPickupPacket operates on captured
         // scalar values - no deref of `self` - so it's SEH-safe without an
         // extra wrapper (PluginLookup internals are already __try-guarded).
-        if (eligible && result) {
+        if (eligible && result && Pulsar::GetConfig().coopSharedWorldItems) {
             auto& net = Pulsar::Network::GetSingleton();
             if (net.IsConnected()) {
                 SendPickupPacket(selfID, baseID, baseType, px, py, pz);

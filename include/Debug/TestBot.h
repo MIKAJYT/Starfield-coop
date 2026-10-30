@@ -15,4 +15,8 @@ namespace Pulsar::TestBot {
     // Game-thread tick (cheap: one file read at start, one state write per second).
     void Tick();
 
+    // Aim scenario (host): the look pitch and aiming flag the bot wants sent in place
+    // of the player's own. False when the bot is not steering the aim.
+    bool AimOverrideForTest(float& a_pitch, bool& a_sighted);
+
 }  // namespace Pulsar::TestBot

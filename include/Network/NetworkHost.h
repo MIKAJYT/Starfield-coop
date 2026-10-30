@@ -50,6 +50,11 @@ namespace Pulsar::Network
         void BeginHostBridgeSaveTransfer(const char* a_saveName);
         void Shutdown();
         void Disconnect();  // Graceful disconnect (client or host)
+        // Bot reconnect test: drop every datagram this game receives for a_ms, as a
+        // network outage would. No-op in the hardened Release build.
+        void SimulateOutageForTest(uint32_t a_ms);
+        // Times this client reconnected after a dropped connection (bot).
+        uint32_t ReconnectsForTest() const { return m_reconnects; }
         void SetPeerTimeout(uint32_t a_ms);
         void ResetTeleport();
         // Phase 3i v17.1 - suppress next ResetTeleport call. Used by DockSync
@@ -173,6 +178,8 @@ namespace Pulsar::Network
         std::string m_lastAddress;
         uint16_t    m_lastPort = DEFAULT_PORT;
         uint64_t    m_reconnectAt = 0;  // tick to attempt reconnect (0=disabled)
+        bool        m_reconnectPending = false;  // the connection dropped; the next connect is a reconnect
+        uint32_t    m_reconnects = 0;            // reconnects after a drop (bot)
 
         // Client: pending teleport to host position
         struct TeleportData { float x, y, z, rotX, rotY, rotZ; };

@@ -3,6 +3,7 @@
 
 #ifndef PULSAR_HARDENED
 
+#include "Animation/BoneSync.h"
 #include "Config.h"
 #include "InventorySync/DirectRestore.h"
 #include "NPCSync/NPCSync.h"
@@ -10,6 +11,7 @@
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/SpaceSync.h"
+#include "Coop/CoopMortality.h"
 #include "Coop/TakeoffVote.h"
 #include "UI/HudMessage.h"
 #include "TransitSync/TransitSync.h"
@@ -49,6 +51,27 @@ namespace Pulsar::TestBot
         //            the client must get both too. The client's own copy of the
         //            quest also gives the weapon (as a replicated stage script
         //            would), so it must end up with one weapon, not two.
+        //   friendlyfire - the host hits the client's figure twice, as the
+        //            attacker: 60 % of its health, then 4 s later more than all
+        //            of it. With CoopFriendlyFireGuard=1 the figure must be back
+        //            to full health within 2 s each time and never go down, and
+        //            the client's own health must not move.
+        //   aim    - the host draws its weapon and aims: 8 s looking up (+0.6 rad)
+        //            and aiming, 8 s looking down (-0.6 rad) and aiming, then level
+        //            and not aiming. The client reports the pitch it received, its
+        //            clone's head bone and whether the clone is in the sights pose;
+        //            with CoopAimSync=1 the head must turn between up and down.
+        //   jetpack - the host jumps and fires its boostpack for 2.5 s (the engine's
+        //            ActionJump, ActionBoostpackStart, ActionBoostpackStop). Both
+        //            sides track heights every frame; the client's clone must rise
+        //            with CoopJetpackSync=1).
+        //   pickup - the host takes the nearest loose item lying in the world (a
+        //            save-file reference, so it is the same reference on both
+        //            machines). With CoopSharedWorldItems=1 it must be gone on the
+        //            client too. Both roles report the loose items around them.
+        //   reconnect - the client's network goes dark for 25 s (every received
+        //            datagram dropped). The connection must time out and, with
+        //            AutoReconnect=1, come back by itself, partner figures and all.
         struct Settings {
             bool        enabled = false;
             std::string stateFile;          // state log, one JSON line per second (test slot logs)
@@ -96,6 +119,18 @@ namespace Pulsar::TestBot
             std::uint64_t voteSeenWallMs = 0;
             std::uint64_t voteReadyWallMs = 0;   // client: answered ready
             std::uint64_t f8AtWallMs = 0;        // host: F8 pressed during the vote (TakeoffF8DuringVote)
+            int           ffHits = 0;            // friendlyfire, host: hits dealt to the figure
+            std::uint64_t ffLastHitMs = 0;
+            std::string   ffHitInfo;
+            std::uint64_t aimStartMs = 0;        // aim, host: tick the steering began (0 = not yet)
+            bool          aimDrawn = false;      // aim, host: weapon drawn before aiming
+            int           jetStep = 0;           // jetpack, host: 0 idle, 1 jumped, 2 boosting, 3 stopped
+            std::uint64_t jetStepMs = 0;
+            std::string   jetInfo;
+            float         jetZMin = 1e9f, jetZMax = -1e9f;            // own height since the last sample
+            float         jetCloneZMin = 1e9f, jetCloneZMax = -1e9f;  // the clone's
+            int           jetJumpMask = 0;       // own iSyncJumpState values seen since the last sample (bit per value)
+            std::uint32_t pickRef = 0;           // pickup, host: the item taken
             int           notifySent = 0;        // message check: test messages sent
         };
         State s_state;
@@ -426,6 +461,56 @@ namespace Pulsar::TestBot
             return n;
         }
 
+        // Loose items lying in the world (loot form types, the ones LootSync mirrors),
+        // save-file references only, within a_radius.
+        struct ItemSeen {
+            RE::TESObjectREFR* ref;
+            std::uint32_t      id;
+            float              dist;
+            bool               present;   // enabled, not deleted, 3D loaded
+        };
+
+        int SafeListLooseItems(RE::TESObjectCELL* a_cell, float a_px, float a_py, float a_pz, float a_radius,
+                               ItemSeen* a_out, int a_max) noexcept
+        {
+            int n = 0;
+            __try {
+                if (!a_cell) return 0;
+                auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+                const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                if (!data || size == 0 || size > 20000) return 0;
+                const float maxD2 = a_radius * a_radius;
+                for (std::uint32_t i = 0; i < size && n < a_max; ++i) {
+                    auto* ref = data[i];
+                    if (!ref) continue;
+                    auto* rb = reinterpret_cast<std::uint8_t*>(ref);
+                    auto* base = *reinterpret_cast<std::uint8_t**>(rb + 0x98);
+                    if (!base) continue;
+                    switch (static_cast<RE::FormType>(*(base + 0x2E))) {
+                    case RE::FormType::kARMO: case RE::FormType::kBOOK: case RE::FormType::kMISC:
+                    case RE::FormType::kWEAP: case RE::FormType::kAMMO: case RE::FormType::kALCH:
+                    case RE::FormType::kINGR: case RE::FormType::kNOTE:
+                        break;
+                    default:
+                        continue;
+                    }
+                    const std::uint32_t id = ref->formID;
+                    if (id >= 0xFF000000u) continue;
+                    auto* loc = reinterpret_cast<float*>(rb + 0x8C);
+                    const float dx = loc[0] - a_px, dy = loc[1] - a_py, dz = loc[2] - a_pz;
+                    const float d2 = dx * dx + dy * dy + dz * dz;
+                    if (d2 >= maxD2) continue;
+                    const std::uint32_t flags = *reinterpret_cast<std::uint32_t*>(rb + 0x20);
+                    const auto loaded = *reinterpret_cast<std::uintptr_t*>(rb + 0xB8);
+                    const bool has3D = loaded && *reinterpret_cast<std::uintptr_t*>(loaded + 0x08);
+                    const bool present = !(flags & (1u << 11)) && !(flags & (1u << 5)) && has3D;   // kDisabled, kDeleted
+                    a_out[n++] = { ref, id, std::sqrt(d2), present };
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return n;
+        }
+
         // Activate a door as the player would, through the engine's Activate
         // core (REL::ID 63380): the function the Papyrus ObjectReference.Activate
         // native calls and LootSync hooks, so every hook sees a real player
@@ -491,6 +576,89 @@ namespace Pulsar::TestBot
         }
 
         constexpr std::uint32_t kCredits = 0x0000000Fu;
+
+        RE::ActorValueInfo* HealthAV()
+        {
+            static RE::ActorValueInfo* s_av = RE::TESForm::LookupByEditorID<RE::ActorValueInfo>("Health");
+            return s_av;
+        }
+
+        float SafeHealth(RE::Actor* a_actor) noexcept
+        {
+            auto* av = HealthAV();
+            __try {
+                return a_actor && av ? a_actor->GetActorValue(*av) : -1.0f;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return -1.0f;
+            }
+        }
+
+        // A hit's health loss, with the player as the source (the damage modifier a
+        // weapon hit adds). Returns the health before the hit, -1 on failure.
+        bool SafeDrawWeapon(RE::PlayerCharacter* a_player) noexcept
+        {
+            __try {
+                if (!a_player) return false;
+                a_player->DrawWeaponMagicHands(true);
+                return true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+        }
+
+        // The clone's head bone (C_Head) world rotation, row by row. The bone cache is
+        // resolved again for every sample: a respawned clone has a new skeleton.
+        bool SafeHeadRotation(RE::Actor* a_actor, float (&a_out)[9]) noexcept
+        {
+            static Pulsar::BoneSync::BoneCache s_cache;
+            RE::NiNode* root = nullptr;
+            __try {
+                if (!a_actor) return false;
+                const auto loaded = *reinterpret_cast<std::uintptr_t*>(reinterpret_cast<std::uint8_t*>(a_actor) + 0xB8);
+                auto* obj = loaded ? *reinterpret_cast<RE::NiAVObject**>(loaded + 0x08) : nullptr;
+                root = obj ? obj->GetAsNiNode() : nullptr;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+            if (!root) return false;
+            s_cache = {};
+            s_cache.Resolve(root);
+            __try {
+                auto* head = s_cache.bones[6];
+                if (!head) return false;
+                const auto& m = head->world.rotate;
+                for (int r = 0; r < 3; ++r) {
+                    a_out[r * 3 + 0] = m.entry[r].x;
+                    a_out[r * 3 + 1] = m.entry[r].y;
+                    a_out[r * 3 + 2] = m.entry[r].z;
+                }
+                return true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+        }
+
+        int SafeGraphInt(RE::Actor* a_actor, const char* a_name)
+        {
+            if (!a_actor) return -1;
+            RE::BSFixedString var(a_name);
+            std::int32_t v = -1;
+            a_actor->GetGraphVariableImplInt(var, v);
+            return v;
+        }
+
+        float SafeHitAsPlayer(RE::Actor* a_target, RE::PlayerCharacter* a_player, float a_fraction) noexcept
+        {
+            auto* av = HealthAV();
+            __try {
+                if (!a_target || !av) return -1.0f;
+                const float before = a_target->GetActorValue(*av);
+                a_target->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, *av, -(before * a_fraction + 1.0f), a_player);
+                return before;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return -1.0f;
+            }
+        }
 
         // Give the player an item the way a quest script does: no source
         // container, reason kQuestReward. Returns false if the form is unusable.
@@ -696,6 +864,65 @@ namespace Pulsar::TestBot
         }
     }
 
+    namespace
+    {
+        std::uint32_t ActionID(const char* a_editorID)
+        {
+            auto* form = RE::TESForm::LookupByEditorID(a_editorID);
+            return form ? form->formID : 0;
+        }
+
+        // Every frame: the jetpack steps (they are sub-second) and the height tracking.
+        void TickJetpack(std::uint64_t a_now)
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            const ActorSnap me = Snap(player);
+            if (me.valid) {
+                s_state.jetZMin = (std::min)(s_state.jetZMin, me.z);
+                s_state.jetZMax = (std::max)(s_state.jetZMax, me.z);
+                const int js = player ? SafeGraphInt(player, "iSyncJumpState") : -1;
+                if (js >= 0 && js < 8) s_state.jetJumpMask |= 1 << js;
+            }
+            const ActorSnap cl = Snap(Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteActor());
+            if (cl.valid && cl.has3D) {
+                s_state.jetCloneZMin = (std::min)(s_state.jetCloneZMin, cl.z);
+                s_state.jetCloneZMax = (std::max)(s_state.jetCloneZMax, cl.z);
+            }
+            if (s_state.jetStep == 0 || s_state.jetStep >= 3 || !player) return;
+            char msg[120];
+            if (s_state.jetStep == 1 && a_now - s_state.jetStepMs >= 250) {
+                const std::uint32_t id = ActionID("ActionBoostpackStart");
+                const bool ok = id && Pulsar::RemotePlayer::PerformActionOnActor(player, id);
+                std::snprintf(msg, sizeof(msg), ", boostpack start %08X ok=%d", id, ok ? 1 : 0);
+                s_state.jetInfo += msg;
+                s_state.jetStep = 2;
+                s_state.jetStepMs = a_now;
+                Trace(msg);
+            } else if (s_state.jetStep == 2 && a_now - s_state.jetStepMs >= 2500) {
+                const std::uint32_t id = ActionID("ActionBoostpackStop");
+                const bool ok = id && Pulsar::RemotePlayer::PerformActionOnActor(player, id);
+                std::snprintf(msg, sizeof(msg), ", boostpack stop %08X ok=%d", id, ok ? 1 : 0);
+                s_state.jetInfo += msg;
+                s_state.jetStep = 3;
+                Trace(msg);
+            }
+            s_state.actionInfo = "jetpack: " + s_state.jetInfo;
+        }
+    }
+
+    // Aim phases from the start: 0-3 s draw, 3-11 s up and aiming, 11-19 s down and
+    // aiming, 19-27 s level, not aiming; then the player's own aim again.
+    bool AimOverrideForTest(float& a_pitch, bool& a_sighted)
+    {
+        if (!s_state.cfg.enabled || s_state.cfg.scenario != "aim" || !s_state.aimStartMs) return false;
+        const std::uint64_t t = ::GetTickCount64() - s_state.aimStartMs;
+        if (t < 3000 || t >= 27000) return false;
+        if (t < 11000)      { a_pitch = 0.6f;  a_sighted = true; }
+        else if (t < 19000) { a_pitch = -0.6f; a_sighted = true; }
+        else                { a_pitch = 0.0f;  a_sighted = false; }
+        return true;
+    }
+
     void Tick()
     {
         if (!s_state.loaded) {
@@ -707,6 +934,7 @@ namespace Pulsar::TestBot
         if (!s_state.cfg.enabled) return;
 
         const std::uint64_t now = ::GetTickCount64();
+        if (s_state.cfg.scenario == "jetpack") TickJetpack(now);
         if (now < s_state.nextWriteMs) return;
         s_state.nextWriteMs = now + 1000;
 
@@ -816,8 +1044,97 @@ namespace Pulsar::TestBot
             TickTakeoff(player, me, now);
         }
 
+        // Friendly fire, host: two hits on the partner's figure, 4 s apart.
+        if (isHost && s_state.cfg.scenario == "friendlyfire" && s_state.ffHits < 2 && cloneVisible &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs &&
+            (s_state.ffHits == 0 || now - s_state.ffLastHitMs >= 4000)) {
+            const float fraction = s_state.ffHits == 0 ? 0.6f : 1.5f;
+            const float before = SafeHitAsPlayer(clone, player, fraction);
+            const float after = SafeHealth(clone);
+            ++s_state.ffHits;
+            s_state.ffLastHitMs = now;
+            char msg[160];
+            std::snprintf(msg, sizeof(msg), "%shit %d: %.0f%% of %.0f, figure health right after %.0f",
+                          s_state.ffHitInfo.empty() ? "" : "; ", s_state.ffHits, fraction * 100.0f, before, after);
+            s_state.ffHitInfo += msg;
+            Trace(msg);
+            if (s_state.ffHits == 1) {
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+            }
+            s_state.actionInfo = "friendlyfire: " + s_state.ffHitInfo;
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
+        // Reconnect, client: a 25 s network outage once the partner is settled.
+        if (!isHost && s_state.cfg.scenario == "reconnect" && !s_state.acted && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            Pulsar::Network::GetSingleton().SimulateOutageForTest(25000);
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            s_state.actionInfo = "reconnect: network outage 25000 ms";
+            Trace(s_state.actionInfo.c_str());
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
+        // Pickup, host: take the nearest loose item, as the player would (Activate core).
+        if (isHost && s_state.cfg.scenario == "pickup" && !s_state.acted && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            ItemSeen items[64];
+            const int n = SafeListLooseItems(player->parentCell, me.x, me.y, me.z, 20.0f, items, 64);
+            const ItemSeen* pick = nullptr;
+            for (int i = 0; i < n; ++i)
+                if (items[i].present && (!pick || items[i].dist < pick->dist)) pick = &items[i];
+            char msg[160];
+            if (pick) {
+                const int r = SafeActivateAsPlayer(pick->ref, player);
+                s_state.pickRef = pick->id;
+                std::snprintf(msg, sizeof(msg), "pickup: took %08X (%.1f m), activate=%d, %d loose items within 20 m",
+                              pick->id, pick->dist, r, n);
+            } else {
+                std::snprintf(msg, sizeof(msg), "pickup: no loose item within 20 m (%d seen, none present)", n);
+            }
+            s_state.actionInfo = msg;
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            Trace(msg);
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
+        // Jetpack, host: jump; TickJetpack fires the boostpack 250 ms later.
+        if (isHost && s_state.cfg.scenario == "jetpack" && s_state.jetStep == 0 && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            const std::uint32_t id = ActionID("ActionJump");
+            const bool ok = id && Pulsar::RemotePlayer::PerformActionOnActor(player, id);
+            char msg[80];
+            std::snprintf(msg, sizeof(msg), "jump %08X ok=%d from z %.2f", id, ok ? 1 : 0, me.z);
+            s_state.jetInfo = msg;
+            s_state.jetStep = 1;
+            s_state.jetStepMs = now;
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            s_state.actionInfo = "jetpack: " + s_state.jetInfo;
+            Trace(msg);
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
+        // Aim, host: draw the weapon, then the phases run from AimOverrideForTest.
+        if (isHost && s_state.cfg.scenario == "aim" && !s_state.aimStartMs && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            s_state.aimStartMs = now;
+            s_state.aimDrawn = SafeDrawWeapon(player);
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            s_state.actionInfo = std::string("aim: weapon draw called=") + (s_state.aimDrawn ? "1" : "0") +
+                                 ", up +0.6 rad 3-11 s, down -0.6 rad 11-19 s, level 19-27 s";
+            Trace(s_state.actionInfo.c_str());
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
         // The test action, once the partner is settled: host only.
         if (isHost && s_state.cfg.scenario != "loot" && s_state.cfg.scenario != "takeoff" &&
+            s_state.cfg.scenario != "friendlyfire" && s_state.cfg.scenario != "aim" &&
+            s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -964,6 +1281,62 @@ namespace Pulsar::TestBot
                           s_state.rewardOwnCopy ? "true" : "false");
             j += c;
         }
+        if (s_state.cfg.scenario == "reconnect")
+            j += ",\"reconnects\":" + std::to_string(Pulsar::Network::GetSingleton().ReconnectsForTest());
+        if (s_state.cfg.scenario == "pickup") {
+            // Every loose item around this player, with whether it is still there.
+            ItemSeen items[48];
+            const int n = me.valid ? SafeListLooseItems(player->parentCell, me.x, me.y, me.z, 40.0f, items, 48) : 0;
+            j += ",\"items\":[";
+            for (int i = 0; i < n; ++i) {
+                char c[64];
+                std::snprintf(c, sizeof(c), "%s{\"id\":\"%08X\",\"present\":%s}", i ? "," : "", items[i].id,
+                              items[i].present ? "true" : "false");
+                j += c;
+            }
+            j += "]";
+        }
+        if (s_state.cfg.scenario == "jetpack") {
+            char c[300];
+            std::snprintf(c, sizeof(c),
+                          ",\"jet\":{\"step\":%d,\"zMin\":%.3f,\"zMax\":%.3f,\"cloneZMin\":%.3f,\"cloneZMax\":%.3f,"
+                          "\"jumpMask\":%d,\"boostStarts\":%u,\"boostAccepted\":%u}",
+                          s_state.jetStep, s_state.jetZMin, s_state.jetZMax, s_state.jetCloneZMin, s_state.jetCloneZMax,
+                          s_state.jetJumpMask, Pulsar::RemotePlayer::BoostStartsForTest(),
+                          Pulsar::RemotePlayer::BoostStartsAcceptedForTest());
+            j += c;
+            s_state.jetZMin = s_state.jetCloneZMin = 1e9f;
+            s_state.jetZMax = s_state.jetCloneZMax = -1e9f;
+            s_state.jetJumpMask = 0;
+        }
+        if (s_state.cfg.scenario == "aim") {
+            // Host: what it sends. Client: what arrived, the clone's head and pose.
+            float sentPitch = 0.0f;
+            bool sentSighted = false;
+            const bool steering = AimOverrideForTest(sentPitch, sentSighted);
+            float head[9] = {};
+            const bool gotHead = !isHost && cloneVisible && SafeHeadRotation(clone, head);
+            char c[400];
+            std::snprintf(c, sizeof(c),
+                          ",\"aim\":{\"steering\":%s,\"sent\":%.3f,\"sentSighted\":%s,\"recv\":%.3f,\"cloneSighted\":%d,"
+                          "\"head\":[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f],\"gotHead\":%s}",
+                          steering ? "true" : "false", sentPitch, sentSighted ? "true" : "false",
+                          Pulsar::RemotePlayer::GetRemotePlayerManager().GetNetPitch(),
+                          cloneVisible ? SafeGraphInt(clone, "iSyncSighted") : -1,
+                          head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7], head[8],
+                          gotHead ? "true" : "false");
+            j += c;
+        }
+        if (s_state.cfg.scenario == "friendlyfire") {
+            // Host: the partner's figure. Client: its own health and downed state.
+            char c[200];
+            std::snprintf(c, sizeof(c),
+                          ",\"ff\":{\"figure\":%.1f,\"figureDead\":%s,\"heals\":%u,\"own\":%.1f,\"ownDowned\":%s,\"hits\":%d}",
+                          cloneVisible ? SafeHealth(clone) : -1.0f, cloneVisible && SafeIsDead(clone) ? "true" : "false",
+                          Pulsar::Coop::Mortality::FigureHealsForTest(), me.valid ? SafeHealth(player) : -1.0f,
+                          Pulsar::Coop::Mortality::IsLocalDowned() ? "true" : "false", s_state.ffHits);
+            j += c;
+        }
         j += "}\n";
         WriteState(j);
     }
@@ -974,6 +1347,7 @@ namespace Pulsar::TestBot
 namespace Pulsar::TestBot
 {
     void Tick() {}
+    bool AimOverrideForTest(float&, bool&) { return false; }
 }
 
 #endif

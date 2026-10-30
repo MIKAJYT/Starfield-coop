@@ -333,6 +333,36 @@ namespace Pulsar
                 cfg.coopQuestRewards = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopQuestRewards = {}"sv, cfg.coopQuestRewards);
             }
+            else if (keyLower == "coopfriendlyfireguard" || keyLower == "coop_friendly_fire_guard") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopFriendlyFireGuard = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopFriendlyFireGuard = {}"sv, cfg.coopFriendlyFireGuard);
+            }
+            else if (keyLower == "coopaimsync" || keyLower == "coop_aim_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopAimSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopAimSync = {}"sv, cfg.coopAimSync);
+            }
+            else if (keyLower == "coopjetpacksync" || keyLower == "coop_jetpack_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopJetpackSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopJetpackSync = {}"sv, cfg.coopJetpackSync);
+            }
+            else if (keyLower == "coopsharedworlditems" || keyLower == "coop_shared_world_items") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopSharedWorldItems = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopSharedWorldItems = {}"sv, cfg.coopSharedWorldItems);
+            }
+            else if (keyLower == "autoreconnect" || keyLower == "auto_reconnect") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.autoReconnect = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: AutoReconnect = {}"sv, cfg.autoReconnect);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

@@ -51,7 +51,22 @@ param(
     # takeoff: host pilots off a landed ship; the launch must wait for the
     # client's ready (CoopTakeoffVote=1). Needs a save aboard a landed ship
     # (Save10). -NoTakeoffVote sets it to 0: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus")][string]$Scenario = "follow",
+    # friendlyfire: host hits the client's figure twice; the figure must heal back and the
+    # client's own health must not move (CoopFriendlyFireGuard=1). -NoFriendlyFireGuard: twin.
+    # aim: host looks up, then down, aiming; the client's clone must turn its head and take
+    # the sights pose (CoopAimSync=1). -NoAimSync: twin.
+    # jetpack: host jumps and boosts 2.5 s; the client's clone must rise with it and fire its
+    # own boostpack (CoopJetpackSync=1). -NoJetpackSync: twin.
+    # pickup: host takes a loose item lying in the world; it must be gone on the client too
+    # (CoopSharedWorldItems=1). -NoSharedWorldItems: twin.
+    # reconnect: the client's network goes dark for 25 s; the session must come back by
+    # itself (AutoReconnect=1). -NoAutoReconnect: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect")][string]$Scenario = "follow",
+    [switch]$NoAutoReconnect,
+    [switch]$NoSharedWorldItems,
+    [switch]$NoFriendlyFireGuard,
+    [switch]$NoAimSync,
+    [switch]$NoJetpackSync,
     [switch]$DoorFollow,
     [switch]$SharedLoot,
     [switch]$NoQuestRewards,
@@ -334,6 +349,242 @@ function Invoke-RewardScore {
     return $r
 }
 
+# ---- friendlyfire scenario ----------------------------------------------------
+# The host hits the client's figure twice as the attacker (60 %, then more than all of
+# its health, 4 s apart). PASS: on the host the figure is back to full health 2.5 s
+# after each hit and never dead; on the client its own health never drops and it is
+# never downed. The hits must have landed (health right after < before), or the run
+# cannot tell anything (ERROR).
+function Invoke-FriendlyFireScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    $second = $hostList | Where-Object { $_.ff.hits -ge 2 } | Select-Object -First 1
+    if (-not $act -or -not $second) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never hit the figure twice (clone never settled?)") }
+        return $r
+    }
+    $t0 = [long]$act.actedAtWallMs; $t2 = [long]$second.wallMs
+    $info = $second.actionInfo
+    $hits = @([regex]::Matches($info, 'of (-?[\d.]+), figure health right after (-?[\d.]+)'))
+    if ($hits.Count -lt 2) { $r.Result = "ERROR"; $r.Reasons.Add("cannot read the hits: $info"); return $r }
+    foreach ($h in $hits) {
+        if ([double]$h.Groups[2].Value -ge [double]$h.Groups[1].Value - 1) { $r.Result = "ERROR"; $r.Reasons.Add("a hit did not take the figure's health down: $info"); return $r }
+    }
+    $base = [double]$hits[0].Groups[1].Value
+    $hLate = @($hostList | Where-Object { $_.wallMs -ge $t2 + 8000 })
+    $cLate = @($clientList | Where-Object { $_.wallMs -ge $t2 + 8000 })
+    if ($hLate.Count -lt 2 -or $cLate.Count -lt 2) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples 8 s after the second hit") }
+        return $r
+    }
+    $cBefore = @($clientList | Where-Object { $_.wallMs -lt $t0 -and $_.ff.own -gt 0 })
+    if ($cBefore.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("no client health before the hits"); return $r }
+    $ownBase = [double]$cBefore[-1].ff.own
+    $cAfter = @($clientList | Where-Object { $_.wallMs -ge $t0 })
+    $ownMin = ($cAfter | ForEach-Object { [double]$_.ff.own } | Measure-Object -Minimum).Minimum
+    # Host samples that should show the figure healed: 2.5 s or more after a hit.
+    $healedWindow = @($hostList | Where-Object { ($_.wallMs -ge $t0 + 2500 -and $_.wallMs -lt $t2) -or $_.wallMs -ge $t2 + 2500 } | Where-Object { $_.cloneVisible })
+    $low = @($healedWindow | Where-Object { [double]$_.ff.figure -lt 0.95 * $base })
+    $dead = @($hostList | Where-Object { $_.wallMs -ge $t0 -and $_.ff.figureDead })
+    $lowest = ($healedWindow | ForEach-Object { [double]$_.ff.figure } | Measure-Object -Minimum).Minimum
+    $r.Details = "friendlyfire: $info; figure health before $base, lowest 2.5 s+ after a hit: $lowest; heals $($hLate[-1].ff.heals); client health $ownBase -> lowest $ownMin"
+    if ($dead.Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client's figure died on the host's screen"); return $r }
+    if ($low.Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the figure kept the damage: $($low.Count) samples below 95 % health 2.5 s or more after a hit"); return $r }
+    if ($ownMin -lt $ownBase - 1) { $r.Result = "FAIL"; $r.Reasons.Add("the client's own health dropped from $ownBase to $ownMin"); return $r }
+    if (@($cAfter | Where-Object { $_.ff.ownDowned }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client went down"); return $r }
+    if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the hits"); return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
+# ---- aim scenario --------------------------------------------------------------
+# The host draws its weapon and aims 8 s up (+0.6 rad), 8 s down (-0.6 rad), then 8 s
+# level without aiming. The client reports the pitch it received and its clone's head
+# bone rotation. PASS: the pitch arrived, the head turned 0.35 rad (20 degrees) or more
+# between the up and the down phase, the clone took the sights pose while the host
+# aimed and left it after.
+function Get-RotAngle($a, $b) {
+    $tr = 0.0; for ($k = 0; $k -lt 9; $k++) { $tr += [double]$a[$k] * [double]$b[$k] }
+    $c = ($tr - 1.0) / 2.0; if ($c -gt 1) { $c = 1 }; if ($c -lt -1) { $c = -1 }
+    return [math]::Acos($c)
+}
+function Invoke-AimScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $up = @($hostList | Where-Object { $_.aim.steering -and $_.aim.sent -gt 0.5 })
+    $down = @($hostList | Where-Object { $_.aim.steering -and $_.aim.sent -lt -0.5 })
+    $level = @($hostList | Where-Object { $_.aim.steering -and [math]::Abs($_.aim.sent) -lt 0.01 })
+    if ($up.Count -lt 3 -or $down.Count -lt 3 -or $level.Count -lt 3) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never ran all aim phases (up $($up.Count), down $($down.Count), level $($level.Count) samples)") }
+        return $r
+    }
+    $endLevel = [long]$level[-1].wallMs
+    if (@($clientList | Where-Object { $_.wallMs -ge $endLevel }).Count -lt 1) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("no client samples after the aim phases") }
+        return $r
+    }
+    # Client samples well inside each phase (2 s for the pitch to arrive and the head to turn).
+    $cUp = @($clientList | Where-Object { $_.wallMs -ge [long]$up[0].wallMs + 2000 -and $_.wallMs -le [long]$up[-1].wallMs -and $_.aim.gotHead })
+    $cDown = @($clientList | Where-Object { $_.wallMs -ge [long]$down[0].wallMs + 2000 -and $_.wallMs -le [long]$down[-1].wallMs -and $_.aim.gotHead })
+    $cLevel = @($clientList | Where-Object { $_.wallMs -ge [long]$level[0].wallMs + 3000 -and $_.wallMs -le $endLevel })
+    if ($cUp.Count -lt 2 -or $cDown.Count -lt 2) { $r.Result = "ERROR"; $r.Reasons.Add("no head bone readings on the client (up $($cUp.Count), down $($cDown.Count))"); return $r }
+    $recvUp = @($cUp | Where-Object { [math]::Abs([math]::Abs([double]$_.aim.recv) - 0.6) -lt 0.05 }).Count
+    $recvDown = @($cDown | Where-Object { [math]::Abs([math]::Abs([double]$_.aim.recv) - 0.6) -lt 0.05 }).Count
+    $turn = Get-RotAngle $cUp[-1].aim.head $cDown[-1].aim.head
+    $noise = [math]::Max((Get-RotAngle $cUp[0].aim.head $cUp[-1].aim.head), (Get-RotAngle $cDown[0].aim.head $cDown[-1].aim.head))
+    $sightedWhileAiming = @($cUp + $cDown | Where-Object { $_.aim.cloneSighted -eq 1 }).Count
+    $sightedAfter = @($cLevel | Where-Object { $_.aim.cloneSighted -eq 1 }).Count
+    $r.Details = "aim: $($hostList | Where-Object { $_.acted } | Select-Object -First 1 -ExpandProperty actionInfo); pitch arrived up $recvUp/$($cUp.Count), down $recvDown/$($cDown.Count); head turned {0:N2} rad between up and down (within a phase at most {1:N2}); clone in sights while aiming $sightedWhileAiming/$($cUp.Count + $cDown.Count), after $sightedAfter/$($cLevel.Count)" -f $turn, $noise
+    if ($recvUp -eq 0 -or $recvDown -eq 0) { $r.Result = "FAIL"; $r.Reasons.Add("the host's pitch did not arrive on the client"); return $r }
+    if ($turn -lt 0.35) { $r.Result = "FAIL"; $r.Reasons.Add(("the clone's head turned only {0:N2} rad between looking up and down" -f $turn)); return $r }
+    if ($sightedWhileAiming -eq 0) { $r.Result = "FAIL"; $r.Reasons.Add("the clone never took the sights pose while the host aimed"); return $r }
+    if ($sightedAfter -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the clone stayed in the sights pose after the host stopped aiming"); return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
+# ---- jetpack scenario ----------------------------------------------------------
+# The host jumps and fires its boostpack for 2.5 s. Both bots track heights every frame
+# (min and max per sample). PASS: the host rose 1 m or more, the client's clone rose at
+# least 70 % as high within 8 s, and the client's figure fired its own boostpack.
+function Invoke-JetpackScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never jumped (clone never settled?)") }
+        return $r
+    }
+    $t0 = [long]$act.actedAtWallMs
+    if (@($clientList | Where-Object { $_.wallMs -ge $t0 + 10000 }).Count -lt 2 -or @($hostList | Where-Object { $_.wallMs -ge $t0 + 10000 }).Count -lt 2) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples 10 s after the jump") }
+        return $r
+    }
+    $hBefore = @($hostList | Where-Object { $_.wallMs -lt $t0 }); $cBefore = @($clientList | Where-Object { $_.wallMs -lt $t0 -and $_.cloneVisible })
+    if ($hBefore.Count -eq 0 -or $cBefore.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("no heights before the jump"); return $r }
+    $hBase = [double]$hBefore[-1].player[2]; $cBase = [double]$cBefore[-1].clone[2]
+    $hWin = @($hostList | Where-Object { $_.wallMs -ge $t0 - 1000 -and $_.wallMs -le $t0 + 8000 })
+    $cWin = @($clientList | Where-Object { $_.wallMs -ge $t0 - 1000 -and $_.wallMs -le $t0 + 9000 })
+    $hRise = ($hWin | ForEach-Object { [double]$_.jet.zMax } | Measure-Object -Maximum).Maximum - $hBase
+    $cRise = ($cWin | Where-Object { [double]$_.jet.cloneZMax -gt -1e8 } | ForEach-Object { [double]$_.jet.cloneZMax } | Measure-Object -Maximum).Maximum - $cBase
+    $mask = 0; foreach ($s in $hWin) { $mask = $mask -bor [int]$s.jet.jumpMask }
+    $cLast = $clientList[-1].jet; $cFirst = $cBefore[-1].jet
+    $starts = [int]$cLast.boostStarts - [int]$cFirst.boostStarts; $accepted = [int]$cLast.boostAccepted - [int]$cFirst.boostAccepted
+    $r.Details = "jetpack: $($hostList[-1].actionInfo); host rose {0:N2} m (jump states seen: mask $mask), clone rose {1:N2} m; figure boostpack starts $starts, accepted $accepted" -f $hRise, $cRise
+    if ($hRise -lt 1.0) { $r.Result = "ERROR"; $r.Reasons.Add(("the host rose only {0:N2} m: the bot's boost did not lift it" -f $hRise)); return $r }
+    if ($cRise -lt 0.7 * $hRise) { $r.Result = "FAIL"; $r.Reasons.Add(("the clone rose {0:N2} m, the host {1:N2} m" -f $cRise, $hRise)); return $r }
+    if ($accepted -lt 1) { $r.Result = "FAIL"; $r.Reasons.Add("the client's figure never fired its boostpack (starts $starts, accepted $accepted)"); return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
+# ---- pickup scenario -----------------------------------------------------------
+# The host takes the nearest loose item lying in the world (a save-file reference, the
+# same on both machines). PASS: the client saw the item before, the host's copy is gone,
+# and 8 s after the take the client's copy is gone too (disabled, deleted or no longer
+# in the cell).
+function Invoke-PickupScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never took an item (clone never settled?)") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^pickup: took ([0-9A-F]{8}) .*activate=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not take an item: $($act.actionInfo)"); return $r }
+    $id = $Matches[1]; $t0 = [long]$act.actedAtWallMs
+    $cLate = @($clientList | Where-Object { $_.wallMs -ge $t0 + 8000 }); $hLate = @($hostList | Where-Object { $_.wallMs -ge $t0 + 8000 })
+    if ($cLate.Count -lt 3 -or $hLate.Count -lt 1) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples 8 s after the take") }
+        return $r
+    }
+    $cBefore = @($clientList | Where-Object { $_.wallMs -lt $t0 } | Select-Object -Last 3)
+    $seenBefore = @($cBefore | Where-Object { @($_.items | Where-Object { $_.id -eq $id -and $_.present }).Count -gt 0 }).Count
+    $hostStill = @($hLate | Where-Object { @($_.items | Where-Object { $_.id -eq $id -and $_.present }).Count -gt 0 }).Count
+    $clientStill = @($cLate | Where-Object { @($_.items | Where-Object { $_.id -eq $id -and $_.present }).Count -gt 0 }).Count
+    $r.Details = "pickup: $($act.actionInfo); on the client before: $seenBefore/$($cBefore.Count) samples; still there 8 s+ after: host $hostStill/$($hLate.Count), client $clientStill/$($cLate.Count)"
+    if ($seenBefore -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("the client never saw item $id before the take"); return $r }
+    if ($hostStill -gt 0) { $r.Result = "ERROR"; $r.Reasons.Add("item $id is still there on the host after its own take"); return $r }
+    if ($clientStill -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("item $id is still there on the client 8 s after the host took it"); return $r }
+    if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the take"); return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
+# ---- reconnect scenario --------------------------------------------------------
+# The client's network goes dark for 25 s. PASS: the client lost the connection, then
+# reconnected by itself within 150 s of the outage's end, and afterwards both sides see
+# the partner's figure again.
+function Invoke-ReconnectScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $act = $clientList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the client bot never cut its network (clone never settled?)") }
+        return $r
+    }
+    $t0 = [long]$act.actedAtWallMs; $tEnd = $t0 + 25000
+    $dropped = $clientList | Where-Object { $_.wallMs -ge $t0 -and -not $_.connected } | Select-Object -First 1
+    $back = $clientList | Where-Object { $_.wallMs -ge $tEnd -and $_.connected -and $_.cloneVisible -and $_.reconnects -ge 1 } | Select-Object -First 1
+    $hostBack = if ($back) { $hostList | Where-Object { $_.wallMs -ge [long]$back.wallMs -and $_.cloneVisible } | Select-Object -First 1 } else { $null }
+    $deadline = $tEnd + 150000
+    $lastSeen = [long]$clientList[-1].wallMs
+    $r.Details = "reconnect: $($act.actionInfo); dropped at +$(if ($dropped) { [long]$dropped.wallMs - $t0 } else { '-' }) ms; back with the partner's figure at +$(if ($back) { [long]$back.wallMs - $t0 } else { '-' }) ms (reconnects $($clientList[-1].reconnects)); host sees the client's figure again at +$(if ($hostBack) { [long]$hostBack.wallMs - $t0 } else { '-' }) ms"
+    if (-not $dropped) {
+        if ($lastSeen -ge $tEnd) { $r.Result = "ERROR"; $r.Reasons.Add("the connection never dropped during the outage"); return $r }
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("no client samples after the outage began") }
+        return $r
+    }
+    if ($back -and $hostBack) { $r.Result = "PASS"; return $r }
+    if ($lastSeen -ge $deadline -or ($Final -and $lastSeen -ge $tEnd)) {
+        $r.Result = "FAIL"
+        $r.Reasons.Add($(if (-not $back) { "the client did not come back within 150 s of the outage's end" } else { "the host never saw the client's figure again" }))
+        return $r
+    }
+    return $r
+}
+
 # ---- papyrus scenario ---------------------------------------------------------
 # C++ -> Papyrus dispatch check. The host bot dispatches PULSAR's own
 # PulsarFurnSync.DoPlayerFollowMoveTo (the move-aboard / follow path) at itself.
@@ -502,6 +753,95 @@ function New-RewardRun([int]$clientCredits = 500, [int]$clientItems = 1, [int]$h
     $d = if ($decides) { @("[PULSAR] [REWARD] +0x0000000F x500 (partner's quest reward)", "[PULSAR] [REWARD] partner's reward 0x$($item): x1 already given by our own quest") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-FriendlyFireRun([bool]$heals = $true, [bool]$clientHurt = $false, [bool]$acts = $true, [bool]$lands = $true, [bool]$dies = $false) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000; $hit2 = $actAt + 4000
+    $after1 = if ($lands) { 99 } else { 250 }; $after2 = if ($lands) { -126 } else { 250 }
+    $info1 = "friendlyfire: hit 1: 60% of 250, figure health right after $after1"
+    $info2 = "$info1; hit 2: 150% of 250, figure health right after $after2"
+    for ($i = 0; $i -lt 40; $i++) {
+        $t = $t0 + $i * 1000; $hitsNow = if (-not $acts) { 0 } elseif ($t -ge $hit2) { 2 } elseif ($t -ge $actAt) { 1 } else { 0 }
+        $fig = 250.0
+        if ($hitsNow -ge 1 -and -not $heals) { $fig = if ($hitsNow -eq 2) { 0.0 } else { 99.0 } }
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($hitsNow -ge 1) $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($hitsNow -eq 2) { $info2 } elseif ($hitsNow -eq 1) { $info1 } else { "" }); $hs | Add-Member connected $true
+        $hs | Add-Member ff ([pscustomobject]@{ figure = $fig; figureDead = ($dies -and $hitsNow -eq 2); heals = $(if ($heals) { $hitsNow } else { 0 }); own = 300.0; ownDowned = $false; hits = $hitsNow })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cs | Add-Member ff ([pscustomobject]@{ figure = 250.0; figureDead = $false; heals = 0; own = $(if ($clientHurt -and $t -ge $actAt + 1000) { 120.0 } else { 300.0 }); ownDowned = $false; hits = 0 })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
+function New-AimRun([bool]$turns = $true, [bool]$arrives = $true, [bool]$sights = $true, [bool]$acts = $true, [bool]$sticks = $false) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $start = $t0 + 10000
+    $hUp = @(1, 0, 0, 0, 0.825, -0.565, 0, 0.565, 0.825); $hDown = @(1, 0, 0, 0, 0.825, 0.565, 0, -0.565, 0.825); $hLevel = @(1, 0, 0, 0, 1, 0, 0, 0, 1)
+    for ($i = 0; $i -lt 50; $i++) {
+        $t = $t0 + $i * 1000; $e = $t - $start
+        $steer = $acts -and $e -ge 3000 -and $e -lt 27000
+        $sent = if (-not $steer) { 0.0 } elseif ($e -lt 11000) { 0.6 } elseif ($e -lt 19000) { -0.6 } else { 0.0 }
+        $sentSighted = $steer -and $e -lt 19000
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $e -ge 0) $(if ($acts) { $start } else { 0 })
+        $hs | Add-Member actionInfo "aim: weapon draw called=1"; $hs | Add-Member connected $true
+        $hs | Add-Member aim ([pscustomobject]@{ steering = $steer; sent = $sent; sentSighted = $sentSighted; recv = 0.0; cloneSighted = 0; head = $hLevel; gotHead = $false })
+        $ce = $e - 500
+        $recv = if (-not $arrives -or -not $acts -or $ce -lt 3000 -or $ce -ge 27000) { 0.0 } elseif ($ce -lt 11000) { 0.6 } elseif ($ce -lt 19000) { -0.6 } else { 0.0 }
+        $head = if (-not $turns) { $hLevel } elseif ($recv -gt 0.5) { $hUp } elseif ($recv -lt -0.5) { $hDown } else { $hLevel }
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cSighted = if ($sticks -and $acts -and $ce -ge 3000) { 1 } elseif ($sights -and [math]::Abs($recv) -gt 0.5) { 1 } else { 0 }
+        $cs | Add-Member aim ([pscustomobject]@{ steering = $false; sent = 0.0; sentSighted = $false; recv = $recv; cloneSighted = $cSighted; head = $head; gotHead = $true })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
+function New-JetpackRun([double]$hostRise = 6.0, [double]$cloneRise = 5.5, [int]$accepted = 1, [bool]$acts = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000
+    for ($i = 0; $i -lt 30; $i++) {
+        $t = $t0 + $i * 1000; $e = $t - $actAt; $up = $acts -and $e -ge 0 -and $e -lt 4000
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 10) @(1, 0, 10) $true ($acts -and $e -ge 0) $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo "jetpack: jump 00001234 ok=1 from z 10.00, boostpack start 00005678 ok=1"; $hs | Add-Member connected $true
+        $hs | Add-Member jet ([pscustomobject]@{ step = 3; zMin = 10.0; zMax = $(if ($up) { 10 + $hostRise } else { 10.0 }); cloneZMin = 10.0; cloneZMax = 10.0; jumpMask = $(if ($up) { 15 } else { 1 }); boostStarts = 0; boostAccepted = 0 })
+        $cs = New-Sample "client" $t @(1, 0, 10) @(0, 0, 10) $true
+        $cs | Add-Member connected $true
+        $cUp = $acts -and $e -ge 500 -and $e -lt 4500
+        $done = $acts -and $e -ge 1000
+        $cs | Add-Member jet ([pscustomobject]@{ step = 0; zMin = 10.0; zMax = 10.0; cloneZMin = 10.0; cloneZMax = $(if ($cUp) { 10 + $cloneRise } else { 10.0 }); jumpMask = 1; boostStarts = $(if ($done) { 1 } else { 0 }); boostAccepted = $(if ($done) { $accepted } else { 0 }) })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
+function New-PickupRun([bool]$clientRemoves = $true, [bool]$hostRemoves = $true, [bool]$clientSees = $true, [bool]$acts = $true, [bool]$found = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000; $id = "0012ABCD"
+    $info = if ($found) { "pickup: took $id (2.1 m), activate=1, 5 loose items within 20 m" } else { "pickup: no loose item within 20 m (0 seen, none present)" }
+    for ($i = 0; $i -lt 30; $i++) {
+        $t = $t0 + $i * 1000; $after = $acts -and $t -ge $actAt + 2000
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $t -ge $actAt) $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { $info } else { "" }); $hs | Add-Member connected $true
+        $hs | Add-Member items @([pscustomobject]@{ id = $id; present = -not ($after -and $hostRemoves) }, [pscustomobject]@{ id = "0012ABCE"; present = $true })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cItems = @([pscustomobject]@{ id = "0012ABCE"; present = $true })
+        if ($clientSees -and -not ($after -and $clientRemoves)) { $cItems += [pscustomobject]@{ id = $id; present = $true } }
+        $cs | Add-Member items $cItems
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
+function New-ReconnectRun([int]$backAfter = 40000, [bool]$drops = $true, [bool]$acts = $true, [bool]$hostSees = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000
+    for ($i = 0; $i -lt 220; $i++) {
+        $t = $t0 + $i * 1000; $e = $t - $actAt
+        $down = $acts -and $drops -and $e -ge 12000 -and ($backAfter -lt 0 -or $e -lt $backAfter)
+        $isBack = $acts -and $drops -and $backAfter -ge 0 -and $e -ge $backAfter
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) (-not $down -and ($hostSees -or -not $isBack)) $false 0
+        $hs | Add-Member connected (-not $down); $hs | Add-Member reconnects 0
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) (-not $down) ($acts -and $e -ge 0) $(if ($acts) { $actAt } else { 0 })
+        $cs | Add-Member connected (-not $down); $cs | Add-Member actionInfo "reconnect: network outage 25000 ms"
+        $cs | Add-Member reconnects $(if ($isBack) { 1 } else { 0 })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
 function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [bool]$clientFollows = $true, [bool]$boards = $true, [bool]$acts = $true, [bool]$answers = $true, [bool]$outside = $false, [bool]$movedAboard = $true, [bool]$left = $true, [int]$f8At = -1) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $askAt = $t0 + 5000
     $info = "takeoff: seat 0001ABCD activate=1, seated=1, launch fired=1"
@@ -629,13 +969,46 @@ function Invoke-ScorerSelfTest {
         @{ Name = "board: stayed inside";    Run = (New-TakeoffRun);                   Expect = "ERROR";   Takeoff = $true; Outside = $true },
         @{ Name = "f8: vote still holds";    Run = (New-TakeoffRun -f8At 3000);        Expect = "PASS";    Takeoff = $true; F8 = $true },
         @{ Name = "f8: launched on F8";      Run = (New-TakeoffRun -f8At 3000 -spaceAfter 4000); Expect = "FAIL"; Takeoff = $true; F8 = $true },
-        @{ Name = "f8: never pressed";       Run = (New-TakeoffRun);                   Expect = "ERROR";   Takeoff = $true; F8 = $true }
+        @{ Name = "f8: never pressed";       Run = (New-TakeoffRun);                   Expect = "ERROR";   Takeoff = $true; F8 = $true },
+        @{ Name = "ff: figure heals";        Run = (New-FriendlyFireRun);              Expect = "PASS";    FF = $true },
+        @{ Name = "ff: figure keeps damage"; Run = (New-FriendlyFireRun -heals $false); Expect = "FAIL";   FF = $true },
+        @{ Name = "ff: figure dies";         Run = (New-FriendlyFireRun -dies $true);  Expect = "FAIL";    FF = $true },
+        @{ Name = "ff: client hurt";         Run = (New-FriendlyFireRun -clientHurt $true); Expect = "FAIL"; FF = $true },
+        @{ Name = "ff: hits did nothing";    Run = (New-FriendlyFireRun -lands $false); Expect = "ERROR";  FF = $true },
+        @{ Name = "ff: never hit";           Run = (New-FriendlyFireRun -acts $false); Expect = "TIMEOUT"; FF = $true },
+        @{ Name = "aim: head follows";       Run = (New-AimRun);                       Expect = "PASS";    Aim = $true },
+        @{ Name = "aim: head stays level";   Run = (New-AimRun -turns $false);         Expect = "FAIL";    Aim = $true },
+        @{ Name = "aim: pitch never arrives"; Run = (New-AimRun -arrives $false -turns $false); Expect = "FAIL"; Aim = $true },
+        @{ Name = "aim: never in sights";    Run = (New-AimRun -sights $false);        Expect = "FAIL";    Aim = $true },
+        @{ Name = "aim: sights stuck";       Run = (New-AimRun -sticks $true);         Expect = "FAIL";    Aim = $true },
+        @{ Name = "aim: never aimed";        Run = (New-AimRun -acts $false);          Expect = "TIMEOUT"; Aim = $true },
+        @{ Name = "jet: clone boosts";       Run = (New-JetpackRun);                   Expect = "PASS";    Jet = $true },
+        @{ Name = "jet: clone stays down";   Run = (New-JetpackRun -cloneRise 0.5);    Expect = "FAIL";    Jet = $true },
+        @{ Name = "jet: no figure boost";    Run = (New-JetpackRun -accepted 0);       Expect = "FAIL";    Jet = $true },
+        @{ Name = "jet: host never rose";    Run = (New-JetpackRun -hostRise 0.2 -cloneRise 0.2); Expect = "ERROR"; Jet = $true },
+        @{ Name = "jet: never jumped";       Run = (New-JetpackRun -acts $false);      Expect = "TIMEOUT"; Jet = $true },
+        @{ Name = "pick: gone for both";     Run = (New-PickupRun);                    Expect = "PASS";    Pick = $true },
+        @{ Name = "pick: client keeps it";   Run = (New-PickupRun -clientRemoves $false); Expect = "FAIL";  Pick = $true },
+        @{ Name = "pick: host take failed";  Run = (New-PickupRun -hostRemoves $false -clientRemoves $false); Expect = "ERROR"; Pick = $true },
+        @{ Name = "pick: client never saw";  Run = (New-PickupRun -clientSees $false); Expect = "ERROR";   Pick = $true },
+        @{ Name = "pick: no item nearby";    Run = (New-PickupRun -found $false);      Expect = "ERROR";   Pick = $true },
+        @{ Name = "pick: never acted";       Run = (New-PickupRun -acts $false);       Expect = "TIMEOUT"; Pick = $true },
+        @{ Name = "rc: comes back";          Run = (New-ReconnectRun);                 Expect = "PASS";    Rc = $true },
+        @{ Name = "rc: never comes back";    Run = (New-ReconnectRun -backAfter -1);   Expect = "FAIL";    Rc = $true },
+        @{ Name = "rc: host never sees it";  Run = (New-ReconnectRun -hostSees $false); Expect = "FAIL";   Rc = $true },
+        @{ Name = "rc: never dropped";       Run = (New-ReconnectRun -drops $false);   Expect = "ERROR";   Rc = $true },
+        @{ Name = "rc: never cut";           Run = (New-ReconnectRun -acts $false);    Expect = "TIMEOUT"; Rc = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Takeoff")) { Invoke-TakeoffScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true -PartnerOutside $case.ContainsKey("Outside") -F8DuringVote $case.ContainsKey("F8") }
+             elseif ($case.ContainsKey("Rc")) { Invoke-ReconnectScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Pick")) { Invoke-PickupScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Jet")) { Invoke-JetpackScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Aim")) { Invoke-AimScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("FF")) { Invoke-FriendlyFireScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Reward")) { Invoke-RewardScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              else { Invoke-CoopScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Tolerance 1.5 -MoveMetres 5 -Final $true }
         $ok = $s.Result -eq $case.Expect
@@ -725,7 +1098,12 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $instancedLootValue = if ($SharedLoot) { 0 } else { 1 }
     $questRewardsValue = if ($NoQuestRewards) { 0 } else { 1 }
     $takeoffVoteValue = if ($NoTakeoffVote) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $ffGuardValue = if ($NoFriendlyFireGuard) { 0 } else { 1 }
+    $aimSyncValue = if ($NoAimSync) { 0 } else { 1 }
+    $jetpackSyncValue = if ($NoJetpackSync) { 0 } else { 1 }
+    $sharedItemsValue = if ($NoSharedWorldItems) { 0 } else { 1 }
+    $autoReconnectValue = if ($NoAutoReconnect) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -929,6 +1307,11 @@ try {
         $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "reconnect") { Invoke-ReconnectScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "pickup") { Invoke-PickupScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "papyrus") { Invoke-PapyrusScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final -PartnerOutside $PartnerOutside.IsPresent -F8DuringVote $F8DuringVote.IsPresent }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }

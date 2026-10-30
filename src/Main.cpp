@@ -646,6 +646,10 @@ static void FillAnimationData(RE::Actor* a_actor, Pulsar::Network::PositionData&
 
     // Player pitch - captured by PlayerCameraHandler hook (REL::ID 82252)
     float foundPitch = g_playerPitch.load();
+    {
+        bool botSighted = false;
+        if (Pulsar::TestBot::AimOverrideForTest(foundPitch, botSighted)) hostSighted = botSighted ? 1 : 0;
+    }
     a_pos.vars.lookPitch = foundPitch;
     a_pos.rotX = foundPitch;
 

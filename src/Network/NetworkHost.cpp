@@ -86,6 +86,17 @@ namespace Pulsar::Network
     // OUR session - otherwise an attacker could forge a PEER to point us at any IP
     // (connection hijack / DDoS reflection). Consume our control magic (return 1);
     // pass everything else to ENet (return 0). Runs on the ENet service thread.
+    // Bot reconnect test: a network outage. While it lasts every received datagram is
+    // consumed here; after it, the intercept that was installed before handles them.
+    static std::atomic<std::uint64_t> g_outageUntil{ 0 };
+    static ENetInterceptCallback      s_interceptBeforeOutage = nullptr;
+
+    static int ENET_CALLBACK OutageIntercept(ENetHost* a_host, ENetEvent* a_event)
+    {
+        if (::GetTickCount64() < g_outageUntil.load(std::memory_order_relaxed)) return 1;
+        return s_interceptBeforeOutage ? s_interceptBeforeOutage(a_host, a_event) : 0;
+    }
+
     static int ENET_CALLBACK RelayIntercept(ENetHost* a_host, ENetEvent* /*a_event*/)
     {
         const auto*  d = a_host->receivedData;
@@ -756,6 +767,10 @@ namespace Pulsar::Network
         {
             std::lock_guard lock(m_enetMutex);
             if (m_directHost || m_directJoin) Direct::Tick(m_host, m_connectionEstablished.load(std::memory_order_acquire));
+            if (g_outageUntil.load(std::memory_order_relaxed) && m_host->intercept != &OutageIntercept) {
+                s_interceptBeforeOutage = m_host->intercept;
+                m_host->intercept = &OutageIntercept;
+            }
             ENetEvent event{};
             while (enet_host_service(m_host, &event, 0) > 0) {
                 switch (event.type) {
@@ -1164,6 +1179,16 @@ namespace Pulsar::Network
         NASLOG("TELE-DIAG SuppressNextResetTeleport armed");
     }
 
+    void NetworkHost::SimulateOutageForTest(uint32_t a_ms)
+    {
+#ifndef PULSAR_HARDENED
+        g_outageUntil.store(::GetTickCount64() + a_ms, std::memory_order_relaxed);
+        PLOG_INFO("[PULSAR] test: network outage for {} ms"sv, a_ms);
+#else
+        (void)a_ms;
+#endif
+    }
+
     void NetworkHost::Disconnect()
     {
         if (m_peer) {
@@ -1195,6 +1220,11 @@ namespace Pulsar::Network
 
     void NetworkHost::OnConnect(ENetPeer* a_peer)
     {
+        if (!m_isHost && m_reconnectPending) {
+            m_reconnectPending = false;
+            ++m_reconnects;
+            PLOG_INFO("[PULSAR] Reconnected after a dropped connection ({} so far)"sv, m_reconnects);
+        }
         // Direct join: several attempts run at once; the first to connect wins.
         if (!m_isHost && m_directJoin) {
             if (m_peer && m_peer != a_peer) { enet_peer_reset(a_peer); return; }
@@ -2191,8 +2221,13 @@ namespace Pulsar::Network
         const bool wrongKey = m_wrongKey;
         m_wrongKey = false;
         if (!m_isHost && (!m_lastAddress.empty() || m_directJoin) && !versionRejected && !wrongKey) {
-            m_reconnectAt = GetTickCount64() + 3000;  // try reconnect in 3s
-            PLOG_INFO("[PULSAR] Will auto-reconnect in 3s..."sv);
+            if (Pulsar::GetConfig().autoReconnect) {
+                m_reconnectAt = GetTickCount64() + 3000;  // try reconnect in 3s
+                m_reconnectPending = true;
+                PLOG_INFO("[PULSAR] Will auto-reconnect in 3s..."sv);
+            } else {
+                PLOG_INFO("[PULSAR] Connection lost; AutoReconnect = 0, not reconnecting"sv);
+            }
         }
     }
 }
