@@ -1652,6 +1652,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 PROF_CALL("WorldSync::Acti::DrainPending", Pulsar::WorldSync::Acti::DrainPending());
                 PROF_CALL("DialogSync::DrainPending", Pulsar::DialogSync::DrainPending());
                 PROF_CALL("SceneSync::DrainPending", Pulsar::SceneSync::DrainPending());
+                PROF_CALL("QuestSync::DrainPending", Pulsar::QuestSync::DrainPending());
                 PROF_CALL("SpawnSync::DrainPending", Pulsar::SpawnSync::DrainPending());   // enable host-spawned NPCs
 
                 // BISECT TEST DISABLED - C++-spawned clone writes PulsarSpawn=2.0

@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace Pulsar::QuestSync {
 
@@ -39,5 +41,18 @@ namespace Pulsar::QuestSync {
 
     // A save bridge re-synced the worlds: nothing to replay.
     void ForgetMissedStages();
+
+    // Game thread, every tick: start quests the peer started (or set a stage
+    // in) that aren't running here, then apply the stage (CoopQuestStartSync).
+    void DrainPending();
+
+    // Test bot (Debug/TestBot). Quests that started here, "ID:WALLMS,..."
+    // oldest first; whether a quest runs; queue Papyrus Quest.Start; quests
+    // that are not running and whose editor ID contains a_hint (case-
+    // insensitive, Starfield.esm IDs, lowest first; a_seen = quests looked at).
+    std::string                RecentStartsForTest();
+    bool                       IsRunningForTest(std::uint32_t a_id);
+    bool                       StartForTest(std::uint32_t a_id);
+    std::vector<std::uint32_t> StoppedQuestsForTest(const char* a_hint, std::size_t a_max, std::size_t& a_seen);
 
 }  // namespace Pulsar::QuestSync

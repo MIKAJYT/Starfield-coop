@@ -27,6 +27,13 @@ number here means the code for that milestone is in, not that the goal is met.
   plays it 90 ms later; twin with the switch off never does. Background scenes whose
   quest only the game may start can't be forced onto a client where that quest isn't
   running. A scene with a player part is not tested.
+- **Quests the host starts now start for the client** (`CoopQuestStartSync`, default
+  1). The client used to only log the host's quest start, and the game's stage worker
+  skips quests that aren't running, so every stage of a quest picked up mid-session was
+  lost on the client. Now the client starts the quest (Papyrus `Quest.Start`) and then
+  applies the stage. *Bot-tested* (`quest`): the host starts City_AkilaLife05, the
+  client starts it 62 ms later; twin with the switch off never does. Mission-board
+  missions are started by the story manager with random targets and are not covered.
 - **Space census bot** (`space`): after takeoff each bot lists everything in space
   around the ship and the launcher compares the lists. Groundwork for the station/POI
   mismatch; right after takeoff the test orbit is empty, so it needs a flight to a

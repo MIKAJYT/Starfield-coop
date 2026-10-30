@@ -10,6 +10,7 @@
 #include "Network/NetworkHost.h"
 #include "Papyrus/GameCalls.h"
 #include "SceneSync/SceneSync.h"
+#include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/SpaceSync.h"
@@ -1402,12 +1403,66 @@ namespace Pulsar::TestBot
             }
         }
 
+        // Quest (host): start stopped Akila quests (not main quest), one every 4 s,
+        // until one runs here; the client must start the same quest. Shares the
+        // scene loop's candidate fields.
+        if (isHost && s_state.cfg.scenario == "quest" && !s_state.acted && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            if (!s_state.sceneSearched) {
+                s_state.sceneSearched = true;
+                std::size_t seen = 0;
+                for (const auto id : Pulsar::QuestSync::StoppedQuestsForTest("akila", 200, seen)) {
+                    auto* f = RE::TESForm::LookupByID(id);
+                    const char* eid = f ? f->GetFormEditorID() : nullptr;
+                    if (eid && (eid[0] == 'M' || eid[0] == 'm') && (eid[1] == 'Q' || eid[1] == 'q')) continue;
+                    s_state.sceneCands.push_back(id);
+                    if (s_state.sceneCands.size() >= 40) break;
+                }
+                s_state.sceneSearchInfo = std::to_string(s_state.sceneCands.size()) + " stopped Akila quests of " +
+                                          std::to_string(seen) + " seen";
+                Trace(("quest: " + s_state.sceneSearchInfo).c_str());
+            }
+            const bool tried = s_state.sceneTryMs != 0;
+            const std::uint32_t cur = s_state.sceneIdx < s_state.sceneCands.size() ? s_state.sceneCands[s_state.sceneIdx] : 0;
+            char msg[260];
+            if (tried && cur && Pulsar::QuestSync::IsRunningForTest(cur)) {
+                auto* f = RE::TESForm::LookupByID(cur);
+                const char* eid = f ? f->GetFormEditorID() : nullptr;
+                std::snprintf(msg, sizeof(msg), "quest: %08X found=1 %s started on try %zu (%s)", cur, eid ? eid : "-",
+                              s_state.sceneIdx + 1, s_state.sceneSearchInfo.c_str());
+                s_state.actionInfo = msg;
+                s_state.acted = true;
+                s_state.actedAtWallMs = s_state.sceneTryWallMs;
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            } else if (!tried || now - s_state.sceneTryMs >= 4000) {
+                if (tried) ++s_state.sceneIdx;
+                if (s_state.sceneIdx >= s_state.sceneCands.size()) {
+                    std::snprintf(msg, sizeof(msg), "quest: none of %zu candidates started (%s)",
+                                  s_state.sceneCands.size(), s_state.sceneSearchInfo.c_str());
+                    s_state.actionInfo = msg;
+                    s_state.acted = true;
+                    s_state.actedAtWallMs = WallMs();
+                    Trace(msg);
+                    PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+                } else {
+                    const std::uint32_t next = s_state.sceneCands[s_state.sceneIdx];
+                    s_state.sceneTryMs = now;
+                    s_state.sceneTryWallMs = WallMs();
+                    const bool q = Pulsar::QuestSync::StartForTest(next);
+                    std::snprintf(msg, sizeof(msg), "quest: trying %08X (%zu of %zu) queued=%d", next, s_state.sceneIdx + 1,
+                                  s_state.sceneCands.size(), q ? 1 : 0);
+                    Trace(msg);
+                }
+            }
+        }
+
         // The test action, once the partner is settled: host only.
         if (isHost && s_state.cfg.scenario != "loot" && !TakeoffLike() &&
             s_state.cfg.scenario != "friendlyfire" && s_state.cfg.scenario != "aim" &&
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
-            s_state.cfg.scenario != "scene" &&
+            s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1545,6 +1600,9 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "scene") {
             j += ",\"scenes\":\"" + Pulsar::SceneSync::RecentEventsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "quest") {
+            j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
         }
         if (s_state.cfg.scenario == "space") {
             // Every 10 s while in space: "ID:BASE:TYPE:DIST_KM" for each reference.

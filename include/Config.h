@@ -188,6 +188,13 @@ namespace Pulsar
         // ini: CoopSceneSync = 0
         bool        coopSceneSync = true;
 
+        // Quest start sync (owner's spec, joint missions): a quest the peer started
+        // (or set a stage in) that isn't running here is started here through
+        // Papyrus Quest.Start, then the stage is applied; before, the stage worker
+        // skipped it and the quest never started on the client. 0 = log only
+        // (bot twin). ini: CoopQuestStartSync = 0
+        bool        coopQuestStartSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

@@ -48,7 +48,7 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
 | Spec item | Status | Today | Phase |
 |---|---|---|---|
 | One team: shared objectives and rewards, no PvP, no player economy | done | Quest stages and rewards shared. No friendly fire: bot `friendlyfire` (a lethal hit on the partner's figure, healed within 2.5 s, the real player untouched); twin `CoopFriendlyFireGuard = 0` fails (the figure stayed at -31 health, which used to put it into the downed pose on that screen). No player economy exists. | 4 |
-| Joint missions (faction missions, outpost defense, rescues) | partial | Rides on quest sync; untested per mission type. | 5 |
+| Joint missions (faction missions, outpost defense, rescues) | partial | Rides on quest sync. A quest the host starts now starts on the clients too (`CoopQuestStartSync`): before, the client only logged the start and the stage worker skipped every later stage of a quest not running there, so a quest picked up mid-session never reached the client. Bot `quest`: the host starts City_AkilaLife05, the client 62 ms later; twin fails. Missing: mission-board missions (bounties, cargo, rescues, outpost defense) are started by the game's story manager with randomly picked targets, which a script can't start and which differ per machine; they need the mission and its targets sent from the host. | 5 |
 | Shared outposts with team build/remove/storage permissions | missing | | 8 |
 | Ship roles, repair and damage systems | missing | | 6 |
 | Fair XP and team synergies (team buffs, role perks) | partial | Kill XP is shared. Quest XP, team buffs and role perks: missing. | 8 |
@@ -85,7 +85,9 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
    the ship on both machines and compares; right after takeoff from the test save the
    orbit holds only the ship, so it needs a flight to a station, which needs a way for the
    bot to travel (the Creation Kit's base scripts for a travel script, or the engine's
-   travel function). Left: that, then mission types.
+   travel function). Done: quest start sync (bot `quest`). Left: that travel, and
+   mission-board missions (story manager starts them with random targets; the host's
+   mission and targets have to be sent to the clients).
 6. **Ships:** ship position sync, docking, crew roles (pilot, gunner, engineer), repair.
 7. **Stability:** crash dumps and reports, Community Patch test, launcher join codes.
 8. **Team systems:** shared outposts with permissions, quest XP sharing, team buffs and

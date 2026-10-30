@@ -381,6 +381,12 @@ namespace Pulsar
                 cfg.coopSceneSync = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopSceneSync = {}"sv, cfg.coopSceneSync);
             }
+            else if (keyLower == "coopqueststartsync" || keyLower == "coop_quest_start_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopQuestStartSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopQuestStartSync = {}"sv, cfg.coopQuestStartSync);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

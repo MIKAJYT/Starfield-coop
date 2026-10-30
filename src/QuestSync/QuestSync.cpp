@@ -3,7 +3,9 @@
 
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
+#include "Config.h"
 #include "EventTrace/EventTrace.h"
+#include "Papyrus/GameCalls.h"
 #include "QuestSync/StageJournal.h"
 
 #include <REL/Relocation.h>
@@ -13,10 +15,14 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 using namespace std::string_view_literals;
 
@@ -114,6 +120,8 @@ namespace {
     static void          SafeCallOrigStart(void* ctx, RE::TESQuest** questPtr, char* outOk) noexcept;
     static void          SafeCallOrigStop(RE::TESQuest* quest, char param_2) noexcept;
     static RE::TESQuest* SafeDerefQuestPtr(RE::TESQuest** pp) noexcept;
+    static bool          SafeIsRunning(const RE::TESQuest* quest) noexcept;
+    static void          RecordStart(std::uint32_t formID);
 
     static void BroadcastStage(std::uint32_t questFormID, std::uint16_t stageID)
     {
@@ -227,6 +235,7 @@ namespace {
         Pulsar::EventTrace::Trace("QUEST", "START quest=%s",
             Pulsar::EventTrace::NameOf(formID).c_str());
 
+        if (SafeIsRunning(quest)) RecordStart(formID);
         BroadcastStartStop(Pulsar::Network::PKT_QUEST_START, formID, 0);
     }
 
@@ -292,6 +301,52 @@ namespace {
         if (!pp) return nullptr;
         __try { return *pp; }
         __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    }
+
+    // TESQuest +0x114 bit 0: running (the stage worker skips a quest without it).
+    static bool SafeIsRunning(const RE::TESQuest* quest) noexcept
+    {
+        if (!quest) return false;
+        __try { return (*(reinterpret_cast<const std::uint8_t*>(quest) + 0x114) & 1) != 0; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    }
+
+    static std::uint64_t WallMs()
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    }
+
+    // Quest start sync: a quest the peer started, or a stage for one, that is
+    // not running here. The stage worker skips quests that aren't running, so
+    // without a start every stage the host sets for a new quest is lost here.
+    // Applied on the game thread (DrainPending): Papyrus Quest.Start, then the
+    // stage. Quests only the story manager may start stay as they are.
+    constexpr std::uint16_t kNoStage = 0xFFFF;
+    struct PendingStart
+    {
+        std::uint32_t id;
+        std::uint16_t stage;   // kNoStage: start only
+        bool          tried;   // Quest.Start already called
+    };
+    static std::mutex                s_pendingStartMutex;
+    static std::vector<PendingStart> s_pendingStarts;
+
+    static void QueueStart(std::uint32_t id, std::uint16_t stage, bool tried)
+    {
+        std::lock_guard g(s_pendingStartMutex);
+        s_pendingStarts.push_back({ id, stage, tried });
+    }
+
+    // Test bot: quests that started here (the Start hook), with wall time.
+    static std::mutex                                        s_recentStartMutex;
+    static std::deque<std::pair<std::uint32_t, std::uint64_t>> s_recentStarts;
+
+    static void RecordStart(std::uint32_t formID)
+    {
+        std::lock_guard g(s_recentStartMutex);
+        s_recentStarts.emplace_back(formID, WallMs());
+        while (s_recentStarts.size() > 32) s_recentStarts.pop_front();
     }
 
 }  // anonymous namespace
@@ -451,6 +506,18 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
         }
         auto* quest = static_cast<RE::TESQuest*>(form);
 
+        // The worker skips a quest that isn't running: start it first.
+        if (!SafeIsRunning(quest) && Pulsar::GetConfig().coopQuestStartSync) {
+            {
+                std::lock_guard g(s_lastStartStopMutex);
+                s_lastStartStop[d.questFormID] = 1;
+            }
+            QueueStart(d.questFormID, d.stageID, false);
+            PLOG_INFO("[PULSAR] QuestSync RX: quest=0x{:08X} stage={} - quest not running here, starting it first"sv,
+                      d.questFormID, d.stageID);
+            return;
+        }
+
         // Pre-update s_lastSeenStage so the hook's immediate post-call
         // broadcast path dedupes against this stage even if the
         // tls flag misses any nested re-entry path.
@@ -469,13 +536,12 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
         return;
     }
 
-    // PKT_QUEST_START - Phase 2. RX intentionally log-only: the engine
-    // Start core (FUN_140EEFEE0) takes a caller-frame QuestStartCtx that
-    // we can't reconstruct on the peer. Practical observation: most
-    // quests start naturally on the receiver via Phase 1 stage sync (the
-    // initial-stage scripts run, and the engine treats stage 0/10 as
-    // implicit start). If divergence shows up in playtest, Phase 2 v2
-    // will add an explicit StoryTeller-queue-based apply path.
+    // PKT_QUEST_START - Phase 2. The engine Start core (FUN_140EEFEE0) takes
+    // a caller-frame QuestStartCtx that we can't reconstruct on the peer, and
+    // stage sync does NOT start a quest here: the stage worker skips quests
+    // that aren't running. So a quest the peer started is started here through
+    // Papyrus Quest.Start on the game thread (CoopQuestStartSync). Quests only
+    // the story manager may start (mission boards, ambient events) refuse it.
     if (pktType == PKT_QUEST_START) {
         if (length < 1 + sizeof(QuestStartStopData)) return;
         QuestStartStopData d{};
@@ -488,10 +554,15 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
             s_lastStartStop[d.questFormID] = 1;
         }
 
+        auto* form = RE::TESForm::LookupByID(d.questFormID);
+        auto* quest = (form && form->GetFormType() == RE::FormType::kQUST) ? static_cast<RE::TESQuest*>(form) : nullptr;
+        const bool running = SafeIsRunning(quest);
+        const bool apply = quest && !running && Pulsar::GetConfig().coopQuestStartSync;
+        if (apply) QueueStart(d.questFormID, kNoStage, false);
         PLOG_INFO(
-            "[PULSAR] QuestSync RX: quest=0x{:08X} START (peer started - "
-            "relying on stage-cascade for local apply)"sv,
-            d.questFormID);
+            "[PULSAR] QuestSync RX: quest=0x{:08X} START (peer started; {})"sv,
+            d.questFormID,
+            !quest ? "not loaded here" : running ? "already running here" : apply ? "starting it here" : "CoopQuestStartSync = 0, not started");
         return;
     }
 
@@ -591,6 +662,105 @@ void Reset()
     tls_applyingRemoteStage = false;
     tls_applyingRemoteStop  = false;
     PLOG_INFO("[PULSAR] QuestSync: Reset (last-seen + start/stop caches cleared)"sv);
+}
+
+namespace {
+    // Papyrus Quest.Start; the callback re-queues the entry so the stage is
+    // applied on the game thread once the quest runs.
+    void StartViaPapyrus(RE::TESQuest* quest, std::uint32_t id, std::uint16_t stage)
+    {
+        auto* vm = Pulsar::GameCalls::VM();
+        auto obj = Pulsar::GameCalls::ObjectFor(quest);
+        if (!vm || !obj) {
+            PLOG_WARN("[PULSAR] QuestSync: quest=0x{:08X} has no script object here, not started"sv, id);
+            return;
+        }
+        Pulsar::GameCalls::CallMethodForResult(vm, obj, "Start", {},
+            [id, stage](const RE::BSScript::Variable& a_ok) {
+                const bool ok = a_ok.is<bool>() && RE::BSScript::get<bool>(a_ok);
+                PLOG_INFO("[PULSAR] QuestSync: started quest=0x{:08X} for the peer: ok={}"sv, id, ok);
+                QueueStart(id, stage, true);
+            });
+    }
+}
+
+void DrainPending()
+{
+    std::vector<PendingStart> work;
+    {
+        std::lock_guard g(s_pendingStartMutex);
+        work.swap(s_pendingStarts);
+    }
+    for (const auto& p : work) {
+        auto* form = RE::TESForm::LookupByID(p.id);
+        auto* quest = (form && form->GetFormType() == RE::FormType::kQUST) ? static_cast<RE::TESQuest*>(form) : nullptr;
+        if (!quest) continue;
+        if (SafeIsRunning(quest)) {
+            if (p.stage == kNoStage) continue;
+            {
+                std::lock_guard g(s_lastSeenMutex);
+                s_lastSeenStage[p.id] = p.stage;
+            }
+            tls_applyingRemoteStage = true;
+            const bool ok = SafeCallOrigSetStage(quest, p.stage);
+            tls_applyingRemoteStage = false;
+            PLOG_INFO("[PULSAR] QuestSync RX applied after start: quest=0x{:08X} stage={} ok={}"sv, p.id, p.stage, ok ? 1 : 0);
+            continue;
+        }
+        if (p.tried) {
+            PLOG_INFO("[PULSAR] QuestSync: quest=0x{:08X} did not start here (story-manager quest?), stage {} dropped"sv,
+                      p.id, p.stage == kNoStage ? -1 : static_cast<int>(p.stage));
+            continue;
+        }
+        StartViaPapyrus(quest, p.id, p.stage);
+    }
+}
+
+std::string RecentStartsForTest()
+{
+    std::lock_guard g(s_recentStartMutex);
+    std::string s;
+    for (const auto& [id, ms] : s_recentStarts) {
+        char c[40];
+        std::snprintf(c, sizeof(c), "%s%08X:%llu", s.empty() ? "" : ",", id, static_cast<unsigned long long>(ms));
+        s += c;
+    }
+    return s;
+}
+
+bool IsRunningForTest(std::uint32_t a_id)
+{
+    auto* form = RE::TESForm::LookupByID(a_id);
+    return form && form->GetFormType() == RE::FormType::kQUST && SafeIsRunning(static_cast<RE::TESQuest*>(form));
+}
+
+bool StartForTest(std::uint32_t a_id)
+{
+    auto* form = RE::TESForm::LookupByID(a_id);
+    if (!form || form->GetFormType() != RE::FormType::kQUST) return false;
+    auto* vm = Pulsar::GameCalls::VM();
+    auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::TESQuest*>(form));
+    return vm && obj && Pulsar::GameCalls::CallMethod(vm, obj, "Start", {});
+}
+
+std::vector<std::uint32_t> StoppedQuestsForTest(const char* a_hint, std::size_t a_max, std::size_t& a_seen)
+{
+    std::string hint = a_hint ? a_hint : "";
+    for (auto& c : hint) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+    std::vector<std::uint32_t> out;
+    a_seen = 0;
+    for (std::uint32_t id = 0x800; id < 0x00400000 && out.size() < a_max; ++id) {
+        auto* f = RE::TESForm::LookupByID(id);
+        if (!f || f->GetFormType() != RE::FormType::kQUST) continue;
+        ++a_seen;
+        if (SafeIsRunning(static_cast<RE::TESQuest*>(f))) continue;
+        const char* eid = f->GetFormEditorID();
+        if (!eid) continue;
+        std::string low = eid;
+        for (auto& c : low) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+        if (low.find(hint) != std::string::npos) out.push_back(id);
+    }
+    return out;
 }
 
 }  // namespace Pulsar::QuestSync
