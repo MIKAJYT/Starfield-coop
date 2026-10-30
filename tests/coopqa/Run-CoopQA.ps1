@@ -61,7 +61,14 @@ param(
     # (CoopSharedWorldItems=1). -NoSharedWorldItems: twin.
     # reconnect: the client's network goes dark for 25 s; the session must come back by
     # itself (AutoReconnect=1). -NoAutoReconnect: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect")][string]$Scenario = "follow",
+    # separate: each player changes its own items, a perk and skill points; the host then
+    # bridges a fresh save to the client; each must keep only its own changes
+    # (CoopRestoreOwnCharacter=1). -NoRestoreOwnCharacter: twin.
+    # damage: the host hits one NPC, the client another; each hit must show on the other
+    # machine (CoopNpcHealthSync=1). -NoNpcHealthSync: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage")][string]$Scenario = "follow",
+    [switch]$NoRestoreOwnCharacter,
+    [switch]$NoNpcHealthSync,
     [switch]$NoAutoReconnect,
     [switch]$NoSharedWorldItems,
     [switch]$NoFriendlyFireGuard,
@@ -503,6 +510,138 @@ function Invoke-JetpackScore {
     return $r
 }
 
+# ---- separate scenario ---------------------------------------------------------
+# Separate inventories and skill trees. Both players load the same save; each then adds
+# to its own item (host: 3 of the lowest MISC form, client: 5 of the lowest AMMO form),
+# raises one of its own perks by a rank and adds skill points (host 3, client 1). The
+# host bridges a fresh save (which carries only the host's changes) to the client.
+# PASS, 15 s after the client loaded that save: the client has its own item count,
+# perk rank and skill points and none of the host's; the host still has its own.
+function Get-SepPerkRank($sample, [string]$perk) {
+    foreach ($e in ($sample.sep.perks -split ",")) { if ($e -match "^$($perk):(-?\d+)$") { return [int]$Matches[1] } }
+    return -1
+}
+function Invoke-SeparateScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $hAct = $hostList | Where-Object { $_.acted -and $_.sep } | Select-Object -First 1
+    $cAct = $clientList | Where-Object { $_.acted -and $_.sep } | Select-Object -First 1
+    if (-not $hAct -or -not $cAct) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the " + $(if (-not $hAct) { "host" } else { "client" }) + " bot never changed its character (clone never settled?)") }
+        return $r
+    }
+    $h = $hAct.sep; $c = $cAct.sep
+    if ($h.itemH -ne $c.itemH -or $h.itemC -ne $c.itemC -or $h.itemH -eq "00000000" -or $h.itemC -eq "00000000") {
+        $r.Result = "ERROR"; $r.Reasons.Add("the two bots picked different or no items (host $($h.itemH)/$($h.itemC), client $($c.itemH)/$($c.itemC))"); return $r
+    }
+    if ($h.perk -eq "00000000" -or $c.perk -eq "00000000" -or $h.perk -eq $c.perk) {
+        $r.Result = "ERROR"; $r.Reasons.Add("no own perk could be raised (host $($h.perk), client $($c.perk)): $($hAct.actionInfo) | $($cAct.actionInfo)"); return $r
+    }
+    $bridge = $hostList | Where-Object { $_.sep -and [long]$_.sep.bridgeAtWallMs -gt 0 } | Select-Object -First 1
+    if (-not $bridge) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("the host never bridged a save to the client") }
+        return $r
+    }
+    $loadedFirst = $clientList | Where-Object { $_.sep -and $_.sep.loadedSinceAct } | Select-Object -First 1
+    if (-not $loadedFirst) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("the client never loaded the bridged save") }
+        return $r
+    }
+    $tLate = [long]$loadedFirst.wallMs + 15000
+    $cLate = @($clientList | Where-Object { $_.wallMs -ge $tLate -and $_.sep -and $_.inWorld })
+    $hLate = @($hostList | Where-Object { $_.wallMs -ge $tLate -and $_.sep })
+    if ($cLate.Count -lt 3 -or $hLate.Count -lt 1) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples 15 s after the client loaded the bridged save") }
+        return $r
+    }
+    $cs = $cLate[-1]; $hs = $hLate[-1]
+    $want = @(
+        @{ Who = "client"; S = $cs; What = "host's item $($h.itemH)"; Got = [int]$cs.sep.cntH; Want = [int]$h.baseH },
+        @{ Who = "client"; S = $cs; What = "own item $($c.itemC)";    Got = [int]$cs.sep.cntC; Want = [int]$c.baseC + 5 },
+        @{ Who = "client"; S = $cs; What = "skill points";           Got = [int]$cs.sep.sp;   Want = [int]$c.baseSp + 1 },
+        @{ Who = "client"; S = $cs; What = "own perk $($c.perk) rank"; Got = (Get-SepPerkRank $cs $c.perk); Want = [int]$c.perkAfter },
+        @{ Who = "client"; S = $cs; What = "host's perk $($h.perk) rank"; Got = (Get-SepPerkRank $cs $h.perk); Want = [int]$h.perkBefore },
+        @{ Who = "host";   S = $hs; What = "own item $($h.itemH)";    Got = [int]$hs.sep.cntH; Want = [int]$h.baseH + 3 },
+        @{ Who = "host";   S = $hs; What = "client's item $($c.itemC)"; Got = [int]$hs.sep.cntC; Want = [int]$h.baseC },
+        @{ Who = "host";   S = $hs; What = "skill points";           Got = [int]$hs.sep.sp;   Want = [int]$h.baseSp + 3 },
+        @{ Who = "host";   S = $hs; What = "own perk $($h.perk) rank"; Got = (Get-SepPerkRank $hs $h.perk); Want = [int]$h.perkAfter },
+        @{ Who = "host";   S = $hs; What = "client's perk $($c.perk) rank"; Got = (Get-SepPerkRank $hs $c.perk); Want = [int]$c.perkBefore }
+    )
+    $wrong = @($want | Where-Object { $_.Got -ne $_.Want })
+    $r.Details = "separate: host: $($hAct.actionInfo) | client: $($cAct.actionInfo); client loaded the bridged save at +$([long]$loadedFirst.wallMs - [long]$bridge.sep.bridgeAtWallMs) ms (restores $($cs.sep.restores - $c.restoresAtAct)); " +
+                 (($want | ForEach-Object { "$($_.Who) $($_.What) $($_.Got)/$($_.Want)" }) -join ", ")
+    foreach ($w in $wrong) { $r.Reasons.Add("$($w.Who): $($w.What) is $($w.Got), should be $($w.Want)") }
+    if ($wrong.Count -gt 0) { $r.Result = "FAIL"; return $r }
+    if (@($cLate | Where-Object { -not $_.connected }).Count -gt 0) { $r.Result = "FAIL"; $r.Reasons.Add("the client left the session after the bridge"); return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
+# ---- damage scenario -----------------------------------------------------------
+# NPC damage both ways. The host hits a save-file NPC by 40 %, the client 20 s later
+# another one by 30 % (the bot marks a local attack, as a shot does). PASS: within 3-15 s
+# the client's copy of the host's victim lost at least half the host's damage, and the
+# host's copy of the client's victim lost at least half the client's damage.
+function Get-NpcHealth($sample, [string]$id) {
+    $n = @($sample.npcs | Where-Object { $_.id -eq $id })
+    if ($n.Count -gt 0) { return [double]$n[0].health }
+    return $null
+}
+function Invoke-DamageScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    if (@($hostList | Where-Object { $_.role -ne "host" }).Count -gt 0 -or @($clientList | Where-Object { $_.role -ne "client" }).Count -gt 0) {
+        $r.Result = "FAIL"; $r.Reasons.Add("wrong roles in bot state"); return $r
+    }
+    $hAct = $hostList | Where-Object { $_.acted -and $_.dmg } | Select-Object -First 1
+    $cAct = $clientList | Where-Object { $_.acted -and $_.dmg } | Select-Object -First 1
+    if (-not $hAct -or -not $cAct) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the " + $(if (-not $hAct) { "host" } else { "client" }) + " bot never hit an NPC (clone never settled?)") }
+        return $r
+    }
+    foreach ($a in @($hAct, $cAct)) {
+        if ($a.dmg.target -eq "00000000" -or [double]$a.dmg.after -gt [double]$a.dmg.before - 1) {
+            $r.Result = "ERROR"; $r.Reasons.Add("the $($a.role) bot's hit did nothing: $($a.actionInfo)"); return $r
+        }
+    }
+    $t1 = [long]$hAct.dmg.hitAtWallMs; $id1 = $hAct.dmg.target; $d1 = [double]$hAct.dmg.before - [double]$hAct.dmg.after
+    $t2 = [long]$cAct.dmg.hitAtWallMs; $id2 = $cAct.dmg.target; $d2 = [double]$cAct.dmg.before - [double]$cAct.dmg.after
+    $cWin = @($clientList | Where-Object { $_.wallMs -ge $t1 + 3000 -and $_.wallMs -lt [math]::Min($t1 + 15000, $t2) })
+    $hWin = @($hostList | Where-Object { $_.wallMs -ge $t2 + 3000 -and $_.wallMs -lt $t2 + 15000 })
+    if ($cWin.Count -lt 2 -or $hWin.Count -lt 2) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples after the hits (client $($cWin.Count), host $($hWin.Count))") }
+        return $r
+    }
+    $cBefore = $clientList | Where-Object { $_.wallMs -lt $t1 } | Select-Object -Last 1
+    $hBefore = $hostList | Where-Object { $_.wallMs -lt $t2 } | Select-Object -Last 1
+    $c1Before = if ($cBefore) { Get-NpcHealth $cBefore $id1 } else { $null }
+    $h2Before = if ($hBefore) { Get-NpcHealth $hBefore $id2 } else { $null }
+    if ($null -eq $c1Before) { $r.Result = "ERROR"; $r.Reasons.Add("the client has no copy of the host's victim $id1"); return $r }
+    if ($null -eq $h2Before) { $r.Result = "ERROR"; $r.Reasons.Add("the host has no copy of the client's victim $id2"); return $r }
+    $c1Min = ($cWin | ForEach-Object { Get-NpcHealth $_ $id1 } | Where-Object { $null -ne $_ } | Measure-Object -Minimum).Minimum
+    $h2Min = ($hWin | ForEach-Object { Get-NpcHealth $_ $id2 } | Where-Object { $null -ne $_ } | Measure-Object -Minimum).Minimum
+    $r.Details = ("damage: host hit {0} by {1:N1} (client's copy {2:N1} -> lowest {3:N1}); client hit {4} by {5:N1} (host's copy {6:N1} -> lowest {7:N1})" -f `
+        $id1, $d1, $c1Before, $c1Min, $id2, $d2, $h2Before, $h2Min)
+    if ($null -eq $c1Min -or $c1Min -gt $c1Before - 0.5 * $d1) { $r.Result = "FAIL"; $r.Reasons.Add(("the client's copy of {0} did not take the host's hit ({1:N1} -> {2:N1}, hit {3:N1})" -f $id1, $c1Before, $c1Min, $d1)) }
+    if ($null -eq $h2Min -or $h2Min -gt $h2Before - 0.5 * $d2) { $r.Result = "FAIL"; $r.Reasons.Add(("the host's copy of {0} did not take the client's hit ({1:N1} -> {2:N1}, hit {3:N1})" -f $id2, $h2Before, $h2Min, $d2)) }
+    if ($r.Result -eq "FAIL") { return $r }
+    $r.Result = "PASS"
+    return $r
+}
+
 # ---- pickup scenario -----------------------------------------------------------
 # The host takes the nearest loose item lying in the world (a save-file reference, the
 # same on both machines). PASS: the client saw the item before, the host's copy is gone,
@@ -827,6 +966,56 @@ function New-PickupRun([bool]$clientRemoves = $true, [bool]$hostRemoves = $true,
     }
     return @{ H = $hostRun; C = $clientRun; D = @() }
 }
+function New-SeparateRun([bool]$restores = $true, [bool]$keepsPerk = $true, [bool]$hostKeeps = $true, [bool]$bridges = $true, [string]$perk = "0002A001", [bool]$acts = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 5000; $bridgeAt = $t0 + 35000; $loadAt = $t0 + 60000
+    $hostPerk = $perk; $clientPerk = "0002AFFF"
+    for ($i = 0; $i -lt 100; $i++) {
+        $t = $t0 + $i * 1000; $acted = $acts -and $t -ge $actAt; $loaded = $acted -and $bridges -and $t -ge $loadAt
+        # host: +3 item H, +3 skill points, host perk 1 -> 2; client: +5 item C, +1 skill point, client perk 0 -> 1
+        $hH = if ($acted -and ($hostKeeps -or $t -lt $loadAt)) { 13 } else { 10 }
+        $hPerks = "$($clientPerk):0," + $(if ($acted -and $hostPerk -ne "00000000") { "$($hostPerk):2" } else { "0002A001:1" })
+        $hSep = [pscustomobject]@{ itemH = "0001A000"; itemC = "0001B000"; baseH = 10; baseC = 20; cntH = $hH; cntC = 20; baseSp = 4; sp = $(if ($acted) { 7 } else { 4 })
+                                   perk = $(if ($acted) { $hostPerk } else { "00000000" }); perkBefore = 1; perkAfter = $(if ($hostPerk -ne "00000000") { 2 } else { -1 })
+                                   restores = 0; restoresAtAct = 0; bridgeAtWallMs = $(if ($bridges -and $t -ge $bridgeAt) { $bridgeAt } else { 0 }); loadedSinceAct = $false; perks = $hPerks }
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true $acted $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { "separate: item 0001A000 +3 ok=1" } else { "" }); $hs | Add-Member connected $true; $hs | Add-Member inWorld $true; $hs | Add-Member sep $hSep
+        $own = -not $loaded -or $restores
+        $cPerkRank = if ($acted -and $own -and ($keepsPerk -or -not $loaded)) { 1 } else { 0 }
+        $cHostPerkRank = if ($loaded -and -not $restores) { 2 } else { 1 }
+        $cSep = [pscustomobject]@{ itemH = "0001A000"; itemC = "0001B000"; baseH = 10; baseC = 20
+                                   cntH = $(if ($loaded -and -not $restores) { 13 } else { 10 }); cntC = $(if ($acted -and $own) { 25 } else { 20 })
+                                   baseSp = 4; sp = $(if ($loaded -and -not $restores) { 7 } elseif ($acted) { 5 } else { 4 })
+                                   perk = $(if ($acted) { $clientPerk } else { "00000000" }); perkBefore = 0; perkAfter = 1
+                                   restores = $(if ($loaded -and $restores) { 1 } else { 0 }); restoresAtAct = 0; bridgeAtWallMs = 0; loadedSinceAct = $loaded
+                                   perks = "$($clientPerk):$cPerkRank,0002A001:$cHostPerkRank" }
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true $acted $(if ($acts) { $actAt } else { 0 })
+        $cs | Add-Member actionInfo $(if ($acts) { "separate: item 0001B000 +5 ok=1" } else { "" }); $cs | Add-Member connected $true; $cs | Add-Member inWorld $true; $cs | Add-Member sep $cSep
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
+function New-DamageRun([bool]$mirrors = $true, [bool]$forwards = $true, [bool]$found = $true, [bool]$acts = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $hAt = $t0 + 5000; $cAt = $t0 + 25000
+    for ($i = 0; $i -lt 50; $i++) {
+        $t = $t0 + $i * 1000; $hHit = $acts -and $t -ge $hAt; $cHit = $acts -and $t -ge $cAt
+        $n1Host = if ($hHit -and $found) { 60.0 } else { 100.0 }
+        $n2Host = if ($cHit -and $found -and $forwards) { 140.0 } else { 200.0 }
+        $n1Client = if ($hHit -and $found -and $mirrors) { 60.0 } else { 100.0 }
+        $n2Client = if ($cHit -and $found) { 140.0 } else { 200.0 }
+        $hDmg = [pscustomobject]@{ target = $(if ($hHit -and $found) { "00011111" } else { "00000000" }); hitAtWallMs = $(if ($hHit) { $hAt } else { 0 }); before = $(if ($found) { 100.0 } else { -1.0 }); after = $(if ($found) { 60.0 } else { -1.0 }) }
+        $cDmg = [pscustomobject]@{ target = $(if ($cHit -and $found) { "00022222" } else { "00000000" }); hitAtWallMs = $(if ($cHit) { $cAt } else { 0 }); before = $(if ($found) { 200.0 } else { -1.0 }); after = $(if ($found) { 140.0 } else { -1.0 }) }
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true $hHit $(if ($acts) { $hAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts -and $found) { "damage: hit 00011111 (3.0 m) by 40%" } elseif ($acts) { "damage: no unguarded living NPC within 30 m (0 NPCs)" } else { "" })
+        $hs | Add-Member connected $true; $hs | Add-Member dmg $hDmg
+        $hs | Add-Member npcs @([pscustomobject]@{ id = "00011111"; dead = $false; health = $n1Host }, [pscustomobject]@{ id = "00022222"; dead = $false; health = $n2Host })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true $cHit $(if ($acts) { $cAt } else { 0 })
+        $cs | Add-Member actionInfo $(if ($acts -and $found) { "damage: hit 00022222 (3.0 m) by 30%" } elseif ($acts) { "damage: no unguarded living NPC within 30 m (0 NPCs)" } else { "" })
+        $cs | Add-Member connected $true; $cs | Add-Member dmg $cDmg
+        $cs | Add-Member npcs @([pscustomobject]@{ id = "00011111"; dead = $false; health = $n1Client }, [pscustomobject]@{ id = "00022222"; dead = $false; health = $n2Client })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
 function New-ReconnectRun([int]$backAfter = 40000, [bool]$drops = $true, [bool]$acts = $true, [bool]$hostSees = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000
     for ($i = 0; $i -lt 220; $i++) {
@@ -997,7 +1186,19 @@ function Invoke-ScorerSelfTest {
         @{ Name = "rc: never comes back";    Run = (New-ReconnectRun -backAfter -1);   Expect = "FAIL";    Rc = $true },
         @{ Name = "rc: host never sees it";  Run = (New-ReconnectRun -hostSees $false); Expect = "FAIL";   Rc = $true },
         @{ Name = "rc: never dropped";       Run = (New-ReconnectRun -drops $false);   Expect = "ERROR";   Rc = $true },
-        @{ Name = "rc: never cut";           Run = (New-ReconnectRun -acts $false);    Expect = "TIMEOUT"; Rc = $true }
+        @{ Name = "rc: never cut";           Run = (New-ReconnectRun -acts $false);    Expect = "TIMEOUT"; Rc = $true },
+        @{ Name = "sep: each keeps own";     Run = (New-SeparateRun);                  Expect = "PASS";    Sep = $true },
+        @{ Name = "sep: client gets host's"; Run = (New-SeparateRun -restores $false); Expect = "FAIL";    Sep = $true },
+        @{ Name = "sep: client loses perk";  Run = (New-SeparateRun -keepsPerk $false); Expect = "FAIL";   Sep = $true },
+        @{ Name = "sep: host lost its item"; Run = (New-SeparateRun -hostKeeps $false); Expect = "FAIL";   Sep = $true },
+        @{ Name = "sep: no bridge";          Run = (New-SeparateRun -bridges $false);  Expect = "ERROR";   Sep = $true },
+        @{ Name = "sep: no perk to raise";   Run = (New-SeparateRun -perk "00000000"); Expect = "ERROR";   Sep = $true },
+        @{ Name = "sep: never acted";        Run = (New-SeparateRun -acts $false);     Expect = "TIMEOUT"; Sep = $true },
+        @{ Name = "dmg: both directions";    Run = (New-DamageRun);                    Expect = "PASS";    Dmg = $true },
+        @{ Name = "dmg: host hit not shown"; Run = (New-DamageRun -mirrors $false);    Expect = "FAIL";    Dmg = $true },
+        @{ Name = "dmg: client hit lost";    Run = (New-DamageRun -forwards $false);   Expect = "FAIL";    Dmg = $true },
+        @{ Name = "dmg: no NPC to hit";      Run = (New-DamageRun -found $false);      Expect = "ERROR";   Dmg = $true },
+        @{ Name = "dmg: never hit";          Run = (New-DamageRun -acts $false);       Expect = "TIMEOUT"; Dmg = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
@@ -1006,6 +1207,8 @@ function Invoke-ScorerSelfTest {
              elseif ($case.ContainsKey("Takeoff")) { Invoke-TakeoffScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true -PartnerOutside $case.ContainsKey("Outside") -F8DuringVote $case.ContainsKey("F8") }
              elseif ($case.ContainsKey("Rc")) { Invoke-ReconnectScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Pick")) { Invoke-PickupScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Sep")) { Invoke-SeparateScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Dmg")) { Invoke-DamageScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Jet")) { Invoke-JetpackScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Aim")) { Invoke-AimScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("FF")) { Invoke-FriendlyFireScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
@@ -1103,7 +1306,9 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $jetpackSyncValue = if ($NoJetpackSync) { 0 } else { 1 }
     $sharedItemsValue = if ($NoSharedWorldItems) { 0 } else { 1 }
     $autoReconnectValue = if ($NoAutoReconnect) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $restoreOwnValue = if ($NoRestoreOwnCharacter) { 0 } else { 1 }
+    $npcHealthValue = if ($NoNpcHealthSync) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -1309,6 +1514,8 @@ try {
                  elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "reconnect") { Invoke-ReconnectScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "pickup") { Invoke-PickupScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "separate") { Invoke-SeparateScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "damage") { Invoke-DamageScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }

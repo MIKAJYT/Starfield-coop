@@ -11,11 +11,13 @@
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/SpaceSync.h"
+#include "SpaceSync/FastTravelSync.h"
 #include "Coop/CoopMortality.h"
 #include "Coop/TakeoffVote.h"
 #include "UI/HudMessage.h"
 #include "TransitSync/TransitSync.h"
 #include "WorldSync/LootSync.h"
+#include "WorldSync/WorldSync.h"
 
 #include <RE/M/MemoryManager.h>
 #include <RE/P/PlayerCharacter.h>
@@ -31,6 +33,9 @@
 #include <share.h>
 #include <fstream>
 #include <string>
+#include <algorithm>
+#include <utility>
+#include <vector>
 
 using namespace std::string_view_literals;
 
@@ -131,6 +136,21 @@ namespace Pulsar::TestBot
             float         jetCloneZMin = 1e9f, jetCloneZMax = -1e9f;  // the clone's
             int           jetJumpMask = 0;       // own iSyncJumpState values seen since the last sample (bit per value)
             std::uint32_t pickRef = 0;           // pickup, host: the item taken
+            // separate: each player changes its own character, then the host bridges.
+            std::uint32_t sepItemH = 0, sepItemC = 0;   // host's item (MISC), client's item (AMMO)
+            std::int32_t  sepBaseH = -1, sepBaseC = -1; // their counts before
+            std::uint32_t sepBaseSp = 0;                // own skill points before
+            std::uint32_t sepPerk = 0;                  // own perk ranked up
+            std::int32_t  sepPerkBefore = -1, sepPerkAfter = -1;
+            std::uint32_t sepRestoresAtAct = 0;
+            std::uint64_t sepLoadAtAct = 0;             // last save load (tick) when acting
+            std::uint64_t sepBridgeWallMs = 0;          // host: bridge fired
+            std::uint64_t sepActMs = 0;
+            int           sepBridgeTries = 0;
+            // damage: host hits one NPC, the client another.
+            std::uint32_t dmgTarget = 0;
+            std::uint64_t dmgHitWallMs = 0;
+            float         dmgBefore = -1.0f, dmgAfter = -1.0f;
             int           notifySent = 0;        // message check: test messages sent
         };
         State s_state;
@@ -671,6 +691,127 @@ namespace Pulsar::TestBot
             return true;
         }
 
+        // Separate characters: add items without any co-op sync seeing them (the
+        // replay guard LootSync honours for network-applied items).
+        bool AddOwnItem(RE::PlayerCharacter* a_player, std::uint32_t a_base, std::int32_t a_count)
+        {
+            auto* form = RE::TESForm::LookupByID(a_base);
+            if (!form || !form->IsBoundObject()) return false;
+            const bool prev = Pulsar::WorldSync::Loot::SetReplayingFromPacket(true);
+            a_player->AddObjectToContainer(reinterpret_cast<RE::TESBoundObject*>(form), nullptr, a_count,
+                                           nullptr, RE::ITEM_TRANSFER_REASON::kNone);
+            Pulsar::WorldSync::Loot::SetReplayingFromPacket(prev);
+            return true;
+        }
+
+        // Separate characters: both players pick the same two items from the same
+        // save (host's item: lowest MISC form, client's: lowest AMMO form). Each
+        // then adds to its own item, one rank to one of its own perks (host: from
+        // the lowest form ID up, client: from the highest down) and skill points.
+        void ActSeparate(RE::PlayerCharacter* a_player, bool a_isHost)
+        {
+            namespace DR = Pulsar::InventorySync::DirectRestore;
+            s_state.sepItemH = Pulsar::WorldSync::Loot::LowestItemOfTypeForTest(a_player, static_cast<std::uint8_t>(RE::FormType::kMISC));
+            s_state.sepItemC = Pulsar::WorldSync::Loot::LowestItemOfTypeForTest(a_player, static_cast<std::uint8_t>(RE::FormType::kAMMO));
+            s_state.sepBaseH = s_state.sepItemH ? Pulsar::WorldSync::Loot::CountItemForTest(a_player, s_state.sepItemH) : -1;
+            s_state.sepBaseC = s_state.sepItemC ? Pulsar::WorldSync::Loot::CountItemForTest(a_player, s_state.sepItemC) : -1;
+            DR::SkillPointsForTest(s_state.sepBaseSp);
+            s_state.sepRestoresAtAct = DR::RestoresForTest();
+            s_state.sepLoadAtAct = Pulsar::WorldSync::GetLastLoadCompletedTick();
+
+            const std::uint32_t item = a_isHost ? s_state.sepItemH : s_state.sepItemC;
+            const std::int32_t add = a_isHost ? 3 : 5;
+            const bool itemOk = item && AddOwnItem(a_player, item, add);
+
+            std::vector<std::pair<std::uint32_t, std::int8_t>> perks;
+            DR::PerksForTest(perks);
+            std::sort(perks.begin(), perks.end());
+            if (!a_isHost) std::reverse(perks.begin(), perks.end());
+            // Both sides walk the whole list from opposite ends (the top ranks of
+            // the QA save are maxed, run 20261030-205404: 12 of 12 failed); the
+            // scorer rejects a run where they met on the same perk.
+            int tried = 0;
+            for (const auto& pk : perks) {
+                ++tried;
+                const std::int32_t before = DR::PerkRankForTest(pk.first);
+                DR::AddPerkRankForTest(pk.first);
+                const std::int32_t after = DR::PerkRankForTest(pk.first);
+                if (after > before) {
+                    s_state.sepPerk = pk.first;
+                    s_state.sepPerkBefore = before;
+                    s_state.sepPerkAfter = after;
+                    break;
+                }
+            }
+            const std::uint32_t spAdd = a_isHost ? 3 : 1;
+            const bool spOk = DR::SetSkillPointsForTest(s_state.sepBaseSp + spAdd);
+
+            char msg[260];
+            std::snprintf(msg, sizeof(msg),
+                          "separate: item %08X +%d ok=%d (host item %08X base %d, client item %08X base %d); perk %08X rank %d -> %d (%d of %zu tried); skill points %u +%u ok=%d",
+                          item, add, itemOk ? 1 : 0, s_state.sepItemH, s_state.sepBaseH, s_state.sepItemC, s_state.sepBaseC,
+                          s_state.sepPerk, s_state.sepPerkBefore, s_state.sepPerkAfter, tried, perks.size(),
+                          s_state.sepBaseSp, spAdd, spOk ? 1 : 0);
+            s_state.actionInfo = msg;
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            s_state.sepActMs = ::GetTickCount64();
+            Trace(msg);
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
+        // Damage: hit the chosen NPC by a fraction of its health. The NPC itself is
+        // the source (a hit by the player is a crime in a city, see TickLoot).
+        float SafeHitBySelf(RE::Actor* a_target, float a_fraction) noexcept
+        {
+            auto* av = HealthAV();
+            __try {
+                if (!a_target || !av) return -1.0f;
+                const float before = a_target->GetActorValue(*av);
+                a_target->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, *av, -(before * a_fraction), a_target);
+                return before;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return -1.0f;
+            }
+        }
+
+        // Damage: host hits the living, health-synced save-file NPC with the lowest
+        // form ID nearby, the client the one with the highest (a different NPC when
+        // two are around), so each direction has its own victim. Only NPCs whose
+        // health the plugin sends count (city civilians send just their position);
+        // essential and protected ones are fine, as a 30-40% hit kills nobody.
+        void ActDamage(RE::PlayerCharacter* a_player, const ActorSnap& a_me, bool a_isHost)
+        {
+            NpcSeen npcs[64];
+            const int n = SafeListNpcs(a_player->parentCell, a_me.x, a_me.y, a_me.z, s_state.cfg.lootRadius, npcs, 64);
+            const NpcSeen* pick = nullptr;
+            int alive = 0;
+            for (int i = 0; i < n; ++i) {
+                if (npcs[i].dead || SafeHealth(npcs[i].actor) <= 1.0f) continue;
+                if (!Pulsar::NPCSync::IsHealthSyncedForTest(npcs[i].id)) continue;
+                ++alive;
+                if (!pick || (a_isHost ? npcs[i].id < pick->id : npcs[i].id > pick->id)) pick = &npcs[i];
+            }
+            char msg[200];
+            if (pick) {
+                if (!a_isHost) Pulsar::RemotePlayer::NoteLocalAttackForTest();
+                const float fraction = a_isHost ? 0.4f : 0.3f;
+                s_state.dmgTarget = pick->id;
+                s_state.dmgBefore = SafeHitBySelf(pick->actor, fraction);
+                s_state.dmgAfter = SafeHealth(pick->actor);
+                s_state.dmgHitWallMs = WallMs();
+                std::snprintf(msg, sizeof(msg), "damage: hit %08X (%.1f m) by %.0f%%, health %.1f -> %.1f (%d synced alive within %.0f m)",
+                              pick->id, pick->dist, fraction * 100.0f, s_state.dmgBefore, s_state.dmgAfter, alive, s_state.cfg.lootRadius);
+            } else {
+                std::snprintf(msg, sizeof(msg), "damage: no health-synced living NPC within %.0f m (%d NPCs)", s_state.cfg.lootRadius, n);
+            }
+            s_state.actionInfo = msg;
+            s_state.acted = true;
+            s_state.actedAtWallMs = WallMs();
+            Trace(msg);
+            PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+        }
+
         // Takeoff (host): sit in the pilot seat, then, once seated, ask for the
         // launch the way the takeoff menu does (TakeoffMenu_Launch event).
         void TickTakeoff(RE::PlayerCharacter* a_player, const ActorSnap& a_me, std::uint64_t a_now);
@@ -1118,6 +1259,27 @@ namespace Pulsar::TestBot
             PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
         }
 
+        // Separate characters: both players change their own character once settled;
+        // the host then bridges (a fresh save loaded on the client) 30 s later, after
+        // the client's 5 s live capture has seen its change.
+        if (s_state.cfg.scenario == "separate" && !s_state.acted && cloneVisible && me.valid && inWorld &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs)
+            ActSeparate(player, isHost);
+        if (isHost && s_state.cfg.scenario == "separate" && s_state.acted && !s_state.sepBridgeWallMs &&
+            s_state.sepBridgeTries < 60 && now - s_state.sepActMs >= 30000) {
+            ++s_state.sepBridgeTries;
+            if (Pulsar::SpaceSync::FastTravel::FireSaveBridge("bot-separate", /*a_triggerOwnSave=*/true)) {
+                s_state.sepBridgeWallMs = WallMs();
+                Trace("separate: save bridge fired");
+                PLOG_INFO("[PULSAR] TestBot: separate: save bridge fired (try {})"sv, s_state.sepBridgeTries);
+            }
+        }
+
+        // Damage: the host hits once settled, the client 20 s later.
+        if (s_state.cfg.scenario == "damage" && !s_state.acted && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs + (isHost ? 0 : 20000))
+            ActDamage(player, me, isHost);
+
         // Aim, host: draw the weapon, then the phases run from AimOverrideForTest.
         if (isHost && s_state.cfg.scenario == "aim" && !s_state.aimStartMs && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
@@ -1135,6 +1297,7 @@ namespace Pulsar::TestBot
         if (isHost && s_state.cfg.scenario != "loot" && s_state.cfg.scenario != "takeoff" &&
             s_state.cfg.scenario != "friendlyfire" && s_state.cfg.scenario != "aim" &&
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
+            s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1326,6 +1489,51 @@ namespace Pulsar::TestBot
                           head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7], head[8],
                           gotHead ? "true" : "false");
             j += c;
+        }
+        if (s_state.cfg.scenario == "separate") {
+            namespace DR = Pulsar::InventorySync::DirectRestore;
+            std::uint32_t sp = 0;
+            const bool spOk = me.valid && DR::SkillPointsForTest(sp);
+            char c[400];
+            std::snprintf(c, sizeof(c),
+                          ",\"sep\":{\"itemH\":\"%08X\",\"itemC\":\"%08X\",\"baseH\":%d,\"baseC\":%d,\"cntH\":%d,\"cntC\":%d,"
+                          "\"baseSp\":%u,\"sp\":%d,\"perk\":\"%08X\",\"perkBefore\":%d,\"perkAfter\":%d,"
+                          "\"restores\":%u,\"restoresAtAct\":%u,\"bridgeAtWallMs\":%llu,\"loadedSinceAct\":%s,\"perks\":\"",
+                          s_state.sepItemH, s_state.sepItemC, s_state.sepBaseH, s_state.sepBaseC,
+                          me.valid && s_state.sepItemH ? Pulsar::WorldSync::Loot::CountItemForTest(player, s_state.sepItemH) : -1,
+                          me.valid && s_state.sepItemC ? Pulsar::WorldSync::Loot::CountItemForTest(player, s_state.sepItemC) : -1,
+                          s_state.sepBaseSp, spOk ? static_cast<int>(sp) : -1, s_state.sepPerk, s_state.sepPerkBefore,
+                          s_state.sepPerkAfter, DR::RestoresForTest(), s_state.sepRestoresAtAct,
+                          static_cast<unsigned long long>(s_state.sepBridgeWallMs),
+                          s_state.acted && Pulsar::WorldSync::GetLastLoadCompletedTick() != s_state.sepLoadAtAct ? "true" : "false");
+            j += c;
+            // Every own perk as "id:rank", so the scorer can look up the other player's.
+            std::vector<std::pair<std::uint32_t, std::int8_t>> perks;
+            if (me.valid) DR::PerksForTest(perks);
+            for (std::size_t i = 0; i < perks.size(); ++i) {
+                char e[24];
+                std::snprintf(e, sizeof(e), "%s%08X:%d", i ? "," : "", perks[i].first, perks[i].second);
+                j += e;
+            }
+            j += "\"}";
+        }
+        if (s_state.cfg.scenario == "damage") {
+            // Own hit, and the health of every living or dead save-file NPC nearby.
+            char c[200];
+            std::snprintf(c, sizeof(c), ",\"dmg\":{\"target\":\"%08X\",\"hitAtWallMs\":%llu,\"before\":%.1f,\"after\":%.1f}",
+                          s_state.dmgTarget, static_cast<unsigned long long>(s_state.dmgHitWallMs), s_state.dmgBefore,
+                          s_state.dmgAfter);
+            j += c;
+            NpcSeen npcs[64];
+            const int n = me.valid ? SafeListNpcs(player->parentCell, me.x, me.y, me.z, 60.0f, npcs, 64) : 0;
+            j += ",\"npcs\":[";
+            for (int i = 0; i < n; ++i) {
+                char e[80];
+                std::snprintf(e, sizeof(e), "%s{\"id\":\"%08X\",\"dead\":%s,\"health\":%.1f}", i ? "," : "", npcs[i].id,
+                              npcs[i].dead ? "true" : "false", SafeHealth(npcs[i].actor));
+                j += e;
+            }
+            j += "]";
         }
         if (s_state.cfg.scenario == "friendlyfire") {
             // Host: the partner's figure. Client: its own health and downed state.

@@ -409,6 +409,11 @@ namespace Pulsar::RemotePlayer
         return s_lastLocalPlayerAttackMs.load(std::memory_order_relaxed);
     }
 
+    void NoteLocalAttackForTest()
+    {
+        s_lastLocalPlayerAttackMs.store(GetTickCount64(), std::memory_order_relaxed);
+    }
+
     // downed pose - generic PerformAction on any actor (player or clone),
     // same ActionData layout the clone fire-sync uses. Calls the MinHook
     // trampoline directly, so the clone AI-action filter does not interfere.

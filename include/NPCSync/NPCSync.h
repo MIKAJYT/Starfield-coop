@@ -101,4 +101,10 @@ namespace Pulsar::NPCSync {
     // Used by the death watch and the co-op test bot (Debug/TestBot).
     bool KillActor(RE::Actor* a_actor, RE::Actor* a_killer);
 
+    // Test bot (Debug/TestBot): true when this NPC's health travels between the
+    // players - on the host it is in the tracked set (city civilians only send
+    // their position), on the client the host's NPC of the same ID is matched to
+    // this local copy.
+    bool IsHealthSyncedForTest(uint32_t formID);
+
 }  // namespace Pulsar::NPCSync

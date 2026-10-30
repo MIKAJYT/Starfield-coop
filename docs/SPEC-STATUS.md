@@ -18,7 +18,7 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
 |---|---|---|---|
 | Host-authority netcode with stable lobby (create/join, reconnect) | partial | Host-authoritative for world state; NPC firing is not host-authoritative. Lobby and join codes go through the original author's lobby server and relay (funded until end of 2026). Reconnect after a drop: bot `reconnect` (25 s network outage, back by itself in 31 s), twin `AutoReconnect = 0` fails. | 2 (no relay, codes without a server), 4 |
 | Full player sync: run, sprint, crouch, jump, jetpack, aim, animations, outfits | partial | Run, sprint, sneak, jump, armor and weapons on the partner's figure exist. Aim: the up/down pitch and the sights pose arrive (bot `aim`); the sights pose now ends with the aim (it lingered 8 s). Whether the figure's head visibly turns is not proven: the bot's head-bone reading stays fixed once a weapon is drawn, in both the run and its twin. Jetpack: the figure now fires its own boostpack while the partner boosts (`CoopJetpackSync`); the bot can't lift the host with the engine's boost actions, so this is untested. Players 3-4: no aim pitch (no look marker). | 4 (rest needs a person or a better bot) |
-| Combat sync: shooting, hits, damage, downed/death, revive, NPC damage | exists | Fire actions, NPC damage and deaths, downed and revive exist; loot kill tested. | 4 |
+| Combat sync: shooting, hits, damage, downed/death, revive, NPC damage | exists | Fire actions, NPC damage and deaths, downed and revive exist; loot kill tested. NPC damage bot-tested both ways (`damage`, twin `CoopNpcHealthSync = 0` fails). Only tracked NPCs (enemies, companions, guards, anyone in combat) share health; city civilians share only their position. | 4 (done) |
 | World/travel: fast travel, planet loading, POI/dungeon entry | partial | Each player fast travels alone, F8 regroups. Stations and POIs can differ between players in space (known bug). | 5 |
 | Spaceflight: launch, cruise, manual flight, docking, station entry; ship position | partial | Launch done (vote). Flight input is mirrored to the partner. Ship position sync is switched off in the code (`kShipPosSyncEnabled = false`). Docking exists, rough. | 6 |
 | Quest/event sync: quest states, triggers, scripted events (doors, cutscenes, interactions) | partial | Quest stages, doors, locks, activators and dialogue exist. Cutscenes: missing. | 5 |
@@ -32,8 +32,8 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
 | Enemy loot: each player gets their own copy | done | Bot `loot`, twin fails. | 1 |
 | World items shared, first to take removes it for all | done | Bot `pickup` (host takes a loose item, gone on the client), twin `CoopSharedWorldItems = 0` fails. Containers not bot-tested. | 4 |
 | Quest reward items for everyone | done | Bot `reward`, twin fails. Quest XP and weapon mods not yet. | 1, rest in 8 |
-| Separate inventories | exists | Each player's own character is restored over the host's save. | 4 (bot test) |
-| Separate skill trees | exists | Level, skills and perks are part of the restored character. | 4 (bot test) |
+| Separate inventories | exists | Each player's own character is restored over the host's save. Bot-tested (`separate`): after a re-bridge each player has only their own item changes; twin `CoopRestoreOwnCharacter = 0` fails. | 4 (done) |
+| Separate skill trees | exists | Level, skills and perks are part of the restored character. Bot-tested in the same run: own perk rank and skill points kept, the other player's not taken over. | 4 (done) |
 
 ## Ships and movement
 
@@ -76,9 +76,10 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
    partner and one partner figure. Host becomes a hub for up to 3 clients, each with their
    own figure, vote, rewards and loot.
 4. **Bot tests for everything that "exists"**, then jetpack and aim sync, friendly fire off.
-   Done: friendly fire, world pickups, reconnect, aim (partly). Left: separate inventories and
-   skill trees, combat damage, jetpack and head pitch proof (need a bot that can fly and look,
-   or a person).
+   Done: friendly fire, world pickups, reconnect, aim (partly), separate inventories and
+   skill trees, NPC damage both ways. Left: jetpack and head pitch proof (need a bot that can
+   fly and look, or a person). Seen once in 3 `separate` runs: a mid-session save from the
+   host never reached the client (sent, never received, other traffic fine); not reproduced.
 5. **World and quests:** POI/station divergence, cutscenes, mission types.
 6. **Ships:** ship position sync, docking, crew roles (pilot, gunner, engineer), repair.
 7. **Stability:** crash dumps and reports, Community Patch test, launcher join codes.

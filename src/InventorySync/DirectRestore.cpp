@@ -1,5 +1,6 @@
 #include "PCH.h"
 #include "InventorySync/DirectRestore.h"
+#include "Config.h"
 #include "WorldSync/LootSync.h"
 #include "TimeWeatherSync/TimeWeatherSync.h"   // re-sync time/weather after each restore
 
@@ -227,6 +228,7 @@ namespace Pulsar::InventorySync::DirectRestore
         // re-applied additively post-bridge. Mirrors g_savedO2Max: only written
         // while captures are unlocked (normal play), so it survives the bridge.
         struct PerkSnap { std::uint32_t formID = 0; std::int8_t rank = 0; };
+        std::atomic<std::uint32_t> g_restoresForTest{ 0 };   // RestoreClientState runs (bot)
         std::vector<PerkSnap> g_perkSnap;
         std::mutex            g_perkMu;
 
@@ -1546,6 +1548,13 @@ namespace Pulsar::InventorySync::DirectRestore
             ~UnlockOnExit() { UnlockCache(); }
         } _unlockOnExit;
 
+        if (!Pulsar::GetConfig().coopRestoreOwnCharacter) {
+            PLOG_INFO("[PULSAR] [DirectRestore] RestoreClientState: CoopRestoreOwnCharacter = 0, "
+                      "keeping the bridged character"sv);
+            return;
+        }
+        g_restoresForTest.fetch_add(1, std::memory_order_relaxed);
+
         if (!g_cacheValid.load(std::memory_order_acquire)) {
             PLOG_INFO(
                 "[PULSAR] [DirectRestore] RestoreClientState: cache invalid, skip"sv);
@@ -2650,5 +2659,47 @@ namespace Pulsar::InventorySync::DirectRestore
         logAV("CarryWeight");
         logAV("InventoryWeight");
         logAV("Health");
+    }
+
+    // Bot (separate characters): restores run, own perks, one more perk rank,
+    // skill points. Not used by the game itself.
+    std::uint32_t RestoresForTest()
+    {
+        return g_restoresForTest.load(std::memory_order_relaxed);
+    }
+
+    void PerksForTest(std::vector<std::pair<std::uint32_t, std::int8_t>>& a_out)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) return;
+        std::vector<PerkSnap> perks;
+        WalkPerks(player, perks);
+        for (const auto& pk : perks) a_out.push_back({ pk.formID, pk.rank });
+    }
+
+    std::int32_t PerkRankForTest(std::uint32_t a_perk)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        return player ? LivePerkRank(player, a_perk) : -1;
+    }
+
+    bool AddPerkRankForTest(std::uint32_t a_perk)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        auto* form = RE::TESForm::LookupByID(a_perk);
+        if (!player || !form || form->GetFormType() != RE::FormType::kPERK || s_addPerk.address() == 0) return false;
+        return SafeAddPerk(player, static_cast<RE::BGSPerk*>(form), 0);   // 0 = the next rank
+    }
+
+    bool SkillPointsForTest(std::uint32_t& a_out)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        return player && ReadSkillPoints(player, a_out);
+    }
+
+    bool SetSkillPointsForTest(std::uint32_t a_value)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        return player && WriteSkillPoints(player, a_value);
     }
 }

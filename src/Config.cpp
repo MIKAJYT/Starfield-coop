@@ -363,6 +363,18 @@ namespace Pulsar
                 cfg.autoReconnect = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: AutoReconnect = {}"sv, cfg.autoReconnect);
             }
+            else if (keyLower == "cooprestoreowncharacter" || keyLower == "coop_restore_own_character") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopRestoreOwnCharacter = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopRestoreOwnCharacter = {}"sv, cfg.coopRestoreOwnCharacter);
+            }
+            else if (keyLower == "coopnpchealthsync" || keyLower == "coop_npc_health_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopNpcHealthSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopNpcHealthSync = {}"sv, cfg.coopNpcHealthSync);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

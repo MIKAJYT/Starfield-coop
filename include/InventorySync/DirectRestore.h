@@ -218,4 +218,13 @@ namespace Pulsar::InventorySync::DirectRestore
     // items, they are really in the container. Resolves the menu-vs-container
     // question that alien=0 alone can't (alien only compares live==cache).
     void DumpLiveInventory(const char* a_tag);
+
+    // Bot (separate characters). RestoresForTest: RestoreClientState runs that
+    // restored. AddPerkRankForTest: the engine's AddPerk with rank 0 (next rank).
+    std::uint32_t RestoresForTest();
+    void PerksForTest(std::vector<std::pair<std::uint32_t, std::int8_t>>& a_out);
+    std::int32_t PerkRankForTest(std::uint32_t a_perk);
+    bool AddPerkRankForTest(std::uint32_t a_perk);
+    bool SkillPointsForTest(std::uint32_t& a_out);
+    bool SetSkillPointsForTest(std::uint32_t a_value);
 }

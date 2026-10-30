@@ -170,6 +170,17 @@ namespace Pulsar
         // twin). ini: AutoReconnect = 0
         bool        autoReconnect = true;
 
+        // Separate characters (owner's spec): after every save bridge (join, F8,
+        // landing) the client gets its own items, perks and skill points back over
+        // the host's save. 0 = the client keeps the host's character from the
+        // bridged save (bot twin only). ini: CoopRestoreOwnCharacter = 0
+        bool        coopRestoreOwnCharacter = true;
+
+        // NPC health sync (owner's spec, combat): the host's NPC health is mirrored on
+        // the client, and damage the client deals is sent to the host. 0 = each
+        // machine keeps its own NPC health (bot twin). ini: CoopNpcHealthSync = 0
+        bool        coopNpcHealthSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

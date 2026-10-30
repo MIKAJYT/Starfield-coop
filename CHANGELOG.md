@@ -32,6 +32,14 @@ number here means the code for that milestone is in, not that the goal is met.
 - **Jetpack** (`CoopJetpackSync`, default 1): while the partner boosts (jump state "boost"
   for 250 ms), their figure fires its own boostpack. *Not tested in game*: the bot's
   boost actions animate but don't lift the player.
+- **Separate inventories and skill trees** (`CoopRestoreOwnCharacter`, default 1).
+  *Bot-tested* (`separate`): both players change an item, a perk rank and skill points,
+  the host re-sends its save, and each player keeps only their own changes. Twin with the
+  switch off fails (the client takes over the host's character).
+- **NPC damage both ways** (`CoopNpcHealthSync`, default 1). *Bot-tested* (`damage`): the
+  host hits one tracked NPC, the client another; each hit shows on the other screen within
+  15 s. Twin with the switch off fails. City civilians only share their position, not
+  their health.
 
 ## Unreleased - full co-op spec, phase 3: 2-4 players
 

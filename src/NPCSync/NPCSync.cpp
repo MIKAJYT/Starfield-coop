@@ -1,5 +1,6 @@
 #include "PCH.h"
 #include "NPCSync/NPCSync.h"
+#include "Config.h"
 #include "HookGuard.h"
 #include "NASLog.h"
 
@@ -3034,7 +3035,7 @@ namespace Pulsar::NPCSync {
                 if (curHealth < st.baseline - kDmgEps) {
                     const uint64_t lastAtk =
                         Pulsar::RemotePlayer::GetLastLocalPlayerAttackMs();
-                    const bool attributable =
+                    const bool attributable = Pulsar::GetConfig().coopNpcHealthSync &&
                         lastAtk != 0 && (GetTickCount64() - lastAtk) < 3000;
                     // [COMBAT-DBG] every detected health-drop + the attribution
                     // decision. atkAge=999999 → the local-player attack hook never
@@ -3144,7 +3145,7 @@ namespace Pulsar::NPCSync {
                     // continuous host-Health authority; track host's value as baseline
                     // so a host-driven drop (host shooting it) is NOT misread as
                     // client damage.
-                    if (std::abs(curHealth - u.health) > 0.5f) {
+                    if (Pulsar::GetConfig().coopNpcHealthSync && std::abs(curHealth - u.health) > 0.5f) {
                         actor->SetActorValue(*healthAV, u.health);
                     }
                     std::lock_guard lk(g_dmgFwdMutex);
@@ -3358,6 +3359,18 @@ namespace Pulsar::NPCSync {
             a_actor->ModActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, *healthAV, -(health + 10.0f), a_killer);
         }
         return SafeKillActor(a_actor, a_killer) != 0;
+    }
+
+    bool IsHealthSyncedForTest(uint32_t formID)
+    {
+        if (formID == 0) return false;
+        if (IsHostMode()) {
+            std::lock_guard lock(g_trackedMutex);
+            return g_tracked.find(formID) != g_tracked.end();
+        }
+        std::lock_guard lk(g_npcRemapMutex);
+        auto it = g_npcRemap.find(formID);
+        return it != g_npcRemap.end() && it->second == formID;
     }
 
 }  // namespace Pulsar::NPCSync

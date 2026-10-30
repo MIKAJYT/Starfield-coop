@@ -33,6 +33,8 @@ namespace Pulsar::RemotePlayer
     // throw), from the PerformAction hook. 0 = never. NPCSync's damage-forward
     // gates on this for attacker attribution.
     std::uint64_t GetLastLocalPlayerAttackMs();
+    // Bot (damage): marks an attack now, as the PerformAction hook does for a shot.
+    void NoteLocalAttackForTest();
 
     // Jetpack sync, for the bot: boostpack starts the figures performed and how many the
     // engine accepted.
