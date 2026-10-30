@@ -181,6 +181,13 @@ namespace Pulsar
         // machine keeps its own NPC health (bot twin). ini: CoopNpcHealthSync = 0
         bool        coopNpcHealthSync = true;
 
+        // Scene sync (owner's spec, cutscenes): a scene the host starts (a trigger,
+        // a dialogue line, an activator) starts on every client too, its quest
+        // first if that isn't running there; a scene the host's game ends stops
+        // there. 0 = each machine runs only its own scenes (bot twin).
+        // ini: CoopSceneSync = 0
+        bool        coopSceneSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

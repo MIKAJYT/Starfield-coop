@@ -91,6 +91,7 @@ namespace Pulsar::Network
         PKT_TAKEOFF_VOTE     = 0xA7,  // Either side -> peer: takeoff ready vote (Coop/TakeoffVote.h). Payload TakeoffVoteData{op, voteId}: 1 request (the pilot's launch is held), 2 ready, 3 go (board now; launch follows in 3 s), 4 cancelled. Phase 1 "voting/ready system".
         PKT_QUEST_REWARD     = 0xA6,  // Either side -> peer: the local player just got a quest reward (an item add with reason kQuestReward or kScriptAddItem and no source container: stage-script or dialogue AddItem, credits included). Payload QuestRewardData. The receiver holds it 5 s and grants what its own replicated stage script did not already give (QuestSync/RewardLedger.h). Phase 1 "quest rewards for everyone".
         PKT_FROM             = 0xA8,  // Host -> client: a packet another client sent, forwarded: [0xA8][sender player id][original packet] (Network/PeerRouting.h). 2-4 players.
+        PKT_SCENE            = 0xAA,  // Host -> clients: [0xAA][u32 scene form ID][u8 1 started / 0 ended]. The client starts the scene (its quest first if needed) or stops it (SceneSync).
         PKT_ROSTER           = 0xA9,  // Host -> client: [0xA9][your player id][count][ids]. Sent on every join and leave. 2-4 players.
     };
 

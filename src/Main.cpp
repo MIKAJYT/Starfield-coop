@@ -25,6 +25,7 @@
 #include "UI/HudMessage.h"
 #include "DialogSync/DialogSync.h"
 #include "EventTrace/EventTrace.h"
+#include "SceneSync/SceneSync.h"
 #include "VoiceBridge/VoiceBridge.h"
 #include "SpawnSync/SpawnSync.h"
 #include "CellDiag.h"
@@ -963,6 +964,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
         Pulsar::QuestSync::Init();
         Pulsar::DialogSync::Init();
         Pulsar::EventTrace::Init();   // dev-only quest/script/spawn/dialogue trace
+        Pulsar::SceneSync::Init();    // host scenes start on the clients too
         Pulsar::Voice::VoiceBridge::Init();  // proximity voice loopback socket
         Pulsar::SpawnSync::Init();    // host-authoritative NPC spawn replication
         Pulsar::VehicleSync::Init();
@@ -1649,6 +1651,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
 
                 PROF_CALL("WorldSync::Acti::DrainPending", Pulsar::WorldSync::Acti::DrainPending());
                 PROF_CALL("DialogSync::DrainPending", Pulsar::DialogSync::DrainPending());
+                PROF_CALL("SceneSync::DrainPending", Pulsar::SceneSync::DrainPending());
                 PROF_CALL("SpawnSync::DrainPending", Pulsar::SpawnSync::DrainPending());   // enable host-spawned NPCs
 
                 // BISECT TEST DISABLED - C++-spawned clone writes PulsarSpawn=2.0

@@ -39,6 +39,7 @@
 #include "CellContentSync/CellContentSync.h"
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
+#include "SceneSync/SceneSync.h"
 #include "Coop/TakeoffVote.h"
 #include "DialogSync/DialogSync.h"
 #include "SpawnSync/SpawnSync.h"
@@ -1578,6 +1579,12 @@ namespace Pulsar::Network
         if (!m_isHost && a_packet->dataLength >= 1 + sizeof(CorpseLootHeader)
             && a_packet->data[0] == PKT_CORPSE_LOOT) {
             Pulsar::NPCSync::OnCorpseLootReceived(a_packet->data, a_packet->dataLength);
+            return;
+        }
+
+        // PKT_SCENE - the host started or ended a scene (SceneSync).
+        if (a_packet->dataLength >= 6 && a_packet->data[0] == PKT_SCENE) {
+            Pulsar::SceneSync::OnPacketReceived(a_packet->data, a_packet->dataLength);
             return;
         }
 

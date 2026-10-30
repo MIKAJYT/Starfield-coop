@@ -8,6 +8,8 @@
 #include "InventorySync/DirectRestore.h"
 #include "NPCSync/NPCSync.h"
 #include "Network/NetworkHost.h"
+#include "Papyrus/GameCalls.h"
+#include "SceneSync/SceneSync.h"
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/SpaceSync.h"
@@ -19,6 +21,7 @@
 #include "WorldSync/LootSync.h"
 #include "WorldSync/WorldSync.h"
 
+#include <RE/B/BGSScene.h>
 #include <RE/M/MemoryManager.h>
 #include <RE/P/PlayerCharacter.h>
 #include <RE/T/TESObjectCELL.h>
@@ -85,6 +88,7 @@ namespace Pulsar::TestBot
             float       moveMetres = 5.0f;  // follow: X offset of the test move (game units = metres)
             float       doorRadius = 60.0f; // door: search radius for a load door (metres)
             float       lootRadius = 30.0f; // loot: search radius for the NPC to kill (metres)
+            std::uint32_t sceneId = 0;          // scene: the scene the host starts; 0 = search running Akila scenes
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
@@ -144,6 +148,12 @@ namespace Pulsar::TestBot
             std::int32_t  sepPerkBefore = -1, sepPerkAfter = -1;
             std::uint32_t sepRestoresAtAct = 0;
             std::uint64_t sepLoadAtAct = 0;             // last save load (tick) when acting
+            std::vector<std::uint32_t> sceneCands;      // scene (host): scenes to try, in order
+            bool          sceneSearched = false;
+            std::size_t   sceneIdx = 0;                 // the candidate being tried
+            std::uint64_t sceneTryMs = 0;               // tick of the last start call
+            std::uint64_t sceneTryWallMs = 0;
+            std::string   sceneSearchInfo;
             std::uint64_t sepBridgeWallMs = 0;          // host: bridge fired
             std::uint64_t sepActMs = 0;
             int           sepBridgeTries = 0;
@@ -154,6 +164,13 @@ namespace Pulsar::TestBot
             int           notifySent = 0;        // message check: test messages sent
         };
         State s_state;
+
+        // "space" flies the takeoff scenario, then writes a census of the space
+        // around the ship (phase 5: stations and encounters differ between players).
+        bool TakeoffLike()
+        {
+            return s_state.cfg.scenario == "takeoff" || s_state.cfg.scenario == "space";
+        }
 
         std::uint64_t WallMs()
         {
@@ -190,6 +207,7 @@ namespace Pulsar::TestBot
                 else if (key == "scenario")    s.scenario = value;
                 else if (key == "doorradius")  s.doorRadius = std::stof(value);
                 else if (key == "lootradius")  s.lootRadius = std::stof(value);
+                else if (key == "sceneid")     s.sceneId = static_cast<std::uint32_t>(std::stoul(value, nullptr, 16));
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
@@ -360,6 +378,49 @@ namespace Pulsar::TestBot
                 s.seated = mh && *reinterpret_cast<std::uint32_t*>(mh + 0x428) != 0;
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             return s;
+        }
+
+        // Space census: every reference in the space cell around the ship the
+        // player is aboard (stations, other ships, encounters), so the launcher
+        // can compare what each player has around them. Same cell layout as
+        // SafeListNpcs; distances in metres from the player's ship.
+        struct SpaceRef {
+            std::uint32_t id;
+            std::uint32_t base;
+            std::uint8_t  type;     // base form type
+            float         dist;
+        };
+
+        int SafeSpaceCensus(RE::PlayerCharacter* a_player, std::uint32_t& a_cell, SpaceRef* a_out, int a_max) noexcept
+        {
+            int n = 0;
+            a_cell = 0;
+            __try {
+                if (!a_player) return 0;
+                auto* ship = a_player->GetSpaceship(true);
+                if (!ship) return 0;
+                auto* cell = ship->parentCell;
+                if (!cell) return 0;
+                a_cell = cell->formID;
+                auto* sb = reinterpret_cast<std::uint8_t*>(ship);
+                const auto* sl = reinterpret_cast<float*>(sb + 0x8C);
+                auto* cb = reinterpret_cast<std::uint8_t*>(cell);
+                const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                if (!data || size == 0 || size > 20000) return 0;
+                for (std::uint32_t i = 0; i < size && n < a_max; ++i) {
+                    auto* ref = data[i];
+                    if (!ref || ref == ship) continue;
+                    auto* rb = reinterpret_cast<std::uint8_t*>(ref);
+                    auto* base = *reinterpret_cast<std::uint8_t**>(rb + 0x98);
+                    if (!base) continue;
+                    const auto* loc = reinterpret_cast<float*>(rb + 0x8C);
+                    const float dx = loc[0] - sl[0], dy = loc[1] - sl[1], dz = loc[2] - sl[2];
+                    a_out[n++] = { ref->formID, reinterpret_cast<RE::TESForm*>(base)->formID, *(base + 0x2E),
+                                   std::sqrt(dx * dx + dy * dy + dz * dz) };
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return n;
         }
 
         // What the door scan saw, for the state log when no door is used.
@@ -1135,7 +1196,7 @@ namespace Pulsar::TestBot
 
         // Takeoff, client: answer the pilot's request 10 s after it arrives, so
         // the test can tell a held launch from one that did not wait.
-        if (!isHost && s_state.cfg.scenario == "takeoff" && !s_state.voteReadyWallMs) {
+        if (!isHost && TakeoffLike() && !s_state.voteReadyWallMs) {
             if (!s_state.voteSeenAtMs && Pulsar::Coop::TakeoffVote::PendingRequestForTest()) {
                 s_state.voteSeenAtMs = now;
                 s_state.voteSeenWallMs = WallMs();
@@ -1154,7 +1215,7 @@ namespace Pulsar::TestBot
         // Takeoff, client (TakeoffPartnerOutside): leave the landed ship through
         // its hatch 20 s after the partner shows up, so the vote's "go" has to
         // move this player back aboard.
-        if (!isHost && s_state.cfg.scenario == "takeoff" && s_state.cfg.takeoffPartnerOutside &&
+        if (!isHost && TakeoffLike() && s_state.cfg.takeoffPartnerOutside &&
             !s_state.partnerExited && cloneVisible && me.valid && now - s_state.cloneSeenSinceMs >= 20000) {
             s_state.partnerExited = true;
             DoorScan scan;
@@ -1180,7 +1241,7 @@ namespace Pulsar::TestBot
             ? (connected && s_state.firstCloneSeenMs && now - s_state.firstCloneSeenMs >= s_state.cfg.moveAfterMs)
             : (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs);
         const bool f8Pending = s_state.takeoffStep == 3 && s_state.cfg.takeoffF8DuringVote && !s_state.f8AtWallMs;
-        if (isHost && s_state.cfg.scenario == "takeoff" && (!s_state.acted || f8Pending) && me.valid &&
+        if (isHost && TakeoffLike() && (!s_state.acted || f8Pending) && me.valid &&
             (s_state.takeoffStep != 0 || takeoffDue)) {
             TickTakeoff(player, me, now);
         }
@@ -1293,11 +1354,60 @@ namespace Pulsar::TestBot
             PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
         }
 
+        // Scene (host): start scenes of running Akila quests, one every 4 s, until
+        // the host's game plays one. Background quests can only be started by the
+        // story manager (run 20261030-225533), so the scene's quest must already run.
+        if (isHost && s_state.cfg.scenario == "scene" && !s_state.acted && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            if (!s_state.sceneSearched) {
+                s_state.sceneSearched = true;
+                if (s_state.cfg.sceneId) {
+                    s_state.sceneCands = { s_state.cfg.sceneId };
+                    s_state.sceneSearchInfo = "SceneID from the ini";
+                } else {
+                    s_state.sceneCands = Pulsar::SceneSync::RunningScenesForTest("akila", 40, s_state.sceneSearchInfo);
+                }
+                Trace(("scene: " + std::to_string(s_state.sceneCands.size()) + " candidates, " + s_state.sceneSearchInfo).c_str());
+            }
+            const bool tried = s_state.sceneTryMs != 0;
+            const std::uint32_t cur = s_state.sceneIdx < s_state.sceneCands.size() ? s_state.sceneCands[s_state.sceneIdx] : 0;
+            char msg[260];
+            if (tried && cur && Pulsar::SceneSync::LastStartWallMsForTest(cur) + 500 >= s_state.sceneTryWallMs) {
+                std::snprintf(msg, sizeof(msg), "scene: %08X found=1 started on try %zu of %zu (%s)", cur,
+                              s_state.sceneIdx + 1, s_state.sceneCands.size(), s_state.sceneSearchInfo.c_str());
+                s_state.actionInfo = msg;
+                s_state.acted = true;
+                s_state.actedAtWallMs = s_state.sceneTryWallMs;
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            } else if (!tried || now - s_state.sceneTryMs >= 4000) {
+                if (tried) ++s_state.sceneIdx;
+                if (s_state.sceneIdx >= s_state.sceneCands.size()) {
+                    std::snprintf(msg, sizeof(msg), "scene: none of %zu candidates started (%s)",
+                                  s_state.sceneCands.size(), s_state.sceneSearchInfo.c_str());
+                    s_state.actionInfo = msg;
+                    s_state.acted = true;
+                    s_state.actedAtWallMs = WallMs();
+                    Trace(msg);
+                    PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+                } else {
+                    const std::uint32_t next = s_state.sceneCands[s_state.sceneIdx];
+                    s_state.sceneTryMs = now;
+                    s_state.sceneTryWallMs = WallMs();
+                    Pulsar::SceneSync::StartSceneForTest(next);
+                    std::snprintf(msg, sizeof(msg), "scene: trying %08X (%zu of %zu)", next, s_state.sceneIdx + 1,
+                                  s_state.sceneCands.size());
+                    Trace(msg);
+                }
+            }
+        }
+
         // The test action, once the partner is settled: host only.
-        if (isHost && s_state.cfg.scenario != "loot" && s_state.cfg.scenario != "takeoff" &&
+        if (isHost && s_state.cfg.scenario != "loot" && !TakeoffLike() &&
             s_state.cfg.scenario != "friendlyfire" && s_state.cfg.scenario != "aim" &&
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
+            s_state.cfg.scenario != "scene" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1421,7 +1531,7 @@ namespace Pulsar::TestBot
             }
             j += "]";
         }
-        if (s_state.cfg.scenario == "takeoff") {
+        if (TakeoffLike()) {
             const ShipSnap sh = SnapShip(player);
             char c[120];
             std::snprintf(c, sizeof(c), ",\"ship\":{\"inSpace\":%s,\"ship\":\"%08X\",\"seated\":%s}",
@@ -1432,6 +1542,38 @@ namespace Pulsar::TestBot
             j += ",\"readyAtWallMs\":" + std::to_string(s_state.voteReadyWallMs);
             j += ",\"f8AtWallMs\":" + std::to_string(s_state.f8AtWallMs) + "}";
             j += ",\"exitInfo\":\"" + s_state.partnerExitInfo + "\"";
+        }
+        if (s_state.cfg.scenario == "scene") {
+            j += ",\"scenes\":\"" + Pulsar::SceneSync::RecentEventsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "space") {
+            // Every 10 s while in space: "ID:BASE:TYPE:DIST_KM" for each reference.
+            static std::string s_census = ",\"space\":null";
+            static std::uint64_t s_censusAt = 0;
+            const std::uint64_t t = ::GetTickCount64();
+            if (t - s_censusAt >= 10000) {
+                s_censusAt = t;
+                static SpaceRef refs[512];
+                std::uint32_t cell = 0;
+                const int n = SafeSpaceCensus(player, cell, refs, 512);
+                if (!cell) {
+                    s_census = ",\"space\":null";
+                } else {
+                    std::string list;
+                    list.reserve(static_cast<std::size_t>(n) * 32);
+                    for (int i = 0; i < n; ++i) {
+                        char c[48];
+                        std::snprintf(c, sizeof(c), "%s%08X:%08X:%02X:%.1f", i ? "," : "",
+                                      refs[i].id, refs[i].base, refs[i].type, refs[i].dist / 1000.0f);
+                        list += c;
+                    }
+                    char h[96];
+                    std::snprintf(h, sizeof(h), ",\"space\":{\"cell\":\"%08X\",\"atWallMs\":%llu,\"n\":%d,\"refs\":\"",
+                                  cell, static_cast<unsigned long long>(WallMs()), n);
+                    s_census = h + list + "\"}";
+                }
+            }
+            j += s_census;
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];

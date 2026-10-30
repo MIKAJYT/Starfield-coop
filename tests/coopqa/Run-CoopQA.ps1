@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   One-command co-op QA for PULSAR: two isolated Starfield test copies on one PC,
   one hosts, one joins over loopback, the in-game TestBot on each side writes what
@@ -66,9 +66,13 @@ param(
     # (CoopRestoreOwnCharacter=1). -NoRestoreOwnCharacter: twin.
     # damage: the host hits one NPC, the client another; each hit must show on the other
     # machine (CoopNpcHealthSync=1). -NoNpcHealthSync: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage")][string]$Scenario = "follow",
+    # space: takeoff, then each bot lists the space around the ship; the lists must match.
+    # scene: the host starts a scene (its quest first); the client must play the same
+    # scene within 10 s (CoopSceneSync=1). -NoSceneSync: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
+    [switch]$NoSceneSync,
     [switch]$NoAutoReconnect,
     [switch]$NoSharedWorldItems,
     [switch]$NoFriendlyFireGuard,
@@ -752,6 +756,103 @@ function Invoke-PapyrusScore {
     return $r
 }
 
+# ---- space scenario -----------------------------------------------------------
+# Phase 5: stations and encounters can differ between players in space. The
+# takeoff scenario flies both players up (use the takeoff save); every 10 s each
+# bot lists the references in the space cell around the ship ("ID:BASE:TYPE:KM").
+# 40 s after the host reached space, the last census of each side must match:
+# the same cell, the same save-file references (by ID) and the same runtime
+# ones (0xFF IDs differ per game, so those compare by base form, as a multiset).
+function ConvertFrom-SpaceRefs {
+    param([string]$Refs)
+    $out = @()
+    foreach ($e in ($Refs -split ',')) {
+        $p = $e -split ':'
+        if ($p.Count -ge 4) { $out += [pscustomobject]@{ id = $p[0]; base = $p[1]; type = $p[2]; km = [double]$p[3] } }
+    }
+    return ,$out
+}
+
+function Invoke-SpaceScore {
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
+    $r = Invoke-TakeoffScore -HostSamples $HostSamples -ClientSamples $ClientSamples -Final $Final -ClientDecisions $ClientDecisions
+    if ($r.Result -ne "PASS") { return $r }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    $space = @($hostList | Where-Object { $_.ship.inSpace }) | Select-Object -First 1
+    $tCheck = [long]$space.wallMs + 40000
+    $hc = @($hostList | Where-Object { $_.space -and [long]$_.space.atWallMs -ge $tCheck }) | Select-Object -Last 1
+    $cc = @($clientList | Where-Object { $_.space -and [long]$_.space.atWallMs -ge $tCheck }) | Select-Object -Last 1
+    if (-not $hc -or -not $cc) {
+        $r.Result = $(if ($Final) { "TIMEOUT" } else { "PENDING" })
+        if ($Final) { $r.Reasons.Add("no space census from the " + $(if (-not $hc) { "host" } else { "client" }) + " 40 s after takeoff") }
+        return $r
+    }
+    $h = ConvertFrom-SpaceRefs $hc.space.refs; $c = ConvertFrom-SpaceRefs $cc.space.refs
+    $hS = @($h | Where-Object { -not $_.id.StartsWith("FF") } | ForEach-Object { $_.id }); $cS = @($c | Where-Object { -not $_.id.StartsWith("FF") } | ForEach-Object { $_.id })
+    $hD = @($h | Where-Object { $_.id.StartsWith("FF") } | ForEach-Object { $_.base } | Sort-Object); $cD = @($c | Where-Object { $_.id.StartsWith("FF") } | ForEach-Object { $_.base } | Sort-Object)
+    $missS = @($hS | Where-Object { $cS -notcontains $_ }); $extraS = @($cS | Where-Object { $hS -notcontains $_ })
+    $dd = @(Compare-Object -ReferenceObject $hD -DifferenceObject $cD)
+    $missD = @($dd | Where-Object { $_.SideIndicator -eq "<=" } | ForEach-Object { $_.InputObject })
+    $extraD = @($dd | Where-Object { $_.SideIndicator -eq "=>" } | ForEach-Object { $_.InputObject })
+    $show = { param($ids, $list) ($ids | Select-Object -First 8 | ForEach-Object { $id = $_; $e = $list | Where-Object { $_.id -eq $id -or $_.base -eq $id } | Select-Object -First 1; if ($e) { "$($e.id)/$($e.base)/t$($e.type)@$($e.km)km" } else { $id } }) -join ", " }
+    $r.Details += "; space census: host cell $($hc.space.cell) $($h.Count) refs ($($hS.Count) save-file, $($hD.Count) runtime), client cell $($cc.space.cell) $($c.Count) refs ($($cS.Count), $($cD.Count))"
+    if ($hc.space.cell -ne $cc.space.cell) { $r.Result = "FAIL"; $r.Reasons.Add("different space cells (host $($hc.space.cell), client $($cc.space.cell))") }
+    if ($missS.Count) { $r.Result = "FAIL"; $r.Reasons.Add("$($missS.Count) save-file refs only the host has: $(& $show $missS $h)") }
+    if ($extraS.Count) { $r.Result = "FAIL"; $r.Reasons.Add("$($extraS.Count) save-file refs only the client has: $(& $show $extraS $c)") }
+    if ($missD.Count) { $r.Result = "FAIL"; $r.Reasons.Add("$($missD.Count) runtime refs only the host has (by base): $(& $show $missD $h)") }
+    if ($extraD.Count) { $r.Result = "FAIL"; $r.Reasons.Add("$($extraD.Count) runtime refs only the client has (by base): $(& $show $extraD $c)") }
+    return $r
+}
+
+# ---- scene scenario -----------------------------------------------------------
+# The host bot starts a scene (SceneID, default SQ_CCT_Enviro_RakingScene 000D8783,
+# its quest first). Each bot reports the scene events it saw ("ID:TYPE:WALLMS",
+# type 0 started, 1 ended). The host must have played it; the client must start
+# the same scene within 10 s of the host.
+function Get-SceneStarts {
+    param($Samples, [string]$Id)
+    $starts = @{}
+    foreach ($s in $Samples) {
+        if (-not $s.scenes) { continue }
+        foreach ($e in ($s.scenes -split ',')) {
+            $p = $e -split ':'
+            if ($p.Count -eq 3 -and $p[0] -eq $Id -and $p[1] -eq "0") { $starts[[long]$p[2]] = $true }
+        }
+    }
+    return @($starts.Keys | Sort-Object)
+}
+
+function Invoke-SceneScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bot state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never started a scene") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^scene: ([0-9A-F]{8}) found=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not start the scene: $($act.actionInfo)"); return $r }
+    $id = $Matches[1]; $t0 = [long]$act.actedAtWallMs
+    $hStart = @(Get-SceneStarts $hostList $id | Where-Object { $_ -ge $t0 - 1000 }) | Select-Object -First 1
+    if (-not $hStart) {
+        if ($Final -or (NowWallMsOr $hostList) -gt $t0 + 30000) { $r.Result = "ERROR"; $r.Reasons.Add("the scene $id never started on the host (30 s)") }
+        return $r
+    }
+    $cStart = @(Get-SceneStarts $clientList $id | Where-Object { $_ -ge [long]$hStart - 2000 -and $_ -le [long]$hStart + 10000 }) | Select-Object -First 1
+    $r.Details = "scene: $($act.actionInfo); host played $id at +$([long]$hStart - $t0) ms; client " + $(if ($cStart) { "at +$([long]$cStart - $t0) ms" } else { "never" })
+    if ($cStart) { $r.Result = "PASS"; return $r }
+    $lastClient = [long]$clientList[-1].wallMs
+    if ($lastClient -gt [long]$hStart + 15000 -or $Final) { $r.Result = "FAIL"; $r.Reasons.Add("the client did not play scene $id within 10 s of the host") }
+    return $r
+}
+
+# Latest wall time seen in a sample list (scorers run on recorded runs too).
+function NowWallMsOr { param($List) return [long]($List | Select-Object -Last 1).wallMs }
+
 # ---- takeoff scenario ---------------------------------------------------------
 # Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
 # sits in the pilot seat, opens the takeoff menu and asks for the launch. The
@@ -1056,6 +1157,30 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-SceneRun([bool]$acts = $true, [bool]$found = $true, [bool]$hostPlays = $true, [int]$clientAfter = 1500) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 5000; $id = "000D8783"
+    for ($i = 0; $i -lt 40; $i++) {
+        $t = $t0 + $i * 1000
+        $acted = $acts -and $t -ge $actAt
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true $acted $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { "scene: $id found=$(if ($found) { 1 } else { 0 }) start queued=1" } else { "" })
+        $hs | Add-Member scenes $(if ($acted -and $hostPlays -and $t -ge $actAt + 500) { "$($id):0:$($actAt + 500)" } else { "" })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member scenes $(if ($acted -and $hostPlays -and $clientAfter -ge 0 -and $t -ge $actAt + 500 + $clientAfter) { "000AAAAA:0:$($t0 + 100),$($id):0:$($actAt + 500 + $clientAfter)" } else { "000AAAAA:0:$($t0 + 100)" })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
+function New-SpaceRun([string]$hostRefs = "0001F00D:0001F00E:3D:12.5,FF001234:00ABCDEF:3D:3.2", [string]$clientRefs = "0001F00D:0001F00E:3D:12.5,FF009999:00ABCDEF:3D:3.4", [bool]$census = $true, [string]$clientCell = "0000C0DE") {
+    $run = New-TakeoffRun
+    foreach ($pair in @(@($run.H, $hostRefs, "0000C0DE"), @($run.C, $clientRefs, $clientCell))) {
+        foreach ($s in $pair[0]) {
+            $sp = if ($census -and $s.ship.inSpace) { [pscustomobject]@{ cell = $pair[2]; atWallMs = [long]$s.wallMs; n = @($pair[1] -split ',').Count; refs = $pair[1] } } else { $null }
+            $s | Add-Member space $sp
+        }
+    }
+    return $run
+}
 function New-Run([double]$cloneErr = 0.2, [bool]$hostMoves = $true, [bool]$clientFollows = $true, [bool]$visible = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $moveAt = $t0 + 10000
     for ($i = 0; $i -lt 30; $i++) {
@@ -1198,12 +1323,25 @@ function Invoke-ScorerSelfTest {
         @{ Name = "dmg: host hit not shown"; Run = (New-DamageRun -mirrors $false);    Expect = "FAIL";    Dmg = $true },
         @{ Name = "dmg: client hit lost";    Run = (New-DamageRun -forwards $false);   Expect = "FAIL";    Dmg = $true },
         @{ Name = "dmg: no NPC to hit";      Run = (New-DamageRun -found $false);      Expect = "ERROR";   Dmg = $true },
-        @{ Name = "dmg: never hit";          Run = (New-DamageRun -acts $false);       Expect = "TIMEOUT"; Dmg = $true }
+        @{ Name = "dmg: never hit";          Run = (New-DamageRun -acts $false);       Expect = "TIMEOUT"; Dmg = $true },
+        @{ Name = "space: same around both"; Run = (New-SpaceRun);                     Expect = "PASS";    Space = $true },
+        @{ Name = "space: station missing";  Run = (New-SpaceRun -clientRefs "FF009999:00ABCDEF:3D:3.4"); Expect = "FAIL"; Space = $true },
+        @{ Name = "space: other encounter";  Run = (New-SpaceRun -clientRefs "0001F00D:0001F00E:3D:12.5,FF009999:00BEEF00:3D:3.4"); Expect = "FAIL"; Space = $true },
+        @{ Name = "space: other cell";       Run = (New-SpaceRun -clientCell "0000DEAD"); Expect = "FAIL"; Space = $true },
+        @{ Name = "space: no census";        Run = (New-SpaceRun -census $false);      Expect = "TIMEOUT"; Space = $true },
+        @{ Name = "scene: client plays it";  Run = (New-SceneRun);                     Expect = "PASS";    Scene = $true },
+        @{ Name = "scene: client never";     Run = (New-SceneRun -clientAfter -1);     Expect = "FAIL";    Scene = $true },
+        @{ Name = "scene: client too late";  Run = (New-SceneRun -clientAfter 20000);  Expect = "FAIL";    Scene = $true },
+        @{ Name = "scene: host never played"; Run = (New-SceneRun -hostPlays $false);  Expect = "ERROR";   Scene = $true },
+        @{ Name = "scene: no such scene";    Run = (New-SceneRun -found $false);       Expect = "ERROR";   Scene = $true },
+        @{ Name = "scene: never acted";      Run = (New-SceneRun -acts $false);        Expect = "TIMEOUT"; Scene = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Scene")) { Invoke-SceneScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Space")) { Invoke-SpaceScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Takeoff")) { Invoke-TakeoffScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true -PartnerOutside $case.ContainsKey("Outside") -F8DuringVote $case.ContainsKey("F8") }
              elseif ($case.ContainsKey("Rc")) { Invoke-ReconnectScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Pick")) { Invoke-PickupScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
@@ -1308,7 +1446,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $autoReconnectValue = if ($NoAutoReconnect) { 0 } else { 1 }
     $restoreOwnValue = if ($NoRestoreOwnCharacter) { 0 } else { 1 }
     $npcHealthValue = if ($NoNpcHealthSync) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $sceneSyncValue = if ($NoSceneSync) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -1508,7 +1647,7 @@ try {
         $decisions = if ($Scenario -eq "door") { @(Read-SharedLines $clientLog 'AutoFollow: host used door') }
                      elseif ($Scenario -eq "loot") { @(Read-SharedLines $clientLog 'instanced enemy loot') }
                      elseif ($Scenario -eq "reward") { @(Read-SharedLines $clientLog '[REWARD]') }
-                     elseif ($Scenario -eq "takeoff") { @(Read-SharedLines $clientLog '[TAKEOFF-VOTE]') } else { @() }
+                     elseif ($Scenario -eq "takeoff" -or $Scenario -eq "space") { @(Read-SharedLines $clientLog '[TAKEOFF-VOTE]') } else { @() }
         $score = if ($Scenario -eq "door") { Invoke-DoorScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "loot") { Invoke-LootScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "reward") { Invoke-RewardScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
@@ -1519,6 +1658,8 @@ try {
                  elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "scene") { Invoke-SceneScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "space") { Invoke-SpaceScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
                  elseif ($Scenario -eq "papyrus") { Invoke-PapyrusScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final -PartnerOutside $PartnerOutside.IsPresent -F8DuringVote $F8DuringVote.IsPresent }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }

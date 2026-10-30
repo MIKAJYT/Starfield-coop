@@ -21,7 +21,7 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
 | Combat sync: shooting, hits, damage, downed/death, revive, NPC damage | exists | Fire actions, NPC damage and deaths, downed and revive exist; loot kill tested. NPC damage bot-tested both ways (`damage`, twin `CoopNpcHealthSync = 0` fails). Only tracked NPCs (enemies, companions, guards, anyone in combat) share health; city civilians share only their position. | 4 (done) |
 | World/travel: fast travel, planet loading, POI/dungeon entry | partial | Each player fast travels alone, F8 regroups. Stations and POIs can differ between players in space (known bug). | 5 |
 | Spaceflight: launch, cruise, manual flight, docking, station entry; ship position | partial | Launch done (vote). Flight input is mirrored to the partner. Ship position sync is switched off in the code (`kShipPosSyncEnabled = false`). Docking exists, rough. | 6 |
-| Quest/event sync: quest states, triggers, scripted events (doors, cutscenes, interactions) | partial | Quest stages, doors, locks, activators and dialogue exist. Cutscenes: missing. | 5 |
+| Quest/event sync: quest states, triggers, scripted events (doors, cutscenes, interactions) | partial | Quest stages, doors, locks, activators and dialogue exist. Scenes (cutscenes): every scene the host's game starts or ends is sent to the clients, which start it (its quest first when needed) or stop it (`CoopSceneSync`). Bot `scene`: the host starts MQ103_03_ArriveAkilaScene, the client plays it 90 ms later; twin `CoopSceneSync = 0` fails. Limits: background scenes whose quest only the game's story manager may start (e.g. an NPC raking) can't be forced onto a client where that quest isn't running; a scene with a player part may pull the client's own character in (untested). | 5 (scenes done) |
 | Stability: SFSE + Address Library, crash logging, installer/launcher, lobby UI, crash reports, character reset | partial | SFSE and Address Library yes. Crash guard absorbs known engine crashes, but no crash dumps or reports are written. The launcher (installer, lobby, character backup and reset) is the original C# tool. | 2 (launcher join codes), 7 (crash dumps and reports) |
 | Target: 2-4 players, PC Steam, clear versions | partial | Versions documented (COMPATIBILITY.md). Up to 4 players connect (`MaxPlayers`); the host forwards between clients; every player has a figure on every screen. Bot-tested with 2 game copies plus a headless third player. Takeoff vote, quest rewards, downed/revive, item drops, kill XP and the pilot's flight data work for every player (phase 3c). Voice is still first partner only. | 3 |
 
@@ -81,6 +81,11 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
    fly and look, or a person). Seen once in 3 `separate` runs: a mid-session save from the
    host never reached the client (sent, never received, other traffic fine); not reproduced.
 5. **World and quests:** POI/station divergence, cutscenes, mission types.
+   Done: scene sync (bot `scene`). Started: bot `space` lists everything in space around
+   the ship on both machines and compares; right after takeoff from the test save the
+   orbit holds only the ship, so it needs a flight to a station, which needs a way for the
+   bot to travel (the Creation Kit's base scripts for a travel script, or the engine's
+   travel function). Left: that, then mission types.
 6. **Ships:** ship position sync, docking, crew roles (pilot, gunner, engineer), repair.
 7. **Stability:** crash dumps and reports, Community Patch test, launcher join codes.
 8. **Team systems:** shared outposts with permissions, quest XP sharing, team buffs and

@@ -16,6 +16,22 @@ The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
 
+## Unreleased - full co-op spec, phase 5: world and quests
+
+- **Scene sync, cutscenes** (`CoopSceneSync`, default 1). A scene the host's game starts
+  (by a trigger, a dialogue line, an object or a script) used to play only there unless
+  a quest stage started it. The host now sends every scene start and end; the client
+  starts the same scene, its quest first when that isn't running, or stops it. The
+  engine's scene event has no address in CommonLibSF; PULSAR finds it at start by its
+  vtable. *Bot-tested* (`scene`): the host starts MQ103_03_ArriveAkilaScene, the client
+  plays it 90 ms later; twin with the switch off never does. Background scenes whose
+  quest only the game may start can't be forced onto a client where that quest isn't
+  running. A scene with a player part is not tested.
+- **Space census bot** (`space`): after takeoff each bot lists everything in space
+  around the ship and the launcher compares the lists. Groundwork for the station/POI
+  mismatch; right after takeoff the test orbit is empty, so it needs a flight to a
+  station first.
+
 ## Unreleased - full co-op spec, phase 4: tests for what exists, aim, jetpack, no friendly fire
 
 - **No friendly fire** (`CoopFriendlyFireGuard`, default 1). A hit on a partner's figure
