@@ -93,6 +93,7 @@ namespace Pulsar::TestBot
             float       lootRadius = 30.0f; // loot: search radius for the NPC to kill (metres)
             std::uint32_t sceneId = 0;          // scene: the scene the host starts; 0 = search running Akila scenes
             std::string   checkRefsFile;        // space: reference IDs (hex, one per line) to look up in this game
+            bool          manualDock = false;   // dock: a person docks the host's ship; the bot only waits
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
@@ -172,6 +173,7 @@ namespace Pulsar::TestBot
             std::uint64_t dockReadyMs = 0;              // dock: host docked / client hatch applied (tick)
             std::uint64_t dockSettledMs = 0;            // dock: when this side was settled (tick)
             bool          hatchUsed = false;            // dock: walked through the cockpit hatch
+            std::uint64_t dockStandTryMs = 0;           // dock: last try to stand up from a seat (tick)
             std::string   hatchInfo;
             std::uint64_t hullHitWallMs = 0;            // hull (host): the hit, then the repair
             std::uint64_t hullHitMs = 0;
@@ -240,6 +242,7 @@ namespace Pulsar::TestBot
                 else if (key == "lootradius")  s.lootRadius = std::stof(value);
                 else if (key == "sceneid")     s.sceneId = static_cast<std::uint32_t>(std::stoul(value, nullptr, 16));
                 else if (key == "checkrefsfile") s.checkRefsFile = value;
+                else if (key == "manualdock")  s.manualDock = (value == "1" || value == "true");
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
@@ -453,6 +456,42 @@ namespace Pulsar::TestBot
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             return n;
+        }
+
+        // The furniture handle the player sits in (process +0x228, middle-high
+        // +0x08, handle +0x428, as SnapShip); 0 when standing.
+        std::uint32_t SafeSeatHandle(RE::PlayerCharacter* a_player) noexcept
+        {
+            __try {
+                if (!a_player) return 0;
+                auto* proc = *reinterpret_cast<std::uint8_t**>(reinterpret_cast<std::uint8_t*>(a_player) + 0x228);
+                auto* mh = proc ? *reinterpret_cast<std::uint8_t**>(proc + 0x08) : nullptr;
+                return mh ? *reinterpret_cast<std::uint32_t*>(mh + 0x428) : 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return 0;
+            }
+        }
+
+        // That seat as a reference. LookupReferenceByHandle (REL::ID 72986) gave
+        // nothing (run 20261031-140613); the handle manager behind
+        // BSPointerHandle::get() resolves actor handles (GameCalls), so read the
+        // raw value as such a handle.
+        RE::TESObjectREFR* ResolveRefHandle(std::uint32_t a_raw)
+        {
+            const auto& handle = *reinterpret_cast<const RE::BSPointerHandle<RE::TESObjectREFR>*>(&a_raw);
+            return handle.get().get();
+        }
+
+        RE::TESObjectREFR* SafeResolveRefHandle(std::uint32_t a_raw) noexcept
+        {
+            __try { return ResolveRefHandle(a_raw); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+        }
+
+        RE::TESObjectREFR* SeatOf(RE::PlayerCharacter* a_player)
+        {
+            const std::uint32_t raw = SafeSeatHandle(a_player);
+            return raw ? SafeResolveRefHandle(raw) : nullptr;
         }
 
         // The ship the player is aboard, SEH-guarded (an unguarded GetSpaceship
@@ -1548,7 +1587,7 @@ namespace Pulsar::TestBot
             (s_state.dockSettledMs || (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
             RE::TESObjectREFR* ship = SafeShipOf(player);
             auto* vm = Pulsar::GameCalls::VM();
-            if (isHost && !s_state.acted && s_docked.load() == 1) {
+            if (isHost && !s_state.acted && s_docked.load() == 1 && !s_state.cfg.manualDock) {
                 // A save made docked (the docking sequence wired the hatch): no dock call.
                 s_state.actionInfo = "dock: found=1 already docked in the save, no InstantDock";
                 s_state.acted = true;
@@ -1557,7 +1596,22 @@ namespace Pulsar::TestBot
                 Trace(s_state.actionInfo.c_str());
                 PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
             }
-            if (isHost && !s_state.acted && s_docked.load() == 0) {
+            // ManualDock: a person docks the host's ship (the real docking sequence,
+            // which InstantDock skips): the bot only waits for IsDocked.
+            if (isHost && !s_state.acted && s_state.cfg.manualDock && s_docked.load() == 0 &&
+                s_state.actionInfo.empty()) {
+                s_state.actionInfo = "dock: waiting for a person to dock (ManualDock)";
+                Trace(s_state.actionInfo.c_str());
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            }
+            if (isHost && !s_state.acted && s_state.cfg.manualDock && s_docked.load() == 1) {
+                s_state.actionInfo = "dock: found=1 docked by hand (ManualDock)";
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+                Trace(s_state.actionInfo.c_str());
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            }
+            if (isHost && !s_state.acted && !s_state.cfg.manualDock && s_docked.load() == 0) {
                 const auto eye = RefsByName("theeyeref", 4);
                 auto* dest = eye.empty() ? nullptr : RE::TESForm::LookupByID<RE::TESObjectREFR>(eye.front().first);
                 bool queued = false;
@@ -1589,8 +1643,24 @@ namespace Pulsar::TestBot
             if (!s_state.dockSettledMs) s_state.dockSettledMs = now;
             const bool ready = isHost ? s_docked.load() == 1 : Pulsar::DockSync::DockAppliedForTest();
             if (ready && !s_state.dockReadyMs) s_state.dockReadyMs = now;
-            const bool due = s_state.dockReadyMs ? now - s_state.dockReadyMs >= 10000
-                                                 : (!isHost && now - s_state.dockSettledMs >= 60000);
+            // With a person docking, the docking sequence and the pilot seat hold the
+            // player for a while: the hatch did nothing 10 s after the dock (run
+            // 20261031-133237). Wait 30 s and until the player is out of the seat.
+            const std::uint64_t wait = s_state.cfg.manualDock ? 30000 : 10000;
+            const bool seated = SnapShip(player).seated;
+            // Seated when it is time (the client rides in a passenger seat, run
+            // 20261031-133819): stand up as a player does, by using the seat.
+            const bool timeUp = s_state.dockReadyMs ? now - s_state.dockReadyMs >= wait
+                                                    : (!isHost && now - s_state.dockSettledMs >= 60000);
+            if (timeUp && seated && !s_state.hatchUsed && now - s_state.dockStandTryMs >= 5000) {
+                s_state.dockStandTryMs = now;
+                RE::TESObjectREFR* seat = SeatOf(player);
+                const int r = seat ? SafeActivateAsPlayer(seat, player) : -1;
+                PLOG_INFO("[PULSAR] TestBot: dock: standing up from seat {:08X} (handle {:08X}): activate={}"sv,
+                          seat ? seat->formID : 0u, SafeSeatHandle(player), r);
+            }
+            const bool due = !seated && (s_state.dockReadyMs ? now - s_state.dockReadyMs >= wait
+                                                             : (!isHost && now - s_state.dockSettledMs >= 60000));
             if (!s_state.hatchUsed && due) {
                 s_state.hatchUsed = true;
                 DoorScan scan;
