@@ -38,6 +38,8 @@ namespace Pulsar::Network
         void SendVoiceFrame(const uint8_t* a_payload, size_t a_len);
         // Send a specific .sfs file to client. If path empty, uses GetMostRecentSavePath().
         void SendSaveToClient(const std::string& a_path = {});
+        // Test bot: save transfers handed to ENet since the plugin loaded.
+        static std::uint32_t SavesSentForTest();
         // Host-side: trigger quicksave, poll until new save is written, then send it.
         // a_target: the player who loads it (a joining one), 0xFF = every client.
         void BeginHostQuicksaveTransfer(uint8_t a_target = 0xFF);
@@ -133,10 +135,10 @@ namespace Pulsar::Network
         static constexpr int kWrongKeyFailures = 20;
         bool          m_wrongKey = false;    // disconnected for it: no auto-reconnect
         // Guards m_e2e and each slot's cryptoReady / preCryptoTx ONLY. EncSend runs from both
-        // the game thread (Send) and the network thread (quicksave SendSaveToClient), and the
-        // SendSaveToClient paths do not hold m_enetMutex, so that lock alone does not
-        // serialize the queue. This dedicated lock does, and is always innermost: never
-        // held across an enet_* or crypto call, so it cannot deadlock with m_enetMutex.
+        // the game thread (Send) and the network thread (quicksave SendSaveToClient); both
+        // now hold m_enetMutex around the send (the save path did not, and saves were lost:
+        // two threads in enet_peer_send at once). This dedicated lock is always innermost:
+        // never held across an enet_* or crypto call, so it cannot deadlock with m_enetMutex.
         mutable std::mutex m_cryptoQueueMtx;
 
         std::atomic<uint8_t> m_localPlayerId{ 0xFF };

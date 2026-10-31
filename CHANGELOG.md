@@ -41,6 +41,13 @@ number here means the code for that milestone is in, not that the goal is met.
   *Bot-tested* (`mission`): the client lacks MB_Bounty01Far, the host moves it to stage
   10, the client gets the host's save 2.3 s after asking and runs the mission at stage 10
   with its own character restored; twin with the switch off stays without it.
+- **Lost save transfers fixed.** The host sent a save from its network thread without
+  the ENet lock while the game thread kept sending; ENet is not thread-safe, and now and
+  then a save vanished without any error, leaving the client where it was (one case:
+  stuck in orbit while the host was at a station). The send now holds the lock, ENet
+  refusals are logged, and every packet over 1 MB is logged on arrival. *Bot-tested*
+  (`bridges`, 6 save bridges 45 s apart): 12 of 12 arrived in two runs, where about 2 of
+  11 were lost before. No twin (a race).
 - **Space census bot** (`space`): after takeoff the host moves its ship next to The Eye
   and bridges its save; each bot lists everything in space around the ship and the
   launcher compares the lists (an empty host list is an ERROR, not a match). It

@@ -71,6 +71,7 @@ namespace Pulsar::Network
     static std::atomic<uint64_t> s_pktRecvPos{0};
     static uint64_t s_lastPktLog{0};
     static Pulsar::Diag::TrafficStats g_traffic;   // NetStats log line
+    static std::atomic<std::uint32_t> g_savesSent{ 0 };   // test bot (bridges)
 
     // ── P2P hole-punch rendezvous (set by the ENet intercept, read by Update) ──
     // Peer endpoint is packed (ip<<16 | port) into ONE atomic so the reader never
@@ -832,15 +833,25 @@ namespace Pulsar::Network
             }
         }
 
-        if (!e2e) {
-            ENetPacket* p = enet_packet_create(a_data, a_len, flags);
-            enet_peer_send(a_slot.peer, a_channel, p);
-            return;
-        }
+        ENetPacket* p = nullptr;
         std::vector<uint8_t> enc;
-        if (!a_slot.crypto.Encrypt(a_data, a_len, enc)) return;
-        ENetPacket* p = enet_packet_create(enc.data(), enc.size(), flags);
-        enet_peer_send(a_slot.peer, a_channel, p);
+        if (!e2e) {
+            p = enet_packet_create(a_data, a_len, flags);
+        } else {
+            if (!a_slot.crypto.Encrypt(a_data, a_len, enc)) {
+                PLOG_WARN("[PULSAR] EncSend: encrypt failed, packet 0x{:02X} ({} bytes) not sent"sv,
+                          a_len ? a_data[0] : 0, a_len);
+                return;
+            }
+            p = enet_packet_create(enc.data(), enc.size(), flags);
+        }
+        // enet_peer_send refuses (and does not take) a packet for a bad channel, a
+        // peer not connected, or one over the size limit: say so instead of losing it.
+        if (!p || enet_peer_send(a_slot.peer, a_channel, p) < 0) {
+            PLOG_WARN("[PULSAR] EncSend: ENet refused packet 0x{:02X} ({} bytes, channel {})"sv,
+                      a_len ? a_data[0] : 0, a_len, a_channel);
+            if (p) enet_packet_destroy(p);
+        }
     }
 
     // voice: prepend PKT_VOICE and send on channel 2 unreliable via EncSend
@@ -970,6 +981,11 @@ namespace Pulsar::Network
         }
     }
 
+    std::uint32_t NetworkHost::SavesSentForTest()
+    {
+        return g_savesSent.load(std::memory_order_relaxed);
+    }
+
     void NetworkHost::SendSaveToClient(const std::string& a_path)
     {
         if (!m_peer || !m_isHost) return;
@@ -1046,13 +1062,23 @@ namespace Pulsar::Network
         // 2-4 players: a save for one joining player goes to that player only.
         const uint8_t target = m_saveTarget;
         m_saveTarget = Routing::kNoPlayer;
-        if (PeerSlot* one = (target != Routing::kNoPlayer) ? SlotById(target) : nullptr) {
-            g_traffic.CountSent(buf.data(), buf.size());
-            EncSendSlot(*one, 1, buf.data(), buf.size(), true);   // channel 1 for large data
-        } else {
-            EncSend(1, buf.data(), buf.size(), true);  // channel 1 for large data
+        {
+            // Update() polls for the fresh quicksave and calls this OUTSIDE its locked
+            // enet_host_service block, while the game thread sends through Send()
+            // (locked). Without the lock the save's enet_peer_send (thousands of
+            // fragments) could run at the same moment as a game-thread send, and a
+            // save went missing without a trace (runs 20261030-212343, 20261031-014412:
+            // host "sent", client never "received save").
+            std::lock_guard lock(m_enetMutex);
+            if (PeerSlot* one = (target != Routing::kNoPlayer) ? SlotById(target) : nullptr) {
+                g_traffic.CountSent(buf.data(), buf.size());
+                EncSendSlot(*one, 1, buf.data(), buf.size(), true);   // channel 1 for large data
+            } else {
+                EncSend(1, buf.data(), buf.size(), true);  // channel 1 for large data
+            }
         }
 
+        g_savesSent.fetch_add(1, std::memory_order_relaxed);
         auto filename = std::filesystem::path(savePath).filename().string();
         PLOG_INFO(
             "[PULSAR] SendSave: sent {} ({} bytes, {}) to client"sv,
@@ -1327,6 +1353,10 @@ namespace Pulsar::Network
         PeerSlot* slotPtr = SlotOf(a_peer);
         if (!slotPtr) return;   // an attempt or a refused peer
         PeerSlot& slot = *slotPtr;
+        // Large packets (save transfers) are rare and were lost before without a trace:
+        // log each one as it arrives, before decryption.
+        if (a_packet && a_packet->dataLength > 1000000)
+            PLOG_INFO("[PULSAR] NetRecv: large packet {} bytes on channel {}"sv, a_packet->dataLength, a_channel);
         const bool reliable = a_packet && (a_packet->flags & ENET_PACKET_FLAG_RELIABLE) != 0;
         // E2E: handle the key-exchange hello, then decrypt every other packet BEFORE
         // any code below reads data[0]. After decrypt we repoint a_packet at the plaintext

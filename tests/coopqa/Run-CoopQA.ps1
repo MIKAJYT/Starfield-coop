@@ -75,7 +75,9 @@ param(
     # mission: the client stops a running mission-board quest quietly, then the host
     # advances a stage in it; the client must get it back at the host's stage through
     # the host's save (CoopMissionBridge=1). -NoMissionBridge: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission")][string]$Scenario = "follow",
+    # bridges: the host sends 6 save bridges, one every 45 s; every save the host sent must
+    # reach the client (a save sent without the ENet lock was lost about 1 in 5). No twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
     [switch]$NoSceneSync,
@@ -956,6 +958,32 @@ function Invoke-MissionScore {
     return $r
 }
 
+# ---- bridges scenario ---------------------------------------------------------
+# The host fires 6 save bridges, 45 s apart. Each side counts save transfers since
+# its plugin loaded (the join save included): host sent, client received. 60 s
+# after the host's sixth bridge the two counts must match.
+function Invoke-BridgesScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["bridges"] }); $clientList = @($ClientSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["bridges"] })
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no bridge counts from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    $h = $hostList[-1].bridges; $c = $clientList[-1].bridges
+    $fired = [int]$h.fired
+    $lastFire = if ($h.firedAt) { [long](($h.firedAt -split ',')[-1]) } else { 0 }
+    $r.Details = "bridges: host fired $fired, sent $($h.savesSent) saves; client received $($c.savesReceived), loaded $($c.loads)"
+    if ($fired -lt 6) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("the host fired only $fired of 6 bridges") }
+        return $r
+    }
+    if ([long]$clientList[-1].wallMs -lt $lastFire + 60000 -and -not $Final) { return $r }
+    if ([int]$c.savesReceived -ge [int]$h.savesSent) { $r.Result = "PASS" }
+    else { $r.Result = "FAIL"; $r.Reasons.Add("$([int]$h.savesSent - [int]$c.savesReceived) of $($h.savesSent) saves the host sent never reached the client") }
+    return $r
+}
+
 # ---- takeoff scenario ---------------------------------------------------------
 # Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
 # sits in the pilot seat, opens the takeoff menu and asks for the launch. The
@@ -1260,6 +1288,21 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-BridgesRun([int]$fired = 6, [int]$lost = 0) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000
+    for ($i = 0; $i -lt 400; $i++) {
+        $t = $t0 + $i * 1000
+        $n = [Math]::Min($fired, [Math]::Floor($i / 45))
+        $at = (1..([Math]::Max($n, 0)) | Where-Object { $_ -ge 1 } | ForEach-Object { $t0 + $_ * 45000 }) -join ','
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($n -gt 0) $(if ($n -gt 0) { $t0 + 45000 } else { 0 })
+        $hs | Add-Member bridges ([pscustomobject]@{ fired = $n; firedAt = $at; loads = 0; loadsAt = ""; savesSent = 1 + $n; savesReceived = 0 })
+        $recv = 1 + [Math]::Max(0, $n - $(if ($n -ge $fired) { $lost } else { 0 }))
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member bridges ([pscustomobject]@{ fired = 0; firedAt = ""; loads = $recv - 1; loadsAt = ""; savesSent = 0; savesReceived = $recv })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
 function New-MissionRun([bool]$acts = $true, [bool]$found = $true, [bool]$stops = $true, [bool]$rises = $true, [int]$clientBackAfter = 20000, [int]$clientStage = 20) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 30000; $id = "0002C0DE"
     for ($i = 0; $i -lt 90; $i++) {
@@ -1480,12 +1523,16 @@ function Invoke-ScorerSelfTest {
         @{ Name = "mission: never stopped";  Run = (New-MissionRun -stops $false);     Expect = "ERROR";   Mission = $true },
         @{ Name = "mission: stage not raised"; Run = (New-MissionRun -rises $false);   Expect = "ERROR";   Mission = $true },
         @{ Name = "mission: no mission";     Run = (New-MissionRun -found $false);     Expect = "ERROR";   Mission = $true },
-        @{ Name = "mission: never acted";    Run = (New-MissionRun -acts $false);      Expect = "TIMEOUT"; Mission = $true }
+        @{ Name = "mission: never acted";    Run = (New-MissionRun -acts $false);      Expect = "TIMEOUT"; Mission = $true },
+        @{ Name = "bridges: all arrive";     Run = (New-BridgesRun);                   Expect = "PASS";    Bridges = $true },
+        @{ Name = "bridges: one lost";       Run = (New-BridgesRun -lost 1);           Expect = "FAIL";    Bridges = $true },
+        @{ Name = "bridges: too few fired";  Run = (New-BridgesRun -fired 3);          Expect = "ERROR";   Bridges = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Bridges")) { Invoke-BridgesScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Mission")) { Invoke-MissionScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Quest")) { Invoke-QuestScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Scene")) { Invoke-SceneScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
@@ -1808,6 +1855,7 @@ try {
                  elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "bridges") { Invoke-BridgesScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "mission") { Invoke-MissionScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "quest") { Invoke-QuestScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "scene") { Invoke-SceneScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }

@@ -471,8 +471,16 @@ namespace Pulsar::WorldSync {
         return true;
     }
 
+    static std::atomic<std::uint32_t> s_savesReceived{ 0 };
+
+    std::uint32_t SavesReceivedForTest()
+    {
+        return s_savesReceived.load(std::memory_order_relaxed);
+    }
+
     void OnSaveReceived(const uint8_t* a_data, size_t a_length)
     {
+        s_savesReceived.fetch_add(1, std::memory_order_relaxed);
         // Packet format: [uint8 type][uint32 totalSize][raw .sfs data]
         if (a_length < 5) {
             PLOG_WARN("[PULSAR] WorldSync: save packet too small ({} bytes)"sv, a_length);

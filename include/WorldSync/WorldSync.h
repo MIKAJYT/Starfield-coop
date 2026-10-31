@@ -29,6 +29,8 @@ namespace Pulsar::WorldSync {
     // Called from network thread when PKT_SAVE_TRANSFER arrives
     // Raw packet format: [uint8 type][uint32 totalSize][raw .sfs data]
     void OnSaveReceived(const uint8_t* a_data, size_t a_length);
+    // Test bot: save transfers received since the plugin loaded.
+    std::uint32_t SavesReceivedForTest();
 
     // Called from game thread to process pending save load
     void ProcessPending();

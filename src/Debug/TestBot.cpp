@@ -163,6 +163,12 @@ namespace Pulsar::TestBot
             std::uint64_t missionRefreshMs = 0;
             std::uint64_t missionLoadAtPick = 0;        // last save load (tick) when picking
             std::uint64_t spaceSinceMs = 0;             // space (host): first tick in space
+            int           bridgesFired = 0;             // bridges (host): save bridges sent
+            std::string   bridgesFiredAt;               //   their wall times, comma-separated
+            std::uint64_t bridgeNextMs = 0;
+            int           bridgeLoads = 0;              // bridges (client): saves loaded
+            std::string   bridgeLoadsAt;
+            std::uint64_t bridgeLastLoad = 0;
             std::uint64_t travelAtWallMs = 0;           // space (host): ship moved to the station
             std::string   travelInfo;
             std::uint64_t sepBridgeWallMs = 0;          // host: bridge fired
@@ -1431,6 +1437,35 @@ namespace Pulsar::TestBot
             }
         }
 
+        // Bridges: the host sends 6 save bridges, one every 45 s, while the game runs;
+        // the client must load each. A save sent from the network thread without the
+        // ENet lock went missing about 1 in 5 (runs 20261030-212343, 20261031-014412).
+        if (s_state.cfg.scenario == "bridges" && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            if (isHost && s_state.bridgesFired < 6) {
+                if (!s_state.bridgeNextMs) s_state.bridgeNextMs = now;
+                if (now >= s_state.bridgeNextMs &&
+                    Pulsar::SpaceSync::FastTravel::FireSaveBridge("bot-bridges", /*a_triggerOwnSave=*/true)) {
+                    ++s_state.bridgesFired;
+                    s_state.bridgesFiredAt += (s_state.bridgesFiredAt.empty() ? "" : ",") + std::to_string(WallMs());
+                    s_state.bridgeNextMs = now + 45000;
+                    s_state.acted = true;
+                    if (!s_state.actedAtWallMs) s_state.actedAtWallMs = WallMs();
+                    PLOG_INFO("[PULSAR] TestBot: bridges: fired {} of 6"sv, s_state.bridgesFired);
+                }
+            }
+        }
+        if (s_state.cfg.scenario == "bridges" && !isHost) {
+            const std::uint64_t load = Pulsar::WorldSync::GetLastLoadCompletedTick();
+            if (load != 0 && load != s_state.bridgeLastLoad) {
+                if (s_state.bridgeLastLoad != 0) {   // the first one is the join load
+                    ++s_state.bridgeLoads;
+                    s_state.bridgeLoadsAt += (s_state.bridgeLoadsAt.empty() ? "" : ",") + std::to_string(WallMs());
+                }
+                s_state.bridgeLastLoad = load;
+            }
+        }
+
         // Space (host): 30 s after reaching space, move the ship 2 km off The Eye,
         // the station over Jemison (the takeoff save leaves from New Atlantis; the
         // orbit right after takeoff is empty, run 20261030-215716), then bridge the
@@ -1588,6 +1623,7 @@ namespace Pulsar::TestBot
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
             s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" && s_state.cfg.scenario != "mission" &&
+            s_state.cfg.scenario != "bridges" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1729,6 +1765,12 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "quest") {
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "bridges") {
+            j += ",\"bridges\":{\"fired\":" + std::to_string(s_state.bridgesFired) + ",\"firedAt\":\"" + s_state.bridgesFiredAt +
+                 "\",\"loads\":" + std::to_string(s_state.bridgeLoads) + ",\"loadsAt\":\"" + s_state.bridgeLoadsAt +
+                 "\",\"savesSent\":" + std::to_string(Pulsar::Network::NetworkHost::SavesSentForTest()) +
+                 ",\"savesReceived\":" + std::to_string(Pulsar::WorldSync::SavesReceivedForTest()) + "}";
         }
         if (s_state.cfg.scenario == "mission") {
             char c[220];
