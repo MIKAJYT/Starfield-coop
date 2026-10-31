@@ -1486,6 +1486,23 @@ namespace Pulsar::TestBot
                     sent = obj && Pulsar::GameCalls::CallMethod(Pulsar::GameCalls::VM(), obj, "MoveTo",
                         { Pulsar::GameCalls::Arg(dest), Pulsar::GameCalls::Arg(2000.0f), Pulsar::GameCalls::Arg(0.0f),
                           Pulsar::GameCalls::Arg(0.0f), Pulsar::GameCalls::Arg(true), Pulsar::GameCalls::Arg(false) });
+                    // Then turn the ship to face the station, so the screenshots of both
+                    // players show it: heading + the angle to the station, as the game
+                    // measures it (GetHeadingAngle).
+                    if (sent) {
+                        auto* vm = Pulsar::GameCalls::VM();
+                        Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetAngleZ", {},
+                            [vm, obj, dest](const RE::BSScript::Variable& a_z) {
+                                const float z = a_z.is<float>() ? RE::BSScript::get<float>(a_z) : 0.0f;
+                                Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetHeadingAngle", { Pulsar::GameCalls::Arg(dest) },
+                                    [vm, obj, z](const RE::BSScript::Variable& a_h) {
+                                        const float h = a_h.is<float>() ? RE::BSScript::get<float>(a_h) : 0.0f;
+                                        Pulsar::GameCalls::CallMethod(vm, obj, "SetAngle",
+                                            { Pulsar::GameCalls::Arg(0.0f), Pulsar::GameCalls::Arg(0.0f), Pulsar::GameCalls::Arg(z + h) });
+                                        PLOG_INFO("[PULSAR] TestBot: space: turned the ship to face the station ({:.0f} + {:.0f} deg)"sv, z, h);
+                                    });
+                            });
+                    }
                 }
                 char msg[200];
                 std::snprintf(msg, sizeof(msg), "travel: ship %08X moved to %08X TheEyeREF queued=%d",
