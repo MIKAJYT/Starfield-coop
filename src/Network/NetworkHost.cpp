@@ -1657,9 +1657,10 @@ namespace Pulsar::Network
             return;
         }
 
-        // PKT_VEHICLE_POS - single FURN-REFR position from host (Moon Jumper etc.).
-        // Own framing like PKT_NPC_STATE. Client-only.
-        if (!m_isHost && a_packet->dataLength >= 1 + sizeof(VehiclePosData)
+        // PKT_VEHICLE_POS - the FURN-REFR the sender sits in (Moon Jumper, ship seats).
+        // Own framing like PKT_NPC_STATE. Both ways: the client sends its seat too
+        // (CoopClientSeatSync) so the host can seat the client's figure.
+        if (a_packet->dataLength >= 1 + sizeof(VehiclePosData)
             && a_packet->data[0] == PKT_VEHICLE_POS) {
             Pulsar::VehicleSync::OnPacketReceived(a_packet->data, a_packet->dataLength);
             return;

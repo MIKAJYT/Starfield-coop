@@ -407,6 +407,7 @@ namespace Pulsar::VehicleSync
         float    posX = 0, posY = 0, posZ = 0;
         float    rotX = 0, rotY = 0, rotZ = 0;
         uint64_t lastUpdateMs = 0;
+        uint32_t refID = 0;            // the sender's FURN ref (save-file refs match)
     };
     static HostFurnInfo s_hostFurn;
     static std::mutex   s_hostFurnMutex;
@@ -456,6 +457,7 @@ namespace Pulsar::VehicleSync
             s_hostFurn.posX = v.posX; s_hostFurn.posY = v.posY; s_hostFurn.posZ = v.posZ;
             s_hostFurn.rotX = v.rotX; s_hostFurn.rotY = v.rotY; s_hostFurn.rotZ = v.rotZ;
             s_hostFurn.lastUpdateMs = GetTickCount64();
+            s_hostFurn.refID = v.refFormID;
         }
 
         static uint64_t s_lastRecvLog = 0;
@@ -468,6 +470,9 @@ namespace Pulsar::VehicleSync
                       resolved);
         }
 
+        // The vehicle-move queue is drained by RunClientTick only; the host now gets
+        // the client's seat too (SendSeatPacket) and must not let it grow.
+        if (IsHostMode()) return;
         std::lock_guard lock(s_pendingMutex);
         s_pending.push_back(v);
     }
@@ -611,6 +616,75 @@ namespace Pulsar::VehicleSync
         if (node) SafeReadNodeRotate9(node, out);
     }
 
+    // Send the FURN the local player sits in (PKT_VEHICLE_POS), at most every 200 ms or
+    // on a move. The host sends its own; since the client moves into a passenger seat
+    // (CoopLeaveHostSeat) the client sends its seat too, so the host can seat the
+    // client's figure (owner's report: it stood next to the pilot seat).
+    static void SendSeatPacket(RE::TESObjectREFR* furn, uint32_t cellID)
+    {
+        auto& net = Pulsar::Network::GetSingleton();
+        auto base = furn->GetBaseObject();
+        if (!base) {
+            PLOG_WARN("[PULSAR] VehicleSync send: FURN ref=0x{:08X} has no baseObject"sv, furn->formID);
+            return;
+        }
+
+        auto pos = furn->GetPosition();
+        float rotX = furn->data.angle.x;
+        float rotY = furn->data.angle.y;
+        float rotZ = furn->data.angle.z;
+        uint32_t hostRefID = furn->formID;
+        uint32_t hostBaseID = base->GetFormID();
+
+        uint64_t now = GetTickCount64();
+        auto& ls = s_hostSent[hostRefID];
+        float dx = pos.x - ls.x, dy = pos.y - ls.y, dz = pos.z - ls.z;
+        float d2 = dx * dx + dy * dy + dz * dz;
+        bool shouldSend = (ls.timeMs == 0) ||
+                          (now - ls.timeMs > 200) ||
+                          (d2 > 0.25f);
+        if (!shouldSend) return;
+
+        ls.timeMs = now;
+        ls.x = pos.x; ls.y = pos.y; ls.z = pos.z;
+
+        using namespace Pulsar::Network;
+        uint8_t buf[1 + sizeof(VehiclePosData)]{};
+        buf[0] = PKT_VEHICLE_POS;
+
+        VehiclePosData v{};
+        v.refFormID = hostRefID;
+        v.baseFormID = hostBaseID;
+        v.cellFormID = cellID;
+        v.posX = pos.x; v.posY = pos.y; v.posZ = pos.z;
+        v.rotX = rotX; v.rotY = rotY; v.rotZ = rotZ;
+        // exact orientation: host vehicle's render world.rotate (3x3).
+        SafeGetFurnNodeRotate(furn, v.rot3x3);
+
+        // Resolve cross-plugin identity of the FURN base: plugin filename +
+        // flag-aware local ID. Same T34 pattern NPCSync uses for TESNPC base
+        // resolution - lets the client re-encode the base under its own
+        // load order (ESL/medium plugins have different FE/FF prefixes per
+        // machine depending on load index).
+        if ((hostBaseID & 0xFF000000) != 0xFF000000) {
+            if (Pulsar::NPCSync::PluginLookup::FormIDToPluginName(
+                    hostBaseID, v.basePlugin, sizeof(v.basePlugin))) {
+                v.baseLocalID = Pulsar::NPCSync::PluginLookup::FormIDToLocalID(hostBaseID);
+            }
+        }
+
+        std::memcpy(buf + 1, &v, sizeof(v));
+
+        net.Send(buf, sizeof(buf), /*reliable*/ false);
+
+        static uint64_t s_lastLog = 0;
+        if (now - s_lastLog > 3000) {
+            s_lastLog = now;
+            PLOG_INFO("[PULSAR] VehicleSync send({}): ref=0x{:08X} base=0x{:08X} pos=({:.1f},{:.1f},{:.1f}) rot=({:.3f},{:.3f},{:.3f})"sv,
+                      net.IsHost() ? "host" : "client", hostRefID, hostBaseID, pos.x, pos.y, pos.z, rotX, rotY, rotZ);
+        }
+    }
+
     static void RunHostTick()
     {
         auto& net = Pulsar::Network::GetSingleton();
@@ -684,66 +758,7 @@ namespace Pulsar::VehicleSync
             return;
         }
 
-        auto base = furn->GetBaseObject();
-        if (!base) {
-            PLOG_WARN("[PULSAR] VehicleSync host: FURN ref=0x{:08X} has no baseObject"sv, furn->formID);
-            return;
-        }
-
-        auto pos = furn->GetPosition();
-        float rotX = furn->data.angle.x;
-        float rotY = furn->data.angle.y;
-        float rotZ = furn->data.angle.z;
-        uint32_t hostRefID = furn->formID;
-        uint32_t hostBaseID = base->GetFormID();
-
-        uint64_t now = GetTickCount64();
-        auto& ls = s_hostSent[hostRefID];
-        float dx = pos.x - ls.x, dy = pos.y - ls.y, dz = pos.z - ls.z;
-        float d2 = dx * dx + dy * dy + dz * dz;
-        bool shouldSend = (ls.timeMs == 0) ||
-                          (now - ls.timeMs > 200) ||
-                          (d2 > 0.25f);
-        if (!shouldSend) return;
-
-        ls.timeMs = now;
-        ls.x = pos.x; ls.y = pos.y; ls.z = pos.z;
-
-        using namespace Pulsar::Network;
-        uint8_t buf[1 + sizeof(VehiclePosData)]{};
-        buf[0] = PKT_VEHICLE_POS;
-
-        VehiclePosData v{};
-        v.refFormID = hostRefID;
-        v.baseFormID = hostBaseID;
-        v.cellFormID = cellID;
-        v.posX = pos.x; v.posY = pos.y; v.posZ = pos.z;
-        v.rotX = rotX; v.rotY = rotY; v.rotZ = rotZ;
-        // exact orientation: host vehicle's render world.rotate (3x3).
-        SafeGetFurnNodeRotate(furn, v.rot3x3);
-
-        // Resolve cross-plugin identity of the FURN base: plugin filename +
-        // flag-aware local ID. Same T34 pattern NPCSync uses for TESNPC base
-        // resolution - lets the client re-encode the base under its own
-        // load order (ESL/medium plugins have different FE/FF prefixes per
-        // machine depending on load index).
-        if ((hostBaseID & 0xFF000000) != 0xFF000000) {
-            if (Pulsar::NPCSync::PluginLookup::FormIDToPluginName(
-                    hostBaseID, v.basePlugin, sizeof(v.basePlugin))) {
-                v.baseLocalID = Pulsar::NPCSync::PluginLookup::FormIDToLocalID(hostBaseID);
-            }
-        }
-
-        std::memcpy(buf + 1, &v, sizeof(v));
-
-        net.Send(buf, sizeof(buf), /*reliable*/ false);
-
-        static uint64_t s_lastLog = 0;
-        if (now - s_lastLog > 3000) {
-            s_lastLog = now;
-            PLOG_INFO("[PULSAR] VehicleSync host: ref=0x{:08X} base=0x{:08X} pos=({:.1f},{:.1f},{:.1f}) rot=({:.3f},{:.3f},{:.3f})"sv,
-                      hostRefID, hostBaseID, pos.x, pos.y, pos.z, rotX, rotY, rotZ);
-        }
+        SendSeatPacket(furn, cellID);
     }
 
     // ===== Havok body resolve (244 RE, reference_vehicle_havok_re) =====
@@ -1171,12 +1186,33 @@ namespace Pulsar::VehicleSync
         }
     }
 
+    // Client: send the seat the local player sits in, so the host seats the client's
+    // figure there too (owner's report 2026-10-31: the host saw the friend standing
+    // next to the pilot seat while the friend sat in a passenger chair).
+    static void RunClientSeatSend()
+    {
+        if (!Pulsar::GetConfig().coopClientSeatSync) return;
+        auto& net = Pulsar::Network::GetSingleton();
+        if (!net.IsConnected()) return;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !player->parentCell) return;
+        uint32_t cellID = player->parentCell->formID;
+        if (cellID != s_hostLastCell) {
+            s_hostLastCell = cellID;
+            s_hostSent.clear();
+        }
+        auto* furn = GetOccupiedFurniture(player);
+        if (!furn) return;
+        SendSeatPacket(furn, cellID);
+    }
+
     void OnGameThreadTick()
     {
         if (IsHostMode()) {
             RunHostTick();
         } else {
             RunClientTick();
+            RunClientSeatSend();
         }
     }
 
@@ -1204,6 +1240,10 @@ namespace Pulsar::VehicleSync
         bool                 spawnedByUs     = false;   // we PlaceAtMe'd this FURN → Delete on unseat
         uint32_t             expectedBaseID  = 0;       // filter for post-spawn rescan
         uint64_t             spawnRequestMs  = 0;
+        // Re-match: the sender's FURN ref this match was made for, and when the
+        // last re-match ran (at most once a second).
+        uint32_t             matchedRefID    = 0;
+        uint64_t             lastRematchMs   = 0;
     };
     static std::unordered_map<uint32_t, SeatedState> s_seatedByCloneID;
     static std::mutex s_seatedMutex;
@@ -1691,6 +1731,38 @@ namespace Pulsar::VehicleSync
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
+    // The sender's FURN ref by ID, when it is a FURN in the local player's cell. Both
+    // games load the same save, so ship-interior refs carry the same IDs; this beats
+    // the nearest-same-base guess when the ship has several seats of one kind.
+    static bool SafeIsFurnInCell(RE::TESObjectREFR* a_ref, RE::TESObjectCELL* a_cell)
+    {
+        __try {
+            auto* rb = reinterpret_cast<uint8_t*>(a_ref);
+            if (*reinterpret_cast<RE::TESObjectCELL**>(rb + 0xB0) != a_cell) return false;
+            auto* base = *reinterpret_cast<uint8_t**>(rb + 0x98);
+            return base && *reinterpret_cast<uint8_t*>(base + 0x2E) == static_cast<uint8_t>(RE::FormType::kFURN);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+    static RE::TESObjectREFR* FindSentFurnByRef(uint32_t a_refID)
+    {
+        if (a_refID == 0) return nullptr;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player || !player->parentCell) return nullptr;
+        auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_refID);
+        return (ref && SafeIsFurnInCell(ref, player->parentCell)) ? ref : nullptr;
+    }
+
+    uint32_t CloneSeatRefForTest()
+    {
+        std::lock_guard lock(s_seatedMutex);
+        for (const auto& [id, st] : s_seatedByCloneID) {
+            if (st.seated && st.furn) return st.furn->formID;
+        }
+        return 0;
+    }
+
     void OnRemoteSeatedUpdate(RE::Actor* a_clone, bool a_seated,
                               float a_x, float a_y, float a_z)
     {
@@ -1794,12 +1866,36 @@ namespace Pulsar::VehicleSync
         // 0 → 1: match a local FURN with the SAME base as host's FURN
         // (Schritt A of the A+B plan). Pulls host's cross-plugin-resolved
         // base and position from s_hostFurn (populated by PKT_VEHICLE_POS).
+        // Re-match: seated without a seat (the seat packet came after the seated bit),
+        // or the sender moved to another seat (the client goes from the host's pilot
+        // seat into a passenger chair after joining). Re-runs the 0→1 match below, at
+        // most once a second.
+        if (st.seated && a_seated && !st.pendingSpawn) {
+            uint32_t sentRef = 0, sentBase = 0;
+            {
+                std::lock_guard lockH(s_hostFurnMutex);
+                sentRef = s_hostFurn.refID;
+                sentBase = s_hostFurn.resolvedBaseID;
+            }
+            const bool noSeat = !st.furn && (sentRef != 0 || sentBase != 0);
+            const bool seatChanged = st.furn && sentRef != 0 && sentRef != st.matchedRefID;
+            const uint64_t now = GetTickCount64();
+            if ((noSeat || seatChanged) && now - st.lastRematchMs > 1000) {
+                st.lastRematchMs = now;
+                PLOG_INFO("[PULSAR] VehicleSync: re-match clone=0x{:08X} (seat={} sentRef=0x{:08X} matched=0x{:08X})"sv,
+                          a_clone->formID, static_cast<void*>(st.furn), sentRef, st.matchedRefID);
+                st.seated = false;
+                st.furn = nullptr;
+            }
+        }
+
         if (!st.seated && a_seated) {
-            uint32_t hostBaseResolved = 0;
+            uint32_t hostBaseResolved = 0, sentRef = 0;
             float hostPosX = a_x, hostPosY = a_y, hostPosZ = a_z;
             {
                 std::lock_guard lock(s_hostFurnMutex);
                 hostBaseResolved = s_hostFurn.resolvedBaseID;
+                sentRef = s_hostFurn.refID;
                 if (s_hostFurn.lastUpdateMs != 0) {
                     hostPosX = s_hostFurn.posX;
                     hostPosY = s_hostFurn.posY;
@@ -1820,7 +1916,8 @@ namespace Pulsar::VehicleSync
             // Without a resolved base we can't tell the MJ apart from a
             // bench. Log and bail - Schritt B (PlaceAtMe fallback) will
             // take over once implemented; for now we stay passive.
-            if (hostBaseResolved == 0) {
+            auto* byRef = FindSentFurnByRef(sentRef);
+            if (hostBaseResolved == 0 && !byRef) {
                 static uint64_t s_lastNoBase = 0;
                 uint64_t now = GetTickCount64();
                 if (now - s_lastNoBase > 3000) {
@@ -1834,8 +1931,23 @@ namespace Pulsar::VehicleSync
             // form on both machines. If client has the MJ in its parentCell
             // at all, it IS the same vehicle - match by base with huge
             // radius so distance from host doesn't gate it.
-            auto* furn = FindNearestFurnToClone(a_clone, 10000.0f, hostBaseResolved,
-                                                hostPosX, hostPosY, hostPosZ);
+            auto* furn = byRef ? byRef
+                               : FindNearestFurnToClone(a_clone, 10000.0f, hostBaseResolved,
+                                                        hostPosX, hostPosY, hostPosZ);
+            // Never into the seat the local player sits in: two actors on one FURN get
+            // both stuck (see the BISECT note above).
+            auto* localPlayer = RE::PlayerCharacter::GetSingleton();
+            if (furn && localPlayer && furn == GetOccupiedFurniture(localPlayer)) {
+                static uint64_t s_lastOwnSeat = 0;
+                uint64_t onow = GetTickCount64();
+                if (onow - s_lastOwnSeat > 3000) {
+                    s_lastOwnSeat = onow;
+                    PLOG_INFO("[PULSAR] VehicleSync: match furn=0x{:08X} is the local player's seat - not seating the clone"sv,
+                              furn->formID);
+                }
+                st.matchedRefID = sentRef;
+                return;
+            }
             if (furn) {
                 // Schritt A hit - reuse client's existing FURN.
                 auto base = furn->GetBaseObject();
@@ -1863,6 +1975,7 @@ namespace Pulsar::VehicleSync
                 st.seated = true;
                 st.spawnedByUs = false;
                 st.furn = furn;
+                st.matchedRefID = sentRef;
                 st.lastFurnMoveMs = 0;
                 return;
             }
@@ -1916,7 +2029,9 @@ namespace Pulsar::VehicleSync
         // the clone at seat-offset from FURN, which on client yields the
         // correct actor world pos if FURN is at host-FURN pos.
         // No time-throttle - every PKT_POSITION-driven update teleports.
-        if (st.seated && a_seated && st.furn) {
+        // The host never moves its own furniture after the client's seat: the seat is
+        // part of the host's world (a ship seat moves with the ship).
+        if (st.seated && a_seated && st.furn && !IsHostMode()) {
             float fx = a_x, fy = a_y, fz = a_z;
             float rx = 0.0f, ry = 0.0f, rz = 0.0f;
             bool haveRot = false;

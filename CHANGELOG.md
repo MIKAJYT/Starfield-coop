@@ -44,6 +44,14 @@ number here means the code for that milestone is in, not that the goal is met.
   player's figure whenever the local player sat anywhere in the same cell (meant for
   both in one pilot seat). The client now hides the host only in the seat it loaded
   into; the host no longer hides the client. The host side is not watched yet.
+- **The host shows the client in its passenger seat** (`CoopClientSeatSync`, default 1).
+  The host saw the client's figure standing next to the pilot seat while the client sat
+  in a chair: only the host sent its seat (`PKT_VEHICLE_POS`). Now the client sends its
+  seat too; the host finds that seat by its ref ID (same save, same IDs), re-matches
+  when the seat changes, never uses the seat the host itself sits in, and no longer
+  moves its own furniture after the packet. *Bot-tested* (`seat`, twice): the host shows
+  the client's figure in chair 03292F68, the client's seat. *Watched by the owner* in
+  sf-a. No twin run yet (`-NoClientSeatSync`).
 - Open: the host's figure stands up a few seconds late on the client (the host reports
   the stand-up when its animation ends; the client then plays its own and respawns the
   figure).

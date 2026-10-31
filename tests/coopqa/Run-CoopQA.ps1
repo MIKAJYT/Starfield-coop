@@ -88,7 +88,8 @@ param(
     # -NoDockSync: twin.
     # seat: from a save where the host sits in the pilot seat, the client joins seated; 40 s
     # after it is in the world (70 s) it must have left that seat (a passenger seat or standing,
-    # CoopLeaveHostSeat=1). -NoLeaveHostSeat: twin.
+    # CoopLeaveHostSeat=1). -NoLeaveHostSeat: twin. In a passenger seat the host must show the
+    # client's figure in that seat (CoopClientSeatSync=1). -NoClientSeatSync: twin.
     [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull", "dock", "seat")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
@@ -98,6 +99,7 @@ param(
     [switch]$NoShipHullSync,
     [switch]$NoDockSync,
     [switch]$NoLeaveHostSeat,
+    [switch]$NoClientSeatSync,
     # Keep both games open this many seconds after the result (a person looks).
     [int]$HoldSec = 0,
     [switch]$NoAutoReconnect,
@@ -1129,8 +1131,16 @@ function Invoke-SeatScore {
     $r.Details = "seat: client seated after joining: $wasSeated (seat $firstSeat); 70 s later: seated=$($late[-1].seated) seat $lastSeat"
     if (-not $wasSeated) { $r.Result = "ERROR"; $r.Reasons.Add("the client never sat (the save must have the host in a seat)"); return $r }
     $left = if ($hasIds -and $firstSeat) { (-not $late[-1].seated) -or ($lastSeat -ne $firstSeat -and $lastSeat -ne "00000000") } else { -not $late[-1].seated }
-    if ($left) { $r.Result = "PASS" }
-    else { $r.Result = "FAIL"; $r.Reasons.Add("the client is still in the seat it joined in 70 s after joining") }
+    if (-not $left) { $r.Result = "FAIL"; $r.Reasons.Add("the client is still in the seat it joined in 70 s after joining"); return $r }
+    # CoopClientSeatSync: when the client sits in another seat, the host must show the
+    # client's figure in that seat too (partnerSeatId on the host; same save, same ref IDs).
+    $hostLate = @($HostSamples | Sort-Object wallMs | Where-Object { [long]$_.wallMs -ge $t0 + 70000 -and $_.PSObject.Properties["partnerSeatId"] })
+    if ($late[-1].seated -and $lastSeat -and $lastSeat -ne "00000000" -and $hostLate.Count -gt 0) {
+        $hostView = $hostLate[-1].partnerSeatId
+        $r.Details += "; host shows the client's figure in seat $hostView"
+        if ($hostView -ne $lastSeat) { $r.Result = "FAIL"; $r.Reasons.Add("the host does not show the client's figure in its seat ($lastSeat)"); return $r }
+    }
+    $r.Result = "PASS"
     return $r
 }
 
@@ -1438,13 +1448,14 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
-function New-SeatRun([bool]$sits = $true, [bool]$stands = $true, [string]$movesTo = "") {
+function New-SeatRun([bool]$sits = $true, [bool]$stands = $true, [string]$movesTo = "", [string]$hostShows = "") {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000
     for ($i = 0; $i -lt 100; $i++) {
         $t = $t0 + $i * 1000
         $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true
         $hs | Add-Member seated $true
         $hs | Add-Member seatId "03292FAB"
+        if ($hostShows) { $hs | Add-Member partnerSeatId $(if ($i -ge 20) { $hostShows } else { "00000000" }) }
         $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
         $cs | Add-Member connected $true
         $moved = $movesTo -and $i -ge 12
@@ -1741,7 +1752,9 @@ function Invoke-ScorerSelfTest {
         @{ Name = "seat: stands up";         Run = (New-SeatRun);                      Expect = "PASS";    Seat = $true },
         @{ Name = "seat: stays seated";      Run = (New-SeatRun -stands $false);       Expect = "FAIL";    Seat = $true },
         @{ Name = "seat: never sat";         Run = (New-SeatRun -sits $false);         Expect = "ERROR";   Seat = $true },
-        @{ Name = "seat: passenger seat";    Run = (New-SeatRun -stands $false -movesTo "03292AE0"); Expect = "PASS"; Seat = $true }
+        @{ Name = "seat: passenger seat";    Run = (New-SeatRun -stands $false -movesTo "03292AE0"); Expect = "PASS"; Seat = $true },
+        @{ Name = "seat: host shows it";     Run = (New-SeatRun -stands $false -movesTo "03292AE0" -hostShows "03292AE0"); Expect = "PASS"; Seat = $true },
+        @{ Name = "seat: host shows none";   Run = (New-SeatRun -stands $false -movesTo "03292AE0" -hostShows "00000000"); Expect = "FAIL"; Seat = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
@@ -1865,7 +1878,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $hullSyncValue = if ($NoShipHullSync) { 0 } else { 1 }
     $dockSyncValue = if ($NoDockSync) { 0 } else { 1 }
     $standUpValue = if ($NoLeaveHostSeat) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`nCoopLeaveHostSeat = $standUpValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $clientSeatValue = if ($NoClientSeatSync) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`nCoopLeaveHostSeat = $standUpValue`r`nCoopClientSeatSync = $clientSeatValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     # Test-only Papyrus helpers (scripts/Source/PulsarTest*.psc, compiled with the Creation
     # Kit's compiler into build/papyrus): into the test copies only, never the release.

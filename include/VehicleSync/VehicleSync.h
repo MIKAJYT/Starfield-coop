@@ -45,4 +45,7 @@ namespace Pulsar::VehicleSync
     // Client: refuse activating the vehicle the host is driving (formal entry
     // crashes the client). Shows a message (rate-limited). See RidePolicy.h.
     bool ShouldBlockClientEntry(RE::TESObjectREFR* a_ref);
+
+    // Test bot: the FURN ref a seated partner figure sits in here (0 = none).
+    std::uint32_t CloneSeatRefForTest();
 }

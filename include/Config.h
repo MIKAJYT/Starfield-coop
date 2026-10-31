@@ -219,6 +219,12 @@ namespace Pulsar
         // holds E (bot twin). ini: CoopLeaveHostSeat = 0
         bool        coopLeaveHostSeat = true;
 
+        // Client seat sync (owner's report 2026-10-31: the host saw the friend
+        // standing next to the pilot seat while the friend sat in a passenger chair):
+        // the client sends the seat it sits in and the host seats the client's figure
+        // there. 0 = only the host's seat is sent (bot twin). ini: CoopClientSeatSync = 0
+        bool        coopClientSeatSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

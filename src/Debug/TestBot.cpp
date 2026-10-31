@@ -21,6 +21,7 @@
 #include "Coop/TakeoffVote.h"
 #include "UI/HudMessage.h"
 #include "TransitSync/TransitSync.h"
+#include "VehicleSync/VehicleSync.h"
 #include "WorldSync/LootSync.h"
 #include "WorldSync/WorldSync.h"
 
@@ -2084,9 +2085,11 @@ namespace Pulsar::TestBot
                         });
                 }
             }
-            char c[64];
-            std::snprintf(c, sizeof(c), ",\"seated\":%s,\"seatId\":\"%08X\"", SnapShip(player).seated ? "true" : "false",
-                          s_seatId.load());
+            // partnerSeatId: the seat the partner's figure sits in on this side.
+            char c[96];
+            std::snprintf(c, sizeof(c), ",\"seated\":%s,\"seatId\":\"%08X\",\"partnerSeatId\":\"%08X\"",
+                          SnapShip(player).seated ? "true" : "false", s_seatId.load(),
+                          Pulsar::VehicleSync::CloneSeatRefForTest());
             j += c;
         }
         if (s_state.cfg.scenario == "dock") {
