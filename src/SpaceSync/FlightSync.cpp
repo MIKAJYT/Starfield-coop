@@ -3296,6 +3296,8 @@ namespace {
     static std::atomic<int>           g_standUpStep{ 0 };
     static std::atomic<std::uint64_t> g_standUpDueMs{ 0 };
     static std::atomic<std::uint32_t> g_standUpFurn{ 0 };
+    static std::atomic<int>           g_standUpTries{ 0 };
+    constexpr int                     kStandUpMaxTries = 6;
 
     // (g_postBridgeInputLockoutUntilMs hoisted up - see decl near g_isActivePilot.)
 
@@ -3404,6 +3406,7 @@ namespace {
         // Then stand up for real (TickStandUpAfterJoin): without it the client stays
         // in the host's pilot seat, on top of the host's figure, until it holds E.
         if (Pulsar::GetConfig().coopStandUpAfterJoin) {
+            g_standUpTries.store(0, std::memory_order_release);
             g_standUpDueMs.store(::GetTickCount64() + 1000, std::memory_order_release);
             g_standUpStep.store(1, std::memory_order_release);
         }
@@ -3416,9 +3419,10 @@ namespace {
     // host's figure (owner's report, run 20261031-143656). Every forced way out of
     // the seat broke the engine's state (see above), so do what the interact key
     // does: ask Papyrus which furniture the player uses, then activate it as the
-    // player through the engine Activate core. One try; if the player still sits,
-    // holding E works as before. Bot seat: seated after joining, standing 40 s
-    // later (run 20261031-145235); twin with CoopStandUpAfterJoin = 0 stays seated.
+    // player through the engine Activate core. Up to 6 tries (the engine refused
+    // the first one once, run 20261031-150736); then holding E works as before.
+    // Bot seat: seated after joining, standing 40 s later (run 20261031-145235);
+    // twin with CoopStandUpAfterJoin = 0 stays seated.
     //   step 1: query GetFurnitureUsing   step 2: activate   step 3: check
     static void TickStandUpAfterJoin()
     {
@@ -3449,9 +3453,18 @@ namespace {
             const std::uint32_t furn = g_standUpFurn.load(std::memory_order_acquire);
             auto* seat = furn ? RE::TESForm::LookupByID<RE::TESObjectREFR>(furn) : nullptr;
             const int r = seat ? Pulsar::GameCalls::ActivateAsPlayer(seat) : -2;
-            PLOG_INFO("[L.5] StandUp: activating the seat 0x{:08X} as the player: {}"sv, furn,
+            const int tries = g_standUpTries.fetch_add(1) + 1;
+            PLOG_INFO("[L.5] StandUp: activating the seat 0x{:08X} as the player (try {}): {}"sv, furn, tries,
                       r == 1 ? "activated" : r == 0 ? "refused" : r == -1 ? "fault" : "no seat");
-            if (r != 1) { g_standUpStep.store(0, std::memory_order_release); return; }
+            if (r != 1) {
+                // Refused right after the load at times (run 20261031-150736): try again.
+                if (r == 0 && tries < kStandUpMaxTries) {
+                    g_standUpDueMs.store(now + 5000, std::memory_order_release);
+                    return;   // stays at step 2 with the same seat
+                }
+                g_standUpStep.store(0, std::memory_order_release);
+                return;
+            }
             // The stand-up takes longer than 3 s: the check logged "still seated" at
             // 3 s while the player stood well before 40 s (run 20261031-145235).
             g_standUpDueMs.store(now + 10000, std::memory_order_release);
@@ -3460,7 +3473,13 @@ namespace {
         }
         if (step == 3) {
             const bool seated = SafeReadFurnHandle(player) != 0;
-            PLOG_INFO("[L.5] StandUp: {}"sv, seated ? "still seated 10 s after the activate - hold E to stand up" : "standing");
+            if (seated && g_standUpTries.load() < kStandUpMaxTries) {
+                PLOG_INFO("[L.5] StandUp: still seated 10 s after the activate - trying again"sv);
+                g_standUpDueMs.store(now + 1000, std::memory_order_release);
+                g_standUpStep.store(2, std::memory_order_release);
+                return;
+            }
+            PLOG_INFO("[L.5] StandUp: {}"sv, seated ? "still seated after all tries - hold E to stand up" : "standing");
             g_standUpStep.store(0, std::memory_order_release);
         }
     }

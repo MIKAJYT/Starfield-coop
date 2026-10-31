@@ -33,13 +33,13 @@ number here means the code for that milestone is in, not that the goal is met.
   (docked before joining needs no sync). Docking during a session, *tested with the owner
   docking by hand* (`ManualDock = 1`): the client's hatch is rewired, the client arrives
   in the same station cell and sees the host. No twin yet.
-- **The client no longer starts in the host's pilot seat** (`CoopStandUpAfterJoin`,
-  default 1). Joining while the host pilots put the client in the pilot seat, on top of
-  the host's figure, until it held E. After the post-load unseat it now asks Papyrus
-  which furniture it uses (`GetFurnitureUsing`) and activates it as the player through
-  the engine Activate core (new `GameCalls::ActivateAsPlayer`), as the interact key
-  does. *Bot-tested* (`seat`): seated after joining, standing 40 s later; twin stays
-  seated. A person has not yet checked that the stand-up looks and plays right.
+- **Client in the host's pilot seat: attempted, not fixed.** Joining while the host
+  pilots puts the client in the pilot seat, on top of the host's figure, until it holds
+  E. `CoopStandUpAfterJoin` (default 1) activates that seat as the player through the
+  engine Activate core (new `GameCalls::ActivateAsPlayer`), up to 6 tries. It stood the
+  client up in 1 of 3 bot `seat` runs; in the other two the engine refused every try,
+  likely because the host's figure already sits in that seat. Harmless when refused
+  (holding E still works).
 - Seen once: the host's game crashed during startup in a twin run (run
   20261031-121824: exception at PULSAR.dll+0x17549F, then Starfield.exe+0x22CEA90),
   before any bot code ran. Not reproduced; to trace with the PDB.

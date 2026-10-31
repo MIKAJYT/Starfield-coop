@@ -87,7 +87,7 @@ param(
     # (CoopDockSync=1).
     # -NoDockSync: twin.
     # seat: from a save where the host sits in the pilot seat, the client joins seated; 40 s
-    # after it is in the world it must stand (CoopStandUpAfterJoin=1). -NoStandUpAfterJoin: twin.
+    # after it is in the world (70 s) it must stand (CoopStandUpAfterJoin=1). -NoStandUpAfterJoin: twin.
     [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull", "dock", "seat")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
@@ -97,6 +97,8 @@ param(
     [switch]$NoShipHullSync,
     [switch]$NoDockSync,
     [switch]$NoStandUpAfterJoin,
+    # Keep both games open this many seconds after the result (a person looks).
+    [int]$HoldSec = 0,
     [switch]$NoAutoReconnect,
     [switch]$NoSharedWorldItems,
     [switch]$NoFriendlyFireGuard,
@@ -1096,7 +1098,7 @@ function Invoke-DockScore {
 }
 # ---- seat scenario ------------------------------------------------------------
 # The host sits in the pilot seat in the save, so the client loads in seated too
-# (on top of the host's figure). 40 s after the client is in the world and connected,
+# (on top of the host's figure). 70 s after the client is in the world and connected,
 # it must be standing.
 function Invoke-SeatScore {
     param($HostSamples, $ClientSamples, [bool]$Final)
@@ -1113,14 +1115,14 @@ function Invoke-SeatScore {
     }
     $t0 = [long]$in.wallMs
     $wasSeated = @($clientList | Where-Object { $_.seated }).Count -gt 0
-    $late = @($clientList | Where-Object { [long]$_.wallMs -ge $t0 + 40000 })
+    $late = @($clientList | Where-Object { [long]$_.wallMs -ge $t0 + 70000 })
     if ($late.Count -lt 3) {
-        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough client samples 40 s after joining") }
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough client samples 70 s after joining") }
         return $r
     }
-    $r.Details = "seat: client seated after joining: $wasSeated; 40 s later: seated=$($late[-1].seated)"
+    $r.Details = "seat: client seated after joining: $wasSeated; 70 s later: seated=$($late[-1].seated)"
     if (-not $wasSeated) { $r.Result = "ERROR"; $r.Reasons.Add("the client never sat (the save must have the host in a seat)"); return $r }
-    if ($late[-1].seated) { $r.Result = "FAIL"; $r.Reasons.Add("the client is still seated 40 s after joining") }
+    if ($late[-1].seated) { $r.Result = "FAIL"; $r.Reasons.Add("the client is still seated 70 s after joining") }
     else { $r.Result = "PASS" }
     return $r
 }
@@ -2159,7 +2161,12 @@ try {
             elseif (-not (Read-SharedLines $hostLog 'reply code accepted')) { $score.Result = "FAIL"; $score.Reasons.Add("the host did not accept this session's reply code from PULSAR_ReplyCodeIn.txt") }
             elseif (Test-Path -LiteralPath (Join-Path $Instances "$HostSlot\game\Data\SFSE\Plugins\PULSAR_ReplyCodeIn.txt")) { $score.Result = "FAIL"; $score.Reasons.Add("the host left PULSAR_ReplyCodeIn.txt in place") }
         }
-        if ($score.Result -ne "PENDING") { $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }; break }
+        if ($score.Result -ne "PENDING") {
+            $result = $score.Result; $why += $score.Reasons; if ($score.ContainsKey("Details")) { W $score.Details }
+            # -HoldSec: keep both games open after the result, so a person can look.
+            if ($HoldSec -gt 0) { W "result $result - holding the games open for $HoldSec s"; Start-Sleep -Seconds $HoldSec }
+            break
+        }
     }
 } catch {
     if ($_.Exception.Message -notin @("timeout", "measure-done")) { $why += $_.Exception.Message }
