@@ -66,8 +66,10 @@ param(
     # (CoopRestoreOwnCharacter=1). -NoRestoreOwnCharacter: twin.
     # damage: the host hits one NPC, the client another; each hit must show on the other
     # machine (CoopNpcHealthSync=1). -NoNpcHealthSync: twin.
-    # space: takeoff, the host moves its ship to The Eye and bridges its save; each bot lists
-    # the space around the ship and the lists must match. No twin yet (no fix yet).
+    # space: takeoff, the host moves its ship to The Eye and bridges its save; with
+    # CheckRefsFile both bots look up the host's station references, and the client must
+    # draw (3D) at least 90% as many as the host. Without it the census lists are compared.
+    # No fix and no twin yet: today the client draws none (station/POI divergence).
     # scene: the host starts a scene (its quest first); the client must play the same
     # scene within 10 s (CoopSceneSync=1). -NoSceneSync: twin.
     # quest: the host starts a stopped Akila quest; the client must start the same quest
@@ -802,6 +804,17 @@ function Invoke-SpaceScore {
     if (-not $hc -or -not $cc -or ($travelAt -eq 0 -and -not $Final -and $SpaceTravel)) {
         $r.Result = $(if ($Final) { "TIMEOUT" } else { "PENDING" })
         if ($Final) { $r.Reasons.Add("no space census from the " + $(if (-not $hc) { "host" } else { "client" }) + " after takeoff/travel") }
+        return $r
+    }
+    # The direct check, when both bots ran it: the host's station references drawn (3D)
+    # in the ship's cell on each side.
+    $hr = @($hostList | Where-Object { $_.PSObject.Properties["refCheck"] -and [long]$_.wallMs -ge $tCheck }) | Select-Object -Last 1
+    $cr = @($clientList | Where-Object { $_.PSObject.Properties["refCheck"] -and [long]$_.wallMs -ge $tCheck }) | Select-Object -Last 1
+    if ($hr -and $cr) {
+        $hd = [int]$hr.refCheck.has3DInCell; $cd = [int]$cr.refCheck.has3DInCell
+        $r.Details += "; station references drawn: host $hd of $($hr.refCheck.n) (cell $($hr.refCheck.shipCell)), client $cd (cell $($cr.refCheck.shipCell), $($cr.refCheck.exists) exist)"
+        if ($hd -lt 100) { $r.Result = "ERROR"; $r.Reasons.Add("the host draws only $hd of the station references - nothing to compare"); return $r }
+        if ($cd -lt [Math]::Floor(0.9 * $hd)) { $r.Result = "FAIL"; $r.Reasons.Add("the client draws $cd of the $hd station references the host draws") }
         return $r
     }
     $h = ConvertFrom-SpaceRefs $hc.space.refs; $c = ConvertFrom-SpaceRefs $cc.space.refs
