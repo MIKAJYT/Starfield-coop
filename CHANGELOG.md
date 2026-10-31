@@ -58,7 +58,7 @@ number here means the code for that milestone is in, not that the goal is met.
   seat (one SHOW was lost when the figure was re-seated); the figure is not seated into
   a seat the local player left less than 3 s ago; a seat already where the sender's is
   is no longer re-placed on every packet (that drive is for moving vehicles). *Checked
-  with screenshots from the client* (run 20261031-195405): the host sits in the pilot
+  with screenshots from the client* (run 20261031-195409): the host sits in the pilot
   seat, steady over four frames. *Watched by the owner.* Standing up and sitting down
   again not tested yet.
 - Open: the host's figure stands up a few seconds late on the client (the host reports
