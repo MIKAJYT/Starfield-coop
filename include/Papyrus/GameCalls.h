@@ -51,6 +51,10 @@ namespace Pulsar::GameCalls {
                              std::vector<RE::BSScript::Variable> a_args,
                              std::function<void(const RE::BSScript::Variable&)> a_onResult);
 
+    // Activate a_target as the player through the engine Activate core (REL::ID
+    // 63380), as the interact key does. 1 activated, 0 refused, -1 fault. Game thread.
+    int ActivateAsPlayer(RE::TESObjectREFR* a_target);
+
     // Every actor in the high process list (the ones near the player), SEH-guarded.
     void ForEachHighActor(const std::function<void(RE::Actor*)>& a_fn);
 

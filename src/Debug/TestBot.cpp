@@ -1924,6 +1924,7 @@ namespace Pulsar::TestBot
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
             s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" && s_state.cfg.scenario != "mission" &&
             s_state.cfg.scenario != "bridges" && s_state.cfg.scenario != "hull" && s_state.cfg.scenario != "dock" &&
+            s_state.cfg.scenario != "seat" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -2065,6 +2066,9 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "quest") {
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "seat") {
+            j += std::string(",\"seated\":") + (SnapShip(player).seated ? "true" : "false");
         }
         if (s_state.cfg.scenario == "dock") {
             j += ",\"dock\":{\"docked\":" + std::to_string(s_docked.load()) + ",\"dockedSinceWallMs\":" +

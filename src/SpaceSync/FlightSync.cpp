@@ -29,6 +29,7 @@
 
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
+#include "Papyrus/GameCalls.h"
 #include "SpaceSync/ShipCombatSync.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "WorldSync/WorldSync.h"
@@ -3291,6 +3292,11 @@ namespace {
     // while the engine is still completing post-load init.
     static std::atomic<bool> g_unseatInProgress{ false };
 
+    // Stand-up after joining seated (TickStandUpAfterJoin).
+    static std::atomic<int>           g_standUpStep{ 0 };
+    static std::atomic<std::uint64_t> g_standUpDueMs{ 0 };
+    static std::atomic<std::uint32_t> g_standUpFurn{ 0 };
+
     // (g_postBridgeInputLockoutUntilMs hoisted up - see decl near g_isActivePilot.)
 
     static void TickPostLoadUnseat()
@@ -3395,7 +3401,68 @@ namespace {
             "[L.7] FlightInput LOCKOUT armed for 8s (until tick {})"sv,
             lockoutEnd);
 
+        // Then stand up for real (TickStandUpAfterJoin): without it the client stays
+        // in the host's pilot seat, on top of the host's figure, until it holds E.
+        if (Pulsar::GetConfig().coopStandUpAfterJoin) {
+            g_standUpDueMs.store(::GetTickCount64() + 1000, std::memory_order_release);
+            g_standUpStep.store(1, std::memory_order_release);
+        }
+
         g_unseatInProgress.store(false, std::memory_order_release);
+    }
+
+    // Stand-up after joining seated (CoopStandUpAfterJoin). The client loads the
+    // host's save, so it sits where the host sat: the pilot seat, overlapping the
+    // host's figure (owner's report, run 20261031-143656). Every forced way out of
+    // the seat broke the engine's state (see above), so do what the interact key
+    // does: ask Papyrus which furniture the player uses, then activate it as the
+    // player through the engine Activate core. One try; if the player still sits,
+    // holding E works as before. Bot seat: seated after joining, standing 40 s
+    // later (run 20261031-145235); twin with CoopStandUpAfterJoin = 0 stays seated.
+    //   step 1: query GetFurnitureUsing   step 2: activate   step 3: check
+    static void TickStandUpAfterJoin()
+    {
+        const int step = g_standUpStep.load(std::memory_order_acquire);
+        if (step == 0) return;
+        const std::uint64_t now = ::GetTickCount64();
+        if (now < g_standUpDueMs.load(std::memory_order_acquire)) return;
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!player) { g_standUpStep.store(0, std::memory_order_release); return; }
+
+        if (step == 1) {
+            g_standUpStep.store(10, std::memory_order_release);   // waiting for the VM
+            auto* vm = Pulsar::GameCalls::VM();
+            auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::Actor*>(player));
+            const bool queued = vm && obj && Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetFurnitureUsing", {},
+                [](const RE::BSScript::Variable& a_v) {
+                    auto* ref = a_v.is<RE::BSScript::Object>() ? RE::BSScript::UnpackVariable<RE::TESObjectREFR>(a_v) : nullptr;
+                    g_standUpFurn.store(ref ? ref->formID : 0, std::memory_order_release);
+                    g_standUpStep.store(2, std::memory_order_release);
+                });
+            if (!queued) {
+                PLOG_INFO("[L.5] StandUp: GetFurnitureUsing not queued - hold E to stand up"sv);
+                g_standUpStep.store(0, std::memory_order_release);
+            }
+            return;
+        }
+        if (step == 2) {
+            const std::uint32_t furn = g_standUpFurn.load(std::memory_order_acquire);
+            auto* seat = furn ? RE::TESForm::LookupByID<RE::TESObjectREFR>(furn) : nullptr;
+            const int r = seat ? Pulsar::GameCalls::ActivateAsPlayer(seat) : -2;
+            PLOG_INFO("[L.5] StandUp: activating the seat 0x{:08X} as the player: {}"sv, furn,
+                      r == 1 ? "activated" : r == 0 ? "refused" : r == -1 ? "fault" : "no seat");
+            if (r != 1) { g_standUpStep.store(0, std::memory_order_release); return; }
+            // The stand-up takes longer than 3 s: the check logged "still seated" at
+            // 3 s while the player stood well before 40 s (run 20261031-145235).
+            g_standUpDueMs.store(now + 10000, std::memory_order_release);
+            g_standUpStep.store(3, std::memory_order_release);
+            return;
+        }
+        if (step == 3) {
+            const bool seated = SafeReadFurnHandle(player) != 0;
+            PLOG_INFO("[L.5] StandUp: {}"sv, seated ? "still seated 10 s after the activate - hold E to stand up" : "standing");
+            g_standUpStep.store(0, std::memory_order_release);
+        }
     }
 
     // L.7 early-release the post-bridge lockout when the local
@@ -4667,6 +4734,7 @@ void Tick()
         ApplyPendingCruise();
         TickPostCruiseResync();
         TickPostLoadUnseat();
+        TickStandUpAfterJoin();     // stand the client up out of the host's seat
         TickEarlyReleaseLockout();  // L.7 release lockout when user unseats
         TickCoPilotInvisibility();  // L.7 hide overlapping clone in pilot chair
         TickCruiseOrient();       // Phase 4 Step 11 - continuous orient sync @5Hz

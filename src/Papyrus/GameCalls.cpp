@@ -1,6 +1,7 @@
 ﻿#include "PCH.h"
 #include "Papyrus/GameCalls.h"
 
+#include <RE/P/PlayerCharacter.h>
 #include <RE/P/ProcessLists.h>
 
 #include <Windows.h>
@@ -110,6 +111,45 @@ namespace Pulsar::GameCalls {
         };
         RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new ResultCallback(std::move(a_onResult)));
         return a_vm->DispatchStaticCall(RE::BSFixedString(a_script), RE::BSFixedString(a_func), argFn, callback, 0);
+    }
+
+    namespace {
+        // Argument block of the engine Activate core (REL::ID 63380, the function
+        // Papyrus ObjectReference.Activate ends in; LootSync hooks it).
+        struct ActivateArgs
+        {
+            RE::TESObjectREFR* activator;
+            std::uint64_t      unused1;
+            std::uint64_t      unused2;
+            std::uint32_t      countOrFlag;
+            std::uint8_t       flag1c;   // abDefaultProcessingOnly
+            std::uint8_t       flag1d;
+            std::uint8_t       flag1e;
+            std::uint8_t       flag1f;
+        };
+        static_assert(sizeof(ActivateArgs) == 0x20);
+        using ActivateFn = bool(__fastcall*)(RE::TESObjectREFR*, ActivateArgs*);
+
+        int SafeActivate(ActivateFn a_fn, RE::TESObjectREFR* a_target, ActivateArgs* a_args) noexcept
+        {
+            __try {
+                return a_fn(a_target, a_args) ? 1 : 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return -1;
+            }
+        }
+    }
+
+    int ActivateAsPlayer(RE::TESObjectREFR* a_target)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!a_target || !player) return 0;
+        static const auto s_activate = reinterpret_cast<ActivateFn>(REL::Relocation<std::uintptr_t>{ REL::ID(63380) }.address());
+        ActivateArgs args{};
+        args.activator   = player;
+        args.countOrFlag = 1;
+        args.flag1d      = 1;
+        return SafeActivate(s_activate, a_target, &args);
     }
 
     void ForEachHighActor(const std::function<void(RE::Actor*)>& a_fn)
