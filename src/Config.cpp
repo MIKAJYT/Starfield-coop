@@ -405,11 +405,11 @@ namespace Pulsar
                 cfg.coopDockSync = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopDockSync = {}"sv, cfg.coopDockSync);
             }
-            else if (keyLower == "coopstandupafterjoin" || keyLower == "coop_stand_up_after_join") {
+            else if (keyLower == "coopleavehostseat" || keyLower == "coop_leave_host_seat") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopStandUpAfterJoin = (v == "1" || v == "true" || v == "yes" || v == "on");
-                PLOG_INFO("[PULSAR] Config: CoopStandUpAfterJoin = {}"sv, cfg.coopStandUpAfterJoin);
+                cfg.coopLeaveHostSeat = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopLeaveHostSeat = {}"sv, cfg.coopLeaveHostSeat);
             }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;

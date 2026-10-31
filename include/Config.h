@@ -212,11 +212,12 @@ namespace Pulsar
         // (DockSync). 0 = the client ignores them (bot twin). ini: CoopDockSync = 0
         bool        coopDockSync = true;
 
-        // Stand up after joining seated (owner's report: the client started in the
-        // host's pilot seat, on top of the host's figure): after the post-load unseat
-        // the client activates the seat it sits in, as the interact key does. 0 = it
-        // stays seated until the player holds E (bot twin). ini: CoopStandUpAfterJoin = 0
-        bool        coopStandUpAfterJoin = true;
+        // Leave the host's seat after joining (owner's report: the client started in
+        // the host's pilot seat, on top of the host's figure): after the post-load
+        // unseat the client snaps into a free passenger seat, else activates the seat
+        // it sits in as the interact key does. 0 = it stays seated until the player
+        // holds E (bot twin). ini: CoopLeaveHostSeat = 0
+        bool        coopLeaveHostSeat = true;
 
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is

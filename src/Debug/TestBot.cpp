@@ -2068,7 +2068,26 @@ namespace Pulsar::TestBot
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
         }
         if (s_state.cfg.scenario == "seat") {
-            j += std::string(",\"seated\":") + (SnapShip(player).seated ? "true" : "false");
+            // Which seat, from Papyrus GetFurnitureUsing every 2 s (the raw seat handle
+            // does not resolve, run 20261031-142744).
+            static std::atomic<std::uint32_t> s_seatId{ 0 };
+            static std::uint64_t s_seatPollMs = 0;
+            if (::GetTickCount64() - s_seatPollMs >= 2000) {
+                s_seatPollMs = ::GetTickCount64();
+                auto* vm = Pulsar::GameCalls::VM();
+                auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::Actor*>(player));
+                if (vm && obj) {
+                    Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetFurnitureUsing", {},
+                        [](const RE::BSScript::Variable& a_v) {
+                            auto* ref = a_v.is<RE::BSScript::Object>() ? RE::BSScript::UnpackVariable<RE::TESObjectREFR>(a_v) : nullptr;
+                            s_seatId.store(ref ? ref->formID : 0);
+                        });
+                }
+            }
+            char c[64];
+            std::snprintf(c, sizeof(c), ",\"seated\":%s,\"seatId\":\"%08X\"", SnapShip(player).seated ? "true" : "false",
+                          s_seatId.load());
+            j += c;
         }
         if (s_state.cfg.scenario == "dock") {
             j += ",\"dock\":{\"docked\":" + std::to_string(s_docked.load()) + ",\"dockedSinceWallMs\":" +

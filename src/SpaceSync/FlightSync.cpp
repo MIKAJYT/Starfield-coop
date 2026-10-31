@@ -3292,11 +3292,16 @@ namespace {
     // while the engine is still completing post-load init.
     static std::atomic<bool> g_unseatInProgress{ false };
 
-    // Stand-up after joining seated (TickStandUpAfterJoin).
+    // Leaving the host's seat after joining (TickStandUpAfterJoin).
     static std::atomic<int>           g_standUpStep{ 0 };
     static std::atomic<std::uint64_t> g_standUpDueMs{ 0 };
     static std::atomic<std::uint32_t> g_standUpFurn{ 0 };
+    static std::atomic<std::uint32_t> g_standUpTarget{ 0 };   // passenger seat snapped into
+    static std::atomic<std::uint32_t> g_standUpNow{ 0 };      // seat after the snap
     static std::atomic<int>           g_standUpTries{ 0 };
+    // The furniture handle the client loaded into (the host's pilot seat); the
+    // co-pilot clone hiding below applies only while it still sits there.
+    static std::atomic<std::uint32_t> g_joinSeatHandle{ 0 };
     constexpr int                     kStandUpMaxTries = 6;
 
     // (g_postBridgeInputLockoutUntilMs hoisted up - see decl near g_isActivePilot.)
@@ -3337,6 +3342,7 @@ namespace {
         }
 
         const std::uint32_t furnFormID = SafeReadFurnHandle(p);
+        g_joinSeatHandle.store(furnFormID, std::memory_order_release);
         if (furnFormID == 0) {
             PLOG_INFO("[L.5] Unseat: not seated post-load - skip"sv);
             g_unseatInProgress.store(false, std::memory_order_release);
@@ -3403,9 +3409,9 @@ namespace {
             "[L.7] FlightInput LOCKOUT armed for 8s (until tick {})"sv,
             lockoutEnd);
 
-        // Then stand up for real (TickStandUpAfterJoin): without it the client stays
+        // Then leave the seat for real (TickStandUpAfterJoin): without it the client stays
         // in the host's pilot seat, on top of the host's figure, until it holds E.
-        if (Pulsar::GetConfig().coopStandUpAfterJoin) {
+        if (Pulsar::GetConfig().coopLeaveHostSeat) {
             g_standUpTries.store(0, std::memory_order_release);
             g_standUpDueMs.store(::GetTickCount64() + 1000, std::memory_order_release);
             g_standUpStep.store(1, std::memory_order_release);
@@ -3414,16 +3420,92 @@ namespace {
         g_unseatInProgress.store(false, std::memory_order_release);
     }
 
-    // Stand-up after joining seated (CoopStandUpAfterJoin). The client loads the
+    // Leave the host's seat after joining (CoopLeaveHostSeat). The client loads the
     // host's save, so it sits where the host sat: the pilot seat, overlapping the
     // host's figure (owner's report, run 20261031-143656). Every forced way out of
-    // the seat broke the engine's state (see above), so do what the interact key
-    // does: ask Papyrus which furniture the player uses, then activate it as the
-    // player through the engine Activate core. Up to 6 tries (the engine refused
-    // the first one once, run 20261031-150736); then holding E works as before.
-    // Bot seat: seated after joining, standing 40 s later (run 20261031-145235);
-    // twin with CoopStandUpAfterJoin = 0 stays seated.
-    //   step 1: query GetFurnitureUsing   step 2: activate   step 3: check
+    // the seat broke the engine's state (see above). First choice: snap the player
+    // into a free passenger seat near it (Papyrus Actor.SnapIntoInteraction), as
+    // the partner rides along in the design. Fallback: activate the seat as the
+    // player, as the interact key does, up to 6 tries; that stood the client up in
+    // only 1 of 3 runs (runs 20261031-145235, -150736, -151717), likely because the
+    // host's figure sits in that seat too. Then holding E works as before.
+    //   1 query the seat   20 snap into a passenger seat   21-22 verify
+    //   2 activate (stand up)   3 check
+    namespace {
+        struct SeatSeen
+        {
+            RE::TESObjectREFR* ref;
+            float              dist;
+        };
+
+        // Furniture in a_cell within a_radius of (x,y,z), not a_skip; raw cell layout
+        // as TestBot's scans (references +0x80 size / +0x88 data, base +0x98).
+        int SafeCollectSeats(RE::TESObjectCELL* a_cell, const RE::TESObjectREFR* a_skip, float a_x, float a_y,
+                             float a_z, float a_radius, SeatSeen* a_out, int a_max) noexcept
+        {
+            int n = 0;
+            __try {
+                if (!a_cell) return 0;
+                auto* cb = reinterpret_cast<std::uint8_t*>(a_cell);
+                const std::uint32_t size = *reinterpret_cast<std::uint32_t*>(cb + 0x80);
+                auto** data = *reinterpret_cast<RE::TESObjectREFR***>(cb + 0x88);
+                if (!data || size == 0 || size > 20000) return 0;
+                for (std::uint32_t i = 0; i < size && n < a_max; ++i) {
+                    auto* ref = data[i];
+                    if (!ref || ref == a_skip) continue;
+                    auto* rb = reinterpret_cast<std::uint8_t*>(ref);
+                    auto* base = *reinterpret_cast<std::uint8_t**>(rb + 0x98);
+                    if (!base || *(base + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kFURN)) continue;
+                    const auto* loc = reinterpret_cast<const float*>(rb + 0x8C);
+                    const float dx = loc[0] - a_x, dy = loc[1] - a_y, dz = loc[2] - a_z;
+                    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    if (d <= a_radius) a_out[n++] = { ref, d };
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return n;
+        }
+
+        // A seat to ride in: furniture named like a seat, chair or bench (German
+        // test install and English), nearest to the seat the player is in. Unnamed
+        // furniture can be a workbench or a bed, so it is never picked.
+        RE::TESObjectREFR* FindPassengerSeat(RE::PlayerCharacter* a_player, RE::TESObjectREFR* a_current)
+        {
+            if (!a_player || !a_current) return nullptr;
+            SeatSeen seen[48];
+            const auto& at = a_current->data.location;
+            const int n = SafeCollectSeats(a_player->parentCell, a_current, at.x, at.y, at.z, 15.0f, seen, 48);
+            RE::TESObjectREFR* best = nullptr;
+            float bestD = 1e9f;
+            for (int i = 0; i < n; ++i) {
+                const char* name = seen[i].ref->GetDisplayFullName();
+                std::string low = name ? name : "";
+                for (auto& c : low) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+                const bool seatLike = !low.empty() &&
+                    (low.find("sitz") != std::string::npos || low.find("stuhl") != std::string::npos ||
+                     low.find("bank") != std::string::npos || low.find("seat") != std::string::npos ||
+                     low.find("chair") != std::string::npos || low.find("bench") != std::string::npos);
+                PLOG_INFO("[L.5] LeaveSeat: furniture 0x{:08X} '{}' {:.1f} m from the seat{}"sv, seen[i].ref->formID,
+                          name ? name : "", seen[i].dist, seatLike ? " (seat)" : "");
+                if (seatLike && seen[i].dist < bestD) { best = seen[i].ref; bestD = seen[i].dist; }
+            }
+            return best;
+        }
+
+        // Ask Papyrus which furniture the player uses; the formID lands in a_out
+        // and the step moves to a_nextStep.
+        bool QueryFurnitureUsing(RE::PlayerCharacter* a_player, std::atomic<std::uint32_t>* a_out, int a_nextStep)
+        {
+            auto* vm = Pulsar::GameCalls::VM();
+            auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::Actor*>(a_player));
+            return vm && obj && Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetFurnitureUsing", {},
+                [a_out, a_nextStep](const RE::BSScript::Variable& a_v) {
+                    auto* ref = a_v.is<RE::BSScript::Object>() ? RE::BSScript::UnpackVariable<RE::TESObjectREFR>(a_v) : nullptr;
+                    a_out->store(ref ? ref->formID : 0, std::memory_order_release);
+                    g_standUpStep.store(a_nextStep, std::memory_order_release);
+                });
+        }
+    }
+
     static void TickStandUpAfterJoin()
     {
         const int step = g_standUpStep.load(std::memory_order_acquire);
@@ -3435,18 +3517,45 @@ namespace {
 
         if (step == 1) {
             g_standUpStep.store(10, std::memory_order_release);   // waiting for the VM
-            auto* vm = Pulsar::GameCalls::VM();
-            auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::Actor*>(player));
-            const bool queued = vm && obj && Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetFurnitureUsing", {},
-                [](const RE::BSScript::Variable& a_v) {
-                    auto* ref = a_v.is<RE::BSScript::Object>() ? RE::BSScript::UnpackVariable<RE::TESObjectREFR>(a_v) : nullptr;
-                    g_standUpFurn.store(ref ? ref->formID : 0, std::memory_order_release);
-                    g_standUpStep.store(2, std::memory_order_release);
-                });
-            if (!queued) {
-                PLOG_INFO("[L.5] StandUp: GetFurnitureUsing not queued - hold E to stand up"sv);
+            if (!QueryFurnitureUsing(player, &g_standUpFurn, 20)) {
+                PLOG_INFO("[L.5] LeaveSeat: GetFurnitureUsing not queued - hold E to stand up"sv);
                 g_standUpStep.store(0, std::memory_order_release);
             }
+            return;
+        }
+        if (step == 20) {
+            const std::uint32_t furn = g_standUpFurn.load(std::memory_order_acquire);
+            auto* current = furn ? RE::TESForm::LookupByID<RE::TESObjectREFR>(furn) : nullptr;
+            auto* target = FindPassengerSeat(player, current);
+            auto* vm = Pulsar::GameCalls::VM();
+            auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::Actor*>(player));
+            const bool queued = target && vm && obj &&
+                Pulsar::GameCalls::CallMethod(vm, obj, "SnapIntoInteraction", { Pulsar::GameCalls::Arg(target) });
+            PLOG_INFO("[L.5] LeaveSeat: in seat 0x{:08X}; passenger seat 0x{:08X}, snap queued={}"sv, furn,
+                      target ? target->formID : 0u, queued);
+            if (!queued) {   // no seat to move to: stand up instead
+                g_standUpStep.store(2, std::memory_order_release);
+                return;
+            }
+            g_standUpTarget.store(target->formID, std::memory_order_release);
+            g_standUpDueMs.store(now + 5000, std::memory_order_release);
+            g_standUpStep.store(21, std::memory_order_release);
+            return;
+        }
+        if (step == 21) {
+            g_standUpStep.store(10, std::memory_order_release);
+            if (!QueryFurnitureUsing(player, &g_standUpNow, 22)) g_standUpStep.store(2, std::memory_order_release);
+            return;
+        }
+        if (step == 22) {
+            const std::uint32_t nowSeat = g_standUpNow.load(std::memory_order_acquire);
+            if (nowSeat == g_standUpTarget.load(std::memory_order_acquire)) {
+                PLOG_INFO("[L.5] LeaveSeat: moved into the passenger seat 0x{:08X}"sv, nowSeat);
+                g_standUpStep.store(0, std::memory_order_release);
+                return;
+            }
+            PLOG_INFO("[L.5] LeaveSeat: the snap did not take (now in 0x{:08X}) - standing up instead"sv, nowSeat);
+            g_standUpStep.store(2, std::memory_order_release);
             return;
         }
         if (step == 2) {
@@ -3454,10 +3563,9 @@ namespace {
             auto* seat = furn ? RE::TESForm::LookupByID<RE::TESObjectREFR>(furn) : nullptr;
             const int r = seat ? Pulsar::GameCalls::ActivateAsPlayer(seat) : -2;
             const int tries = g_standUpTries.fetch_add(1) + 1;
-            PLOG_INFO("[L.5] StandUp: activating the seat 0x{:08X} as the player (try {}): {}"sv, furn, tries,
+            PLOG_INFO("[L.5] LeaveSeat: activating the seat 0x{:08X} as the player (try {}): {}"sv, furn, tries,
                       r == 1 ? "activated" : r == 0 ? "refused" : r == -1 ? "fault" : "no seat");
             if (r != 1) {
-                // Refused right after the load at times (run 20261031-150736): try again.
                 if (r == 0 && tries < kStandUpMaxTries) {
                     g_standUpDueMs.store(now + 5000, std::memory_order_release);
                     return;   // stays at step 2 with the same seat
@@ -3465,8 +3573,7 @@ namespace {
                 g_standUpStep.store(0, std::memory_order_release);
                 return;
             }
-            // The stand-up takes longer than 3 s: the check logged "still seated" at
-            // 3 s while the player stood well before 40 s (run 20261031-145235).
+            // The stand-up takes longer than 3 s (run 20261031-145235).
             g_standUpDueMs.store(now + 10000, std::memory_order_release);
             g_standUpStep.store(3, std::memory_order_release);
             return;
@@ -3474,16 +3581,15 @@ namespace {
         if (step == 3) {
             const bool seated = SafeReadFurnHandle(player) != 0;
             if (seated && g_standUpTries.load() < kStandUpMaxTries) {
-                PLOG_INFO("[L.5] StandUp: still seated 10 s after the activate - trying again"sv);
+                PLOG_INFO("[L.5] LeaveSeat: still seated 10 s after the activate - trying again"sv);
                 g_standUpDueMs.store(now + 1000, std::memory_order_release);
                 g_standUpStep.store(2, std::memory_order_release);
                 return;
             }
-            PLOG_INFO("[L.5] StandUp: {}"sv, seated ? "still seated after all tries - hold E to stand up" : "standing");
+            PLOG_INFO("[L.5] LeaveSeat: {}"sv, seated ? "still seated after all tries - hold E to stand up" : "standing");
             g_standUpStep.store(0, std::memory_order_release);
         }
     }
-
     // L.7 early-release the post-bridge lockout when the local
     // player has unseated (furn handle = 0). Once unseated, the saved
     // pilot-binding state is naturally drained - no need to keep
@@ -3516,7 +3622,9 @@ namespace {
     // local player is seated AND the remote clone is in the same cell,
     // hide the clone - regardless of where the clone visually stands
     // (per user request 2026-05-07). When local stands up (furn handle
-    // becomes 0), clone becomes visible again.
+    // becomes 0), clone becomes visible again. Since the client moves into a
+    // passenger seat after joining (CoopLeaveHostSeat), only the seat it loaded
+    // into hides the clone (g_joinSeatHandle).
     //
     // Earlier revision compared furn handles for "both in same chair"
     // overlap, but VehicleSync's clone-into-furniture snap (snap=0 in
@@ -3577,7 +3685,18 @@ namespace {
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
         const std::uint32_t cloneCell =
             Pulsar::RemotePlayer::GetRemotePlayerManager().GetRemoteCellID();
-        const bool overlap = (playerCell != 0 && playerCell == cloneCell);
+        // Only while the local player still sits in the seat it loaded into (the
+        // host's pilot seat, where the two overlap). In a passenger seat the clone
+        // was hidden too, and the client never saw the host (owner's report, run
+        // 20261031-153952). Unknown join seat: the old rule (any seat hides).
+        // The host hid the client's figure the same way while piloting, although
+        // the client sat in a passenger seat (owner's report, run 20261031-155438):
+        // with CoopLeaveHostSeat the client never stays in the pilot seat, so the
+        // host shows it.
+        const std::uint32_t joinSeat = g_joinSeatHandle.load(std::memory_order_acquire);
+        const bool sameSeat = net.IsHost() ? !Pulsar::GetConfig().coopLeaveHostSeat
+                                           : (joinSeat == 0 || hPlayer == joinSeat);
+        const bool overlap = (playerCell != 0 && playerCell == cloneCell) && sameSeat;
 
         const bool wasCulled = g_cloneCulledForCoPilot.load(std::memory_order_acquire);
         if (overlap == wasCulled) return;
@@ -4753,7 +4872,7 @@ void Tick()
         ApplyPendingCruise();
         TickPostCruiseResync();
         TickPostLoadUnseat();
-        TickStandUpAfterJoin();     // stand the client up out of the host's seat
+        TickStandUpAfterJoin();     // move the client out of the host's seat
         TickEarlyReleaseLockout();  // L.7 release lockout when user unseats
         TickCoPilotInvisibility();  // L.7 hide overlapping clone in pilot chair
         TickCruiseOrient();       // Phase 4 Step 11 - continuous orient sync @5Hz

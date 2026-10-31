@@ -33,13 +33,20 @@ number here means the code for that milestone is in, not that the goal is met.
   (docked before joining needs no sync). Docking during a session, *tested with the owner
   docking by hand* (`ManualDock = 1`): the client's hatch is rewired, the client arrives
   in the same station cell and sees the host. No twin yet.
-- **Client in the host's pilot seat: attempted, not fixed.** Joining while the host
-  pilots puts the client in the pilot seat, on top of the host's figure, until it holds
-  E. `CoopStandUpAfterJoin` (default 1) activates that seat as the player through the
-  engine Activate core (new `GameCalls::ActivateAsPlayer`), up to 6 tries. It stood the
-  client up in 1 of 3 bot `seat` runs; in the other two the engine refused every try,
-  likely because the host's figure already sits in that seat. Harmless when refused
-  (holding E still works).
+- **The client no longer joins into the host's pilot seat** (`CoopLeaveHostSeat`,
+  default 1). Joining while the host pilots put the client in the pilot seat, on top of
+  the host's figure. Now it snaps into the nearest free seat or chair named like one
+  (Papyrus `SnapIntoInteraction`); without one it activates its seat as the interact key
+  does (new `GameCalls::ActivateAsPlayer`), which the engine refused in 2 of 3 runs.
+  *Bot-tested* (`seat`): from the pilot seat into a chair 4.7 m away; twin stays put.
+  *Watched by the owner*: the client sits in the chair and sees the host.
+- **Partner figure no longer hidden in passenger seats.** A rule from May hid the other
+  player's figure whenever the local player sat anywhere in the same cell (meant for
+  both in one pilot seat). The client now hides the host only in the seat it loaded
+  into; the host no longer hides the client. The host side is not watched yet.
+- Open: the host's figure stands up a few seconds late on the client (the host reports
+  the stand-up when its animation ends; the client then plays its own and respawns the
+  figure).
 - Seen once: the host's game crashed during startup in a twin run (run
   20261031-121824: exception at PULSAR.dll+0x17549F, then Starfield.exe+0x22CEA90),
   before any bot code ran. Not reproduced; to trace with the PDB.
