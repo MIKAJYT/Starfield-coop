@@ -96,6 +96,22 @@ namespace Pulsar::GameCalls {
         return a_vm->DispatchMethodCall(a_self, RE::BSFixedString(a_func), argFn, callback, 0);
     }
 
+    bool CallStaticForResult(RE::BSScript::IVirtualMachine* a_vm,
+                             const char* a_script,
+                             const char* a_func,
+                             std::vector<RE::BSScript::Variable> a_args,
+                             std::function<void(const RE::BSScript::Variable&)> a_onResult)
+    {
+        if (!a_vm) return false;
+        auto argFn = [&](RE::BSScrapArray<RE::BSScript::Variable>& args) -> bool {
+            args.resize(static_cast<std::uint32_t>(a_args.size()));
+            for (std::uint32_t i = 0; i < a_args.size(); ++i) args[i] = a_args[i];
+            return true;
+        };
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new ResultCallback(std::move(a_onResult)));
+        return a_vm->DispatchStaticCall(RE::BSFixedString(a_script), RE::BSFixedString(a_func), argFn, callback, 0);
+    }
+
     void ForEachHighActor(const std::function<void(RE::Actor*)>& a_fn)
     {
         auto* pl = RE::ProcessLists::GetSingleton();

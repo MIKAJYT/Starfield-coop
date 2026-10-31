@@ -22,6 +22,7 @@
 #include "SpaceSync/DockSync.h"
 
 #include "Cell3DAttach.h"
+#include "Config.h"
 #include "NASLog.h"
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
@@ -2736,6 +2737,12 @@ void OnPacketReceived(const std::uint8_t* a_data, std::size_t a_length)
     const std::uint8_t pktType = a_data[0];
 
     auto& net = Pulsar::Network::GetSingleton();
+    if (!Pulsar::GetConfig().coopDockSync) {
+        static std::atomic<bool> s_logged{ false };
+        if (!s_logged.exchange(true))
+            PLOG_INFO("[PULSAR] L.6 V3 DockSync: CoopDockSync = 0, the host's dock packets are ignored"sv);
+        return;
+    }
 
     // PKT_DOCK_FORWARD_BRIDGE_EXPECTED (0x8E) - Phase 3i v17/v18. Host signals
     // "save-bridge incoming, suppress your auto-teleport". Originally also
@@ -3451,6 +3458,11 @@ void Tick()
     } else {
         PLOG_WARN("[PULSAR] L.6 V3 DockSync apply: DispatchStaticCall returned false"sv);
     }
+}
+
+bool DockAppliedForTest()
+{
+    return g_dockAppliedLocally.load(std::memory_order_acquire);
 }
 
 }  // namespace Pulsar::DockSync

@@ -208,6 +208,10 @@ namespace Pulsar
         // its own hull (bot twin). ini: CoopShipHullSync = 0
         bool        coopShipHullSync = true;
 
+        // Dock sync (owner's spec, docking): the client applies the host's dock events
+        // (DockSync). 0 = the client ignores them (bot twin). ini: CoopDockSync = 0
+        bool        coopDockSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

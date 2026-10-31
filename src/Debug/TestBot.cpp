@@ -13,6 +13,7 @@
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "SpaceSync/DockSync.h"
 #include "SpaceSync/ShipCombatSync.h"
 #include "SpaceSync/SpaceSync.h"
 #include "SpaceSync/FastTravelSync.h"
@@ -165,6 +166,13 @@ namespace Pulsar::TestBot
             std::uint64_t missionRefreshMs = 0;
             std::uint64_t missionLoadAtPick = 0;        // last save load (tick) when picking
             std::uint64_t spaceSinceMs = 0;             // space (host): first tick in space
+            std::uint64_t dockAskedWallMs = 0;          // dock (host): InstantDock asked
+            std::string   dockInfo;
+            std::uint64_t dockPollMs = 0;               // dock: IsDocked polled every 2 s
+            std::uint64_t dockReadyMs = 0;              // dock: host docked / client hatch applied (tick)
+            std::uint64_t dockSettledMs = 0;            // dock: when this side was settled (tick)
+            bool          hatchUsed = false;            // dock: walked through the cockpit hatch
+            std::string   hatchInfo;
             std::uint64_t hullHitWallMs = 0;            // hull (host): the hit, then the repair
             std::uint64_t hullHitMs = 0;
             std::uint64_t hullRepairWallMs = 0;
@@ -445,6 +453,17 @@ namespace Pulsar::TestBot
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             return n;
+        }
+
+        // The ship the player is aboard, SEH-guarded (an unguarded GetSpaceship
+        // crashed the game at the main menu, run 20261031-101354).
+        RE::TESObjectREFR* SafeShipOf(RE::PlayerCharacter* a_player) noexcept
+        {
+            __try {
+                return a_player ? a_player->GetSpaceship(true) : nullptr;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return nullptr;
+            }
         }
 
         // Space: one reference's state in this game. Same raw layout as
@@ -1516,6 +1535,77 @@ namespace Pulsar::TestBot
             }
         }
 
+        // Dock: once settled, the host docks its ship at The Eye (InstantDock on
+        // TheEyeREF; start from a save in the ship near The Eye). Both poll IsDocked;
+        // the client's ship must report docked too (DockSync).
+        static std::atomic<int> s_docked{ -1 };              // -1 unknown, 0 no, 1 yes
+        static std::atomic<std::uint64_t> s_dockedSinceWallMs{ 0 };
+        static std::atomic<int> s_dockResult{ -1 };
+        if (s_state.cfg.scenario == "dock" && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            RE::TESObjectREFR* ship = SafeShipOf(player);
+            auto* vm = Pulsar::GameCalls::VM();
+            if (isHost && !s_state.acted) {
+                const auto eye = RefsByName("theeyeref", 4);
+                auto* dest = eye.empty() ? nullptr : RE::TESForm::LookupByID<RE::TESObjectREFR>(eye.front().first);
+                bool queued = false;
+                // InstantDock lives on SpaceshipReference, and the ship packs as an
+                // ObjectReference (the method call was refused, run 20261031-115627):
+                // the test script PulsarTestShip casts it.
+                if (ship && dest && vm) {
+                    queued = Pulsar::GameCalls::CallStaticForResult(vm, "PulsarTestShip", "Dock",
+                        { Pulsar::GameCalls::Arg(ship), Pulsar::GameCalls::Arg(dest) },
+                        [](const RE::BSScript::Variable& a_v) {
+                            const bool ok = a_v.is<bool>() && RE::BSScript::get<bool>(a_v);
+                            s_dockResult.store(ok ? 1 : 0);
+                            PLOG_INFO("[PULSAR] TestBot: dock: InstantDock returned {}"sv, ok);
+                        });
+                }
+                char msg[200];
+                std::snprintf(msg, sizeof(msg), "dock: found=%d ship %08X to %08X TheEyeREF queued=%d", dest && ship ? 1 : 0,
+                              ship ? ship->formID : 0u, dest ? dest->formID : 0u, queued ? 1 : 0);
+                s_state.actionInfo = msg;
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            }
+            // Then walk through the cockpit hatch, as a player does after docking:
+            // the host 10 s after its ship docked, the client 10 s after DockSync
+            // rewired its hatch into the station (or 60 s after settling when it
+            // never does: the twin shows where an unwired hatch leads).
+            if (!s_state.dockSettledMs) s_state.dockSettledMs = now;
+            const bool ready = isHost ? s_docked.load() == 1 : Pulsar::DockSync::DockAppliedForTest();
+            if (ready && !s_state.dockReadyMs) s_state.dockReadyMs = now;
+            const bool due = s_state.dockReadyMs ? now - s_state.dockReadyMs >= 10000
+                                                 : (!isHost && now - s_state.dockSettledMs >= 60000);
+            if (!s_state.hatchUsed && due) {
+                s_state.hatchUsed = true;
+                DoorScan scan;
+                constexpr int kMaxDoors = 8;
+                RE::TESObjectREFR* doors[kMaxDoors] = {};
+                float dist[kMaxDoors] = {};
+                const int found = SafeFindLoadDoors(player->parentCell, me.x, me.y, me.z, 60.0f, scan, doors, dist, kMaxDoors);
+                int result = 0, tried = 0;
+                for (; tried < found && result != 1; ++tried) result = SafeActivateAsPlayer(doors[tried], player);
+                char msg[200];
+                std::snprintf(msg, sizeof(msg), "hatch: %s, %d load doors, tried %d, activate=%d, from cell %08X",
+                              ready ? "after dock" : "never applied", found, tried, result, me.cellID);
+                s_state.hatchInfo = msg;
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: dock: {}"sv, s_state.hatchInfo);
+            }
+            if (ship && vm && now - s_state.dockPollMs >= 2000) {
+                s_state.dockPollMs = now;
+                Pulsar::GameCalls::CallStaticForResult(vm, "PulsarTestShip", "IsShipDocked", { Pulsar::GameCalls::Arg(ship) },
+                    [](const RE::BSScript::Variable& a_v) {
+                        const int d = (a_v.is<bool>() && RE::BSScript::get<bool>(a_v)) ? 1 : 0;
+                        if (d == 1 && s_docked.load() != 1) s_dockedSinceWallMs.store(WallMs());
+                        s_docked.store(d);
+                    });
+            }
+        }
+
         // Hull (host): once settled, hit the ship for 40% of its hull, and 30 s later
         // repair it back; the client's ship must follow both (ShipCombatSync).
         if (isHost && s_state.cfg.scenario == "hull" && cloneVisible && me.valid &&
@@ -1751,7 +1841,7 @@ namespace Pulsar::TestBot
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
             s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" && s_state.cfg.scenario != "mission" &&
-            s_state.cfg.scenario != "bridges" && s_state.cfg.scenario != "hull" &&
+            s_state.cfg.scenario != "bridges" && s_state.cfg.scenario != "hull" && s_state.cfg.scenario != "dock" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1893,6 +1983,12 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "quest") {
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "dock") {
+            j += ",\"dock\":{\"docked\":" + std::to_string(s_docked.load()) + ",\"dockedSinceWallMs\":" +
+                 std::to_string(s_dockedSinceWallMs.load()) + ",\"result\":" + std::to_string(s_dockResult.load()) +
+                 ",\"applied\":" + (Pulsar::DockSync::DockAppliedForTest() ? "true" : "false") +
+                 ",\"hatchInfo\":\"" + s_state.hatchInfo + "\"}";
         }
         if (s_state.cfg.scenario == "hull") {
             float cur = -1.0f, max = -1.0f;

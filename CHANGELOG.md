@@ -22,6 +22,16 @@ number here means the code for that milestone is in, not that the goal is met.
   existing mirror). *Bot-tested* (`hull`, from a save in the ship at The Eye): the host's
   ship is hit (408 -> 244.8 of 948) and repaired; the client's hull follows each within
   0.9 s. Twin with the switch off stays at 408.
+- **Docking: test groundwork, not proven yet.** `CoopDockSync` (default 1) switches the
+  client's handling of the host's dock. Bot `dock` docks the host at The Eye through a
+  test-only Papyrus script (`scripts/Source/PulsarTestShip.psc`, compiled with the
+  Creation Kit's compiler, copied into the test copies only) and a new static-call
+  helper (`GameCalls::CallStaticForResult`). The host docks and the client rewires its
+  hatch, but `InstantDock` skips the docking sequence that gives the hatch its
+  destination, so the walk into the station together is not tested yet.
+- Seen once: the host's game crashed during startup in a twin run (run
+  20261031-121824: exception at PULSAR.dll+0x17549F, then Starfield.exe+0x22CEA90),
+  before any bot code ran. Not reproduced; to trace with the PDB.
 
 ## Unreleased - full co-op spec, phase 5: world and quests
 

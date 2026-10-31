@@ -399,6 +399,12 @@ namespace Pulsar
                 cfg.coopShipHullSync = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopShipHullSync = {}"sv, cfg.coopShipHullSync);
             }
+            else if (keyLower == "coopdocksync" || keyLower == "coop_dock_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopDockSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopDockSync = {}"sv, cfg.coopDockSync);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

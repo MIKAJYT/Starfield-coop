@@ -77,4 +77,8 @@ namespace Pulsar::DockSync {
     // Idempotent - no-op if no apply on file.
     void OnRemoteTakeOff();
 
+    // Test bot (Debug/TestBot, scenario "dock"): the client applied the host's
+    // dock to its cockpit hatch (it now leads into the station).
+    bool DockAppliedForTest();
+
 }  // namespace Pulsar::DockSync

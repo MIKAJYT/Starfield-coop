@@ -44,6 +44,13 @@ namespace Pulsar::GameCalls {
                              std::vector<RE::BSScript::Variable> a_args,
                              std::function<void(const RE::BSScript::Variable&)> a_onResult);
 
+    // A global (static) script function, with its return value (on a VM thread).
+    bool CallStaticForResult(RE::BSScript::IVirtualMachine* a_vm,
+                             const char* a_script,
+                             const char* a_func,
+                             std::vector<RE::BSScript::Variable> a_args,
+                             std::function<void(const RE::BSScript::Variable&)> a_onResult);
+
     // Every actor in the high process list (the ones near the player), SEH-guarded.
     void ForEachHighActor(const std::function<void(RE::Actor*)>& a_fn);
 

@@ -82,13 +82,18 @@ param(
     # hull: in space (start from a save in a ship), the host hits its ship for 40% and 30 s
     # later repairs it; the client's hull must follow each within 5 s (CoopShipHullSync=1).
     # -NoShipHullSync: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull")][string]$Scenario = "follow",
+    # dock: near The Eye (a save in the ship there), the host docks with InstantDock; then
+    # both walk through the cockpit hatch and must end in the same station cell
+    # (CoopDockSync=1).
+    # -NoDockSync: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull", "dock")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
     [switch]$NoSceneSync,
     [switch]$NoQuestStartSync,
     [switch]$NoMissionBridge,
     [switch]$NoShipHullSync,
+    [switch]$NoDockSync,
     [switch]$NoAutoReconnect,
     [switch]$NoSharedWorldItems,
     [switch]$NoFriendlyFireGuard,
@@ -1042,6 +1047,50 @@ function Invoke-HullScore {
     return $r
 }
 
+# ---- dock scenario ------------------------------------------------------------
+# Both players start in the host's ship near The Eye. The host docks (InstantDock);
+# both poll IsDocked. The host must dock; the client's ship must report docked
+# within 30 s of the host's.
+function Invoke-DockScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["dock"] }); $clientList = @($ClientSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["dock"] })
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no dock state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never docked") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^dock: found=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not dock: $($act.actionInfo)"); return $r }
+    $t0 = [long]$act.actedAtWallMs; $shipCell = $act.playerCell
+    $hd = @($hostList | Where-Object { [int]$_.dock.docked -eq 1 }) | Select-Object -First 1
+    if (-not $hd) {
+        if ($Final -or [long]$hostList[-1].wallMs -gt $t0 + 30000) { $r.Result = "ERROR"; $r.Reasons.Add("the host's ship never reported docked (InstantDock result $($hostList[-1].dock.result))") }
+        return $r
+    }
+    # Then both walk through the cockpit hatch: the host must leave the ship, the client
+    # must arrive in the host's cell.
+    $hh = @($hostList | Where-Object { $_.dock.hatchInfo }) | Select-Object -First 1
+    $ch = @($clientList | Where-Object { $_.dock.hatchInfo }) | Select-Object -First 1
+    if (-not $hh -or -not $ch) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the " + $(if (-not $hh) { "host" } else { "client" }) + " never used the cockpit hatch") }
+        return $r
+    }
+    $hostLate = @($hostList | Where-Object { [long]$_.wallMs -ge [long]$hh.wallMs + 20000 }) | Select-Object -Last 1
+    $clientLate = @($clientList | Where-Object { [long]$_.wallMs -ge [long]$ch.wallMs + 20000 }) | Select-Object -Last 1
+    if (-not $hostLate -or -not $clientLate) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("not enough samples 20 s after the hatch") }
+        return $r
+    }
+    $r.Details = "dock: $($act.actionInfo); host docked at +$([long]$hd.dock.dockedSinceWallMs - $t0) ms; client hatch applied: $($clientLate.dock.applied); host $($hh.dock.hatchInfo) -> cell $($hostLate.playerCell); client $($ch.dock.hatchInfo) -> cell $($clientLate.playerCell)"
+    if ($hostLate.playerCell -eq $shipCell) { $r.Result = "ERROR"; $r.Reasons.Add("the host's hatch did not lead off the ship (still in $shipCell)"); return $r }
+    if ($clientLate.playerCell -eq $hostLate.playerCell) { $r.Result = "PASS" }
+    else { $r.Result = "FAIL"; $r.Reasons.Add("the client ended in cell $($clientLate.playerCell), the host in $($hostLate.playerCell)") }
+    return $r
+}
 # ---- takeoff scenario ---------------------------------------------------------
 # Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
 # sits in the pilot seat, opens the takeoff menu and asks for the launch. The
@@ -1346,7 +1395,24 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
-function New-HullRun([bool]$acts = $true, [bool]$hits = $true, [bool]$followsHit = $true, [bool]$repairs = $true, [bool]$followsRepair = $true) {
+function New-DockRun([bool]$acts = $true, [bool]$hostDocks = $true, [bool]$hostLeaves = $true, [string]$clientCell = "0000E1E1") {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $actAt = $t0 + 10000; $hDock = $actAt + 2000; $hHatch = $hDock + 10000; $cHatch = $hDock + 12000
+    for ($i = 0; $i -lt 90; $i++) {
+        $t = $t0 + $i * 1000
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $t -ge $actAt) $(if ($acts) { $actAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { "dock: found=1 ship 0001ABCD to 00012894 TheEyeREF queued=1" } else { "" })
+        $hd = $acts -and $hostDocks -and $t -ge $hDock
+        $hUsed = $hd -and $t -ge $hHatch
+        $hs | Add-Member playerCell $(if ($hUsed -and $hostLeaves) { "0000E1E1" } else { "032928FE" })
+        $hs | Add-Member dock ([pscustomobject]@{ docked = $(if ($hd) { 1 } else { 0 }); dockedSinceWallMs = $(if ($hd) { $hDock } else { 0 }); result = 1; applied = $false; hatchInfo = $(if ($hUsed) { "hatch: after dock, 1 load doors, tried 1, activate=1, from cell 032928FE" } else { "" }) })
+        $cUsed = $hd -and $t -ge $cHatch
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member playerCell $(if ($cUsed) { $clientCell } else { "032928FE" })
+        $cs | Add-Member dock ([pscustomobject]@{ docked = 0; dockedSinceWallMs = 0; result = -1; applied = $hd; hatchInfo = $(if ($cUsed) { "hatch: after dock, 1 load doors, tried 1, activate=1, from cell 032928FE" } else { "" }) })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}function New-HullRun([bool]$acts = $true, [bool]$hits = $true, [bool]$followsHit = $true, [bool]$repairs = $true, [bool]$followsRepair = $true) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000; $hitAt = $t0 + 10000; $repAt = $hitAt + 30000
     for ($i = 0; $i -lt 60; $i++) {
         $t = $t0 + $i * 1000
@@ -1607,12 +1673,18 @@ function Invoke-ScorerSelfTest {
         @{ Name = "hull: repair not shown";  Run = (New-HullRun -followsRepair $false); Expect = "FAIL";   Hull = $true },
         @{ Name = "hull: hit did nothing";   Run = (New-HullRun -hits $false);         Expect = "ERROR";   Hull = $true },
         @{ Name = "hull: never repaired";    Run = (New-HullRun -repairs $false);      Expect = "ERROR";   Hull = $true },
-        @{ Name = "hull: never hit";         Run = (New-HullRun -acts $false);         Expect = "TIMEOUT"; Hull = $true }
+        @{ Name = "hull: never hit";         Run = (New-HullRun -acts $false);         Expect = "TIMEOUT"; Hull = $true },
+        @{ Name = "dock: both into station"; Run = (New-DockRun);                      Expect = "PASS";    Dock = $true },
+        @{ Name = "dock: client elsewhere";  Run = (New-DockRun -clientCell "032928FE"); Expect = "FAIL";  Dock = $true },
+        @{ Name = "dock: host hatch failed"; Run = (New-DockRun -hostLeaves $false);   Expect = "ERROR";   Dock = $true },
+        @{ Name = "dock: host never docked"; Run = (New-DockRun -hostDocks $false);    Expect = "ERROR";   Dock = $true },
+        @{ Name = "dock: never acted";       Run = (New-DockRun -acts $false);         Expect = "TIMEOUT"; Dock = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Dock")) { Invoke-DockScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Hull")) { Invoke-HullScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Bridges")) { Invoke-BridgesScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Mission")) { Invoke-MissionScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
@@ -1727,8 +1799,14 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $questStartValue = if ($NoQuestStartSync) { 0 } else { 1 }
     $missionBridgeValue = if ($NoMissionBridge) { 0 } else { 1 }
     $hullSyncValue = if ($NoShipHullSync) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $dockSyncValue = if ($NoDockSync) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    # Test-only Papyrus helpers (scripts/Source/PulsarTest*.psc, compiled with the Creation
+    # Kit's compiler into build/papyrus): into the test copies only, never the release.
+    foreach ($pex in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "..\..\build\papyrus") -Filter 'PulsarTest*.pex' -ErrorAction SilentlyContinue) {
+        Copy-Item -LiteralPath $pex.FullName -Destination (Join-Path $plugins "..\..\Scripts\$($pex.Name)") -Force
+    }
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
     if (-not $NoLowMemory) {
@@ -1938,6 +2016,7 @@ try {
                  elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "dock") { Invoke-DockScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "hull") { Invoke-HullScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "bridges") { Invoke-BridgesScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "mission") { Invoke-MissionScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
