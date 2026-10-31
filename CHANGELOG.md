@@ -28,7 +28,9 @@ number here means the code for that milestone is in, not that the goal is met.
   Creation Kit's compiler, copied into the test copies only) and a new static-call
   helper (`GameCalls::CallStaticForResult`). The host docks and the client rewires its
   hatch, but `InstantDock` skips the docking sequence that gives the hatch its
-  destination, so the walk into the station together is not tested yet.
+  destination, so docking during a session is not proven yet. *Bot-tested* from a save
+  the owner made docked at The Eye: both players walk through the cockpit hatch into the
+  same station cell; the twin passes too (docked before joining needs no sync).
 - Seen once: the host's game crashed during startup in a twin run (run
   20261031-121824: exception at PULSAR.dll+0x17549F, then Starfield.exe+0x22CEA90),
   before any bot code ran. Not reproduced; to trace with the PDB.

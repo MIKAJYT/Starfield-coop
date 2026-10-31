@@ -1541,11 +1541,23 @@ namespace Pulsar::TestBot
         static std::atomic<int> s_docked{ -1 };              // -1 unknown, 0 no, 1 yes
         static std::atomic<std::uint64_t> s_dockedSinceWallMs{ 0 };
         static std::atomic<int> s_dockResult{ -1 };
-        if (s_state.cfg.scenario == "dock" && cloneVisible && me.valid &&
-            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+        // Once settled it keeps running: after the host walks into the station its
+        // figure leaves the client's view (run 20261031-125357), and the client must
+        // still walk through its own hatch.
+        if (s_state.cfg.scenario == "dock" && me.valid &&
+            (s_state.dockSettledMs || (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
             RE::TESObjectREFR* ship = SafeShipOf(player);
             auto* vm = Pulsar::GameCalls::VM();
-            if (isHost && !s_state.acted) {
+            if (isHost && !s_state.acted && s_docked.load() == 1) {
+                // A save made docked (the docking sequence wired the hatch): no dock call.
+                s_state.actionInfo = "dock: found=1 already docked in the save, no InstantDock";
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+                s_dockedSinceWallMs.store(WallMs());
+                Trace(s_state.actionInfo.c_str());
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            }
+            if (isHost && !s_state.acted && s_docked.load() == 0) {
                 const auto eye = RefsByName("theeyeref", 4);
                 auto* dest = eye.empty() ? nullptr : RE::TESForm::LookupByID<RE::TESObjectREFR>(eye.front().first);
                 bool queued = false;
