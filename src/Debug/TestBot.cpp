@@ -470,6 +470,50 @@ namespace Pulsar::TestBot
             return s;
         }
 
+        // The host's station references (CheckRefsFile, from a host census at The
+        // Eye), looked up here when a_fresh: do they exist, sit in the ship's space
+        // cell, have 3D? Answers whether the station is really missing or only absent
+        // from the cell's reference list. Returns the last result as a JSON member.
+        std::string RefCheckJson(RE::PlayerCharacter* a_player, bool a_fresh)
+        {
+            static std::vector<std::uint32_t> s_checkIds;
+            static bool s_checkLoaded = false;
+            static std::string s_check;
+            if (!s_checkLoaded && !s_state.cfg.checkRefsFile.empty()) {
+                s_checkLoaded = true;
+                std::ifstream in(s_state.cfg.checkRefsFile);
+                std::string line;
+                while (std::getline(in, line)) {
+                    if (line.size() >= 8) s_checkIds.push_back(static_cast<std::uint32_t>(std::stoul(line.substr(0, 8), nullptr, 16)));
+                }
+                PLOG_INFO("[PULSAR] TestBot: {} references to check"sv, s_checkIds.size());
+            }
+            // The ship's cell through the SEH-guarded census (no references kept):
+            // GetSpaceship outside it crashed the game at the main menu (run
+            // 20261031-101354, access violation in Starfield.exe+0x2116846).
+            std::uint32_t shipCell = 0;
+            if (a_fresh && !s_checkIds.empty()) SafeSpaceCensus(a_player, shipCell, nullptr, 0);
+            if (a_fresh && shipCell) {
+                int exists = 0, inCell = 0, has3D = 0, has3DInCell = 0, disabled = 0;
+                std::uint32_t otherCell = 0;
+                for (const auto id : s_checkIds) {
+                    const RefStatus st = SafeRefStatus(id);
+                    if (!st.exists) continue;
+                    ++exists;
+                    if (st.disabled) ++disabled;
+                    if (st.has3D) ++has3D;
+                    if (st.cell == shipCell) { ++inCell; if (st.has3D) ++has3DInCell; }
+                    else if (!otherCell) otherCell = st.cell;
+                }
+                char c[260];
+                std::snprintf(c, sizeof(c),
+                              ",\"refCheck\":{\"n\":%zu,\"shipCell\":\"%08X\",\"exists\":%d,\"inCell\":%d,\"has3D\":%d,\"has3DInCell\":%d,\"disabled\":%d,\"otherCell\":\"%08X\"}",
+                              s_checkIds.size(), shipCell, exists, inCell, has3D, has3DInCell, disabled, otherCell);
+                s_check = c;
+            }
+            return s_check;
+        }
+
         // References whose editor ID contains a_hint (lower case), Starfield.esm IDs,
         // at most a_max, with their names. Reference editor IDs are kept at runtime
         // (EventTrace names MariaStarrettREF).
@@ -1868,47 +1912,15 @@ namespace Pulsar::TestBot
                 }
             }
             j += fresh ? s_census : s_summary;
-
-            // The host's station references (CheckRefsFile, from a host census at The
-            // Eye), looked up here every 10 s: do they exist, sit in the ship's space
-            // cell, have 3D? Answers whether the station is really missing on the client
-            // or only absent from the cell's reference list.
-            static std::vector<std::uint32_t> s_checkIds;
-            static bool s_checkLoaded = false;
-            static std::string s_check;
-            if (!s_checkLoaded && !s_state.cfg.checkRefsFile.empty()) {
-                s_checkLoaded = true;
-                std::ifstream in(s_state.cfg.checkRefsFile);
-                std::string line;
-                while (std::getline(in, line)) {
-                    if (line.size() >= 8) s_checkIds.push_back(static_cast<std::uint32_t>(std::stoul(line.substr(0, 8), nullptr, 16)));
-                }
-                PLOG_INFO("[PULSAR] TestBot: space: {} references to check"sv, s_checkIds.size());
-            }
-            // The ship's cell through the SEH-guarded census (no references kept):
-            // GetSpaceship outside it crashed the game at the main menu (run
-            // 20261031-101354, access violation in Starfield.exe+0x2116846).
-            std::uint32_t shipCell = 0;
-            if (fresh && !s_checkIds.empty()) SafeSpaceCensus(player, shipCell, nullptr, 0);
-            if (fresh && shipCell) {
-                int exists = 0, inCell = 0, has3D = 0, has3DInCell = 0, disabled = 0;
-                std::uint32_t otherCell = 0;
-                for (const auto id : s_checkIds) {
-                    const RefStatus st = SafeRefStatus(id);
-                    if (!st.exists) continue;
-                    ++exists;
-                    if (st.disabled) ++disabled;
-                    if (st.has3D) ++has3D;
-                    if (st.cell == shipCell) { ++inCell; if (st.has3D) ++has3DInCell; }
-                    else if (!otherCell) otherCell = st.cell;
-                }
-                char c[260];
-                std::snprintf(c, sizeof(c),
-                              ",\"refCheck\":{\"n\":%zu,\"shipCell\":\"%08X\",\"exists\":%d,\"inCell\":%d,\"has3D\":%d,\"has3DInCell\":%d,\"disabled\":%d,\"otherCell\":\"%08X\"}",
-                              s_checkIds.size(), shipCell, exists, inCell, has3D, has3DInCell, disabled, otherCell);
-                s_check = c;
-            }
-            j += s_check;
+            j += RefCheckJson(player, fresh);
+        } else if (!s_state.cfg.checkRefsFile.empty()) {
+            // Any other scenario with CheckRefsFile (a session started from a save at
+            // a station): the same check on its own 10 s timer.
+            static std::uint64_t s_refCheckAt = 0;
+            const std::uint64_t t = ::GetTickCount64();
+            const bool fresh = t - s_refCheckAt >= 10000;
+            if (fresh) s_refCheckAt = t;
+            j += RefCheckJson(player, fresh);
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];

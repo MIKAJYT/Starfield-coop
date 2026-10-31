@@ -91,8 +91,12 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
    57 when it loads the host's save; a direct lookup of the host's 4096 station IDs finds
    55 on the client, none with 3D, so the station is not drawn). Left: the fix. Moving the
    client's ship out of the cell and back crashes it (stack overflow on the loading screen
-   it opens). Next: find out whether the host loading its own save at the station also
-   loses it (the engine) or only a client loading the host's save (PULSAR's load path). The Creation Kit's base scripts (Tools/ContentResources.zip)
+   it opens). Not PULSAR's load path: a session started from the host's save at The Eye
+   (run 20261031-110120) shows the station missing on the host too after a plain load
+   from the main menu (55 references, none drawn). But that save was made after the bot's
+   `MoveTo`, not a real star-map jump, so the game may not count the ship as arrived: the
+   missing station may be a side effect of the test. Needed: a save made at a station
+   after a real jump (a player saves there), loaded the same way. The Creation Kit's base scripts (Tools/ContentResources.zip)
    are extracted to instances/papyrus-base for script signatures and compiling.
 6. **Ships:** ship position sync, docking, crew roles (pilot, gunner, engineer), repair.
 7. **Stability:** crash dumps and reports, Community Patch test, launcher join codes.
