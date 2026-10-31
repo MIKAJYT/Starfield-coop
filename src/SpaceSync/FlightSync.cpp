@@ -3474,6 +3474,7 @@ namespace {
             SeatSeen seen[48];
             const auto& at = a_current->data.location;
             const int n = SafeCollectSeats(a_player->parentCell, a_current, at.x, at.y, at.z, 15.0f, seen, 48);
+            PLOG_INFO("[L.5] LeaveSeat: {} furniture within 15 m"sv, n);
             RE::TESObjectREFR* best = nullptr;
             float bestD = 1e9f;
             for (int i = 0; i < n; ++i) {
@@ -3516,6 +3517,7 @@ namespace {
         if (!player) { g_standUpStep.store(0, std::memory_order_release); return; }
 
         if (step == 1) {
+            PLOG_INFO("[L.5] LeaveSeat: step 1 - asking Papyrus for the seat"sv);
             g_standUpStep.store(10, std::memory_order_release);   // waiting for the VM
             if (!QueryFurnitureUsing(player, &g_standUpFurn, 20)) {
                 PLOG_INFO("[L.5] LeaveSeat: GetFurnitureUsing not queued - hold E to stand up"sv);
@@ -3525,8 +3527,10 @@ namespace {
         }
         if (step == 20) {
             const std::uint32_t furn = g_standUpFurn.load(std::memory_order_acquire);
+            PLOG_INFO("[L.5] LeaveSeat: step 20 - in seat 0x{:08X}, looking for a passenger seat"sv, furn);
             auto* current = furn ? RE::TESForm::LookupByID<RE::TESObjectREFR>(furn) : nullptr;
             auto* target = FindPassengerSeat(player, current);
+            PLOG_INFO("[L.5] LeaveSeat: step 20 - seat scan done, snapping"sv);
             auto* vm = Pulsar::GameCalls::VM();
             auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::Actor*>(player));
             const bool queued = target && vm && obj &&
@@ -3543,6 +3547,7 @@ namespace {
             return;
         }
         if (step == 21) {
+            PLOG_INFO("[L.5] LeaveSeat: step 21 - checking the seat after the snap"sv);
             g_standUpStep.store(10, std::memory_order_release);
             if (!QueryFurnitureUsing(player, &g_standUpNow, 22)) g_standUpStep.store(2, std::memory_order_release);
             return;
@@ -3560,6 +3565,7 @@ namespace {
         }
         if (step == 2) {
             const std::uint32_t furn = g_standUpFurn.load(std::memory_order_acquire);
+            PLOG_INFO("[L.5] LeaveSeat: step 2 - activating the seat 0x{:08X}"sv, furn);
             auto* seat = furn ? RE::TESForm::LookupByID<RE::TESObjectREFR>(furn) : nullptr;
             const int r = seat ? Pulsar::GameCalls::ActivateAsPlayer(seat) : -2;
             const int tries = g_standUpTries.fetch_add(1) + 1;
