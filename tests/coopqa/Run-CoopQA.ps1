@@ -66,7 +66,8 @@ param(
     # (CoopRestoreOwnCharacter=1). -NoRestoreOwnCharacter: twin.
     # damage: the host hits one NPC, the client another; each hit must show on the other
     # machine (CoopNpcHealthSync=1). -NoNpcHealthSync: twin.
-    # space: takeoff, then each bot lists the space around the ship; the lists must match.
+    # space: takeoff, the host moves its ship to The Eye and bridges its save; each bot lists
+    # the space around the ship and the lists must match. No twin yet (no fix yet).
     # scene: the host starts a scene (its quest first); the client must play the same
     # scene within 10 s (CoopSceneSync=1). -NoSceneSync: twin.
     # quest: the host starts a stopped Akila quest; the client must start the same quest
@@ -781,17 +782,24 @@ function ConvertFrom-SpaceRefs {
 }
 
 function Invoke-SpaceScore {
-    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @())
+    param($HostSamples, $ClientSamples, [bool]$Final, [string[]]$ClientDecisions = @(), [bool]$SpaceTravel = $false)
     $r = Invoke-TakeoffScore -HostSamples $HostSamples -ClientSamples $ClientSamples -Final $Final -ClientDecisions $ClientDecisions
     if ($r.Result -ne "PASS") { return $r }
     $hostList = @($HostSamples | Sort-Object wallMs); $clientList = @($ClientSamples | Sort-Object wallMs)
     $space = @($hostList | Where-Object { $_.ship.inSpace }) | Select-Object -First 1
-    $tCheck = [long]$space.wallMs + 40000
+    # Phase 2: 30 s after reaching space the host moves its ship next to a station
+    # and bridges its save, as an arrival does; compare 150 s after the move (the
+    # orbit right after takeoff is empty).
+    $trav = @($hostList | Where-Object { $_.PSObject.Properties["travelInfo"] -and $_.travelInfo }) | Select-Object -Last 1
+    $travelAt = [long](@($hostList | ForEach-Object { if ($_.space -and $_.space.PSObject.Properties["travelAtWallMs"]) { [long]$_.space.travelAtWallMs } else { 0 } }) + 0 | Measure-Object -Maximum).Maximum
+    if ($trav) { $r.Details += "; $($trav.travelInfo)" }
+    if ($trav -and $trav.travelInfo -match 'queued=0') { $r.Result = "ERROR"; $r.Reasons.Add("the host bot could not move the ship: $($trav.travelInfo)"); return $r }
+    $tCheck = if ($travelAt -gt 0) { [long]$travelAt + 150000 } else { [long]$space.wallMs + 40000 }
     $hc = @($hostList | Where-Object { $_.space -and [long]$_.space.atWallMs -ge $tCheck }) | Select-Object -Last 1
     $cc = @($clientList | Where-Object { $_.space -and [long]$_.space.atWallMs -ge $tCheck }) | Select-Object -Last 1
-    if (-not $hc -or -not $cc) {
+    if (-not $hc -or -not $cc -or ($travelAt -eq 0 -and -not $Final -and $SpaceTravel)) {
         $r.Result = $(if ($Final) { "TIMEOUT" } else { "PENDING" })
-        if ($Final) { $r.Reasons.Add("no space census from the " + $(if (-not $hc) { "host" } else { "client" }) + " 40 s after takeoff") }
+        if ($Final) { $r.Reasons.Add("no space census from the " + $(if (-not $hc) { "host" } else { "client" }) + " after takeoff/travel") }
         return $r
     }
     $h = ConvertFrom-SpaceRefs $hc.space.refs; $c = ConvertFrom-SpaceRefs $cc.space.refs
@@ -803,6 +811,9 @@ function Invoke-SpaceScore {
     $extraD = @($dd | Where-Object { $_.SideIndicator -eq "=>" } | ForEach-Object { $_.InputObject })
     $show = { param($ids, $list) ($ids | Select-Object -First 8 | ForEach-Object { $id = $_; $e = $list | Where-Object { $_.id -eq $id -or $_.base -eq $id } | Select-Object -First 1; if ($e) { "$($e.id)/$($e.base)/t$($e.type)@$($e.km)km" } else { $id } }) -join ", " }
     $r.Details += "; space census: host cell $($hc.space.cell) $($h.Count) refs ($($hS.Count) save-file, $($hD.Count) runtime), client cell $($cc.space.cell) $($c.Count) refs ($($cS.Count), $($cD.Count))"
+    # Nothing around the host: the comparison would pass on two empty lists (run
+    # 20261031-004820: the ship never moved, both censuses empty).
+    if ($h.Count -eq 0) { $r.Result = "ERROR"; $r.Reasons.Add("nothing in space around the host to compare (cell $($hc.space.cell))"); return $r }
     if ($hc.space.cell -ne $cc.space.cell) { $r.Result = "FAIL"; $r.Reasons.Add("different space cells (host $($hc.space.cell), client $($cc.space.cell))") }
     if ($missS.Count) { $r.Result = "FAIL"; $r.Reasons.Add("$($missS.Count) save-file refs only the host has: $(& $show $missS $h)") }
     if ($extraS.Count) { $r.Result = "FAIL"; $r.Reasons.Add("$($extraS.Count) save-file refs only the client has: $(& $show $extraS $c)") }
@@ -1450,6 +1461,7 @@ function Invoke-ScorerSelfTest {
         @{ Name = "space: other encounter";  Run = (New-SpaceRun -clientRefs "0001F00D:0001F00E:3D:12.5,FF009999:00BEEF00:3D:3.4"); Expect = "FAIL"; Space = $true },
         @{ Name = "space: other cell";       Run = (New-SpaceRun -clientCell "0000DEAD"); Expect = "FAIL"; Space = $true },
         @{ Name = "space: no census";        Run = (New-SpaceRun -census $false);      Expect = "TIMEOUT"; Space = $true },
+        @{ Name = "space: both empty";       Run = (New-SpaceRun -hostRefs "" -clientRefs ""); Expect = "ERROR"; Space = $true },
         @{ Name = "scene: client plays it";  Run = (New-SceneRun);                     Expect = "PASS";    Scene = $true },
         @{ Name = "scene: client never";     Run = (New-SceneRun -clientAfter -1);     Expect = "FAIL";    Scene = $true },
         @{ Name = "scene: client too late";  Run = (New-SceneRun -clientAfter 20000);  Expect = "FAIL";    Scene = $true },
@@ -1799,7 +1811,7 @@ try {
                  elseif ($Scenario -eq "mission") { Invoke-MissionScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "quest") { Invoke-QuestScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "scene") { Invoke-SceneScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
-                 elseif ($Scenario -eq "space") { Invoke-SpaceScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final }
+                 elseif ($Scenario -eq "space") { Invoke-SpaceScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final -SpaceTravel $true }
                  elseif ($Scenario -eq "papyrus") { Invoke-PapyrusScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "takeoff") { Invoke-TakeoffScore -HostSamples $hostSeen -ClientSamples $clientSeen -ClientDecisions $decisions -Final $final -PartnerOutside $PartnerOutside.IsPresent -F8DuringVote $F8DuringVote.IsPresent }
                  else { Invoke-CoopScore -HostSamples $hostSeen -ClientSamples $clientSeen -Tolerance $Tolerance -MoveMetres $MoveMetres -Final $final }

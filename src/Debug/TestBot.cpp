@@ -162,6 +162,9 @@ namespace Pulsar::TestBot
             std::uint64_t missionPickedMs = 0;
             std::uint64_t missionRefreshMs = 0;
             std::uint64_t missionLoadAtPick = 0;        // last save load (tick) when picking
+            std::uint64_t spaceSinceMs = 0;             // space (host): first tick in space
+            std::uint64_t travelAtWallMs = 0;           // space (host): ship moved to the station
+            std::string   travelInfo;
             std::uint64_t sepBridgeWallMs = 0;          // host: bridge fired
             std::uint64_t sepActMs = 0;
             int           sepBridgeTries = 0;
@@ -429,6 +432,24 @@ namespace Pulsar::TestBot
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             return n;
+        }
+
+        // References whose editor ID contains a_hint (lower case), Starfield.esm IDs,
+        // at most a_max, with their names. Reference editor IDs are kept at runtime
+        // (EventTrace names MariaStarrettREF).
+        std::vector<std::pair<std::uint32_t, std::string>> RefsByName(const char* a_hint, std::size_t a_max)
+        {
+            std::vector<std::pair<std::uint32_t, std::string>> out;
+            for (std::uint32_t id = 0x800; id < 0x00400000 && out.size() < a_max; ++id) {
+                auto* f = RE::TESForm::LookupByID(id);
+                if (!f || f->GetFormType() != RE::FormType::kREFR) continue;
+                const char* eid = f->GetFormEditorID();
+                if (!eid || !eid[0]) continue;
+                std::string low = eid;
+                for (auto& c : low) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+                if (low.find(a_hint) != std::string::npos) out.emplace_back(id, eid);
+            }
+            return out;
         }
 
         // What the door scan saw, for the state log when no door is used.
@@ -1410,6 +1431,47 @@ namespace Pulsar::TestBot
             }
         }
 
+        // Space (host): 30 s after reaching space, move the ship 2 km off The Eye,
+        // the station over Jemison (the takeoff save leaves from New Atlantis; the
+        // orbit right after takeoff is empty, run 20261030-215716), then bridge the
+        // save as an arrival does. Game.FastTravel moved the player out of the ship
+        // instead (run 20261031-003619) and star-map travel has no script call, so
+        // this skips the jump itself: it tests what both players see after a
+        // bridge at a station.
+        if (isHost && s_state.cfg.scenario == "space" && s_state.acted && !s_state.travelAtWallMs) {
+            const ShipSnap sh = SnapShip(player);
+            if (sh.inSpace && !s_state.spaceSinceMs) s_state.spaceSinceMs = now;
+            if (s_state.spaceSinceMs && now - s_state.spaceSinceMs >= 30000) {
+                const auto eye = RefsByName("theeyeref", 4);
+                auto* dest = eye.empty() ? nullptr : RE::TESForm::LookupByID<RE::TESObjectREFR>(eye.front().first);
+                auto* ship = player->GetSpaceship(true);
+                bool sent = false;
+                if (dest && ship) {
+                    auto obj = Pulsar::GameCalls::ObjectFor(static_cast<RE::TESObjectREFR*>(ship));
+                    sent = obj && Pulsar::GameCalls::CallMethod(Pulsar::GameCalls::VM(), obj, "MoveTo",
+                        { Pulsar::GameCalls::Arg(dest), Pulsar::GameCalls::Arg(2000.0f), Pulsar::GameCalls::Arg(0.0f),
+                          Pulsar::GameCalls::Arg(0.0f), Pulsar::GameCalls::Arg(true), Pulsar::GameCalls::Arg(false) });
+                }
+                char msg[200];
+                std::snprintf(msg, sizeof(msg), "travel: ship %08X moved to %08X TheEyeREF queued=%d",
+                              ship ? ship->formID : 0u, dest ? dest->formID : 0u, sent ? 1 : 0);
+                s_state.travelInfo = msg;
+                s_state.travelAtWallMs = WallMs();
+                s_state.sepActMs = now;   // bridge timer, shared with "separate"
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: space: {}"sv, s_state.travelInfo);
+            }
+        }
+        if (isHost && s_state.cfg.scenario == "space" && s_state.travelAtWallMs && !s_state.sepBridgeWallMs &&
+            s_state.sepBridgeTries < 60 && now - s_state.sepActMs >= 15000) {
+            ++s_state.sepBridgeTries;
+            if (Pulsar::SpaceSync::FastTravel::FireSaveBridge("bot-space", /*a_triggerOwnSave=*/true)) {
+                s_state.sepBridgeWallMs = WallMs();
+                s_state.travelInfo += "; bridge fired";
+                PLOG_INFO("[PULSAR] TestBot: space: save bridge fired (try {})"sv, s_state.sepBridgeTries);
+            }
+        }
+
         // Mission: both sides pick the same running mission-board quest (story
         // manager, "MB_"); the client stops it quietly (the host has a mission the
         // client lacks), and 30 s later the host advances a stage in it, as
@@ -1660,6 +1722,7 @@ namespace Pulsar::TestBot
             j += ",\"readyAtWallMs\":" + std::to_string(s_state.voteReadyWallMs);
             j += ",\"f8AtWallMs\":" + std::to_string(s_state.f8AtWallMs) + "}";
             j += ",\"exitInfo\":\"" + s_state.partnerExitInfo + "\"";
+            j += ",\"travelInfo\":\"" + s_state.travelInfo + "\"";
         }
         if (s_state.cfg.scenario == "scene") {
             j += ",\"scenes\":\"" + Pulsar::SceneSync::RecentEventsForTest() + "\"";
@@ -1679,17 +1742,23 @@ namespace Pulsar::TestBot
             j += c;
         }
         if (s_state.cfg.scenario == "space") {
-            // Every 10 s while in space: "ID:BASE:TYPE:DIST_KM" for each reference.
+            // Every 10 s while in space: "ID:BASE:TYPE:DIST_KM" for each reference,
+            // on that one state line only (a station cell holds thousands); the
+            // lines between carry the count alone.
             static std::string s_census = ",\"space\":null";
+            static std::string s_summary = ",\"space\":null";
             static std::uint64_t s_censusAt = 0;
             const std::uint64_t t = ::GetTickCount64();
+            bool fresh = false;
             if (t - s_censusAt >= 10000) {
                 s_censusAt = t;
-                static SpaceRef refs[512];
+                fresh = true;
+                static SpaceRef refs[4096];
                 std::uint32_t cell = 0;
-                const int n = SafeSpaceCensus(player, cell, refs, 512);
+                const int n = SafeSpaceCensus(player, cell, refs, 4096);
                 if (!cell) {
                     s_census = ",\"space\":null";
+                    s_summary = s_census;
                 } else {
                     std::string list;
                     list.reserve(static_cast<std::size_t>(n) * 32);
@@ -1699,13 +1768,17 @@ namespace Pulsar::TestBot
                                       refs[i].id, refs[i].base, refs[i].type, refs[i].dist / 1000.0f);
                         list += c;
                     }
-                    char h[96];
-                    std::snprintf(h, sizeof(h), ",\"space\":{\"cell\":\"%08X\",\"atWallMs\":%llu,\"n\":%d,\"refs\":\"",
-                                  cell, static_cast<unsigned long long>(WallMs()), n);
+                    char h[160];
+                    std::snprintf(h, sizeof(h), ",\"space\":{\"cell\":\"%08X\",\"atWallMs\":%llu,\"travelAtWallMs\":%llu,\"n\":%d,\"refs\":\"",
+                                  cell, static_cast<unsigned long long>(WallMs()),
+                                  static_cast<unsigned long long>(s_state.travelAtWallMs), n);
                     s_census = h + list + "\"}";
+                    char sm[96];
+                    std::snprintf(sm, sizeof(sm), ",\"spaceN\":{\"cell\":\"%08X\",\"n\":%d}", cell, n);
+                    s_summary = std::string(",\"space\":null") + sm;
                 }
             }
-            j += s_census;
+            j += fresh ? s_census : s_summary;
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];

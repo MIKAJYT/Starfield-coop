@@ -41,10 +41,12 @@ number here means the code for that milestone is in, not that the goal is met.
   *Bot-tested* (`mission`): the client lacks MB_Bounty01Far, the host moves it to stage
   10, the client gets the host's save 2.3 s after asking and runs the mission at stage 10
   with its own character restored; twin with the switch off stays without it.
-- **Space census bot** (`space`): after takeoff each bot lists everything in space
-  around the ship and the launcher compares the lists. Groundwork for the station/POI
-  mismatch; right after takeoff the test orbit is empty, so it needs a flight to a
-  station first.
+- **Space census bot** (`space`): after takeoff the host moves its ship next to The Eye
+  and bridges its save; each bot lists everything in space around the ship and the
+  launcher compares the lists (an empty host list is an ERROR, not a match). It
+  measures the station/POI mismatch: the client's station cell lists 4096+ references
+  before the bridge and 57 after loading the host's save. Not fixed yet; whether the
+  station is missing on screen is not checked yet.
 
 ## Unreleased - full co-op spec, phase 4: tests for what exists, aim, jetpack, no friendly fire
 
