@@ -1921,6 +1921,22 @@ namespace Pulsar::TestBot
             const bool fresh = t - s_refCheckAt >= 10000;
             if (fresh) s_refCheckAt = t;
             j += RefCheckJson(player, fresh);
+            // And how many references the ship's space cell holds, with how many have
+            // 3D, so a save made at a station shows whether anything is there.
+            static std::string s_cellInfo;
+            if (fresh) {
+                static SpaceRef refs[4096];
+                std::uint32_t cell = 0;
+                const int n = SafeSpaceCensus(player, cell, refs, 4096);
+                int with3D = 0;
+                for (int i = 0; i < n; ++i) {
+                    if (SafeRefStatus(refs[i].id).has3D) ++with3D;
+                }
+                char c[120];
+                std::snprintf(c, sizeof(c), ",\"spaceCell\":{\"cell\":\"%08X\",\"n\":%d,\"has3D\":%d}", cell, n, with3D);
+                s_cellInfo = cell ? c : "";
+            }
+            j += s_cellInfo;
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];

@@ -52,9 +52,13 @@ number here means the code for that milestone is in, not that the goal is met.
   and bridges its save; each bot lists everything in space around the ship and the
   launcher compares the lists (an empty host list is an ERROR, not a match). It
   measures the station/POI mismatch: the client's station cell lists 4096+ references
-  before the bridge and 57 after loading the host's save. A direct lookup of the host's
-  4096 station IDs (`CheckRefsFile`) confirms it: on the client 55 exist and none has 3D,
-  so the station is not drawn there. Not fixed yet.
+  before the bridge and 57 after loading the host's save, and a lookup of the host's 4096
+  station IDs (`CheckRefsFile`) finds none drawn on the client. That gap is the bot's
+  `MoveTo` shortcut, not the reported bug: it parks the ship inside the station's
+  close-up cell, where a load leaves those pieces unloaded on the host too. With a save
+  the owner made at The Eye after a real star-map jump, host and client both draw the
+  station. The old "missing POIs, stuck in the ship" reports most likely came from the
+  lost save transfer fixed above.
 
 ## Unreleased - full co-op spec, phase 4: tests for what exists, aim, jetpack, no friendly fire
 
