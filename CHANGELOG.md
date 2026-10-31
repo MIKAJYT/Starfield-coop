@@ -52,6 +52,15 @@ number here means the code for that milestone is in, not that the goal is met.
   moves its own furniture after the packet. *Bot-tested* (`seat`, twice): the host shows
   the client's figure in chair 03292F68, the client's seat. *Watched by the owner* in
   sf-a. No twin run yet (`-NoClientSeatSync`).
+- **The host is visible in the pilot seat after the client joins.** The owner saw an
+  empty pilot seat from the client, and after the host sat down again a jittering
+  figure. Three fixes: the client keeps the host's figure shown once it left the join
+  seat (one SHOW was lost when the figure was re-seated); the figure is not seated into
+  a seat the local player left less than 3 s ago; a seat already where the sender's is
+  is no longer re-placed on every packet (that drive is for moving vehicles). *Checked
+  with screenshots from the client* (run 20261031-195405): the host sits in the pilot
+  seat, steady over four frames. *Watched by the owner.* Standing up and sitting down
+  again not tested yet.
 - Open: the host's figure stands up a few seconds late on the client (the host reports
   the stand-up when its animation ends; the client then plays its own and respawns the
   figure).

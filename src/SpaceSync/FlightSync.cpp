@@ -3705,6 +3705,10 @@ namespace {
         const bool overlap = (playerCell != 0 && playerCell == cloneCell) && sameSeat;
 
         const bool wasCulled = g_cloneCulledForCoPilot.load(std::memory_order_acquire);
+        // While shown, keep the cull bit clear: the clone's 3D can be rebuilt or
+        // re-seated after a one-time SHOW, and the host stayed invisible in the pilot
+        // seat after the client moved to its chair (owner's report 2026-10-31).
+        if (!overlap) SetClone3DAppCulled(clone, false);
         if (overlap == wasCulled) return;
 
         SetClone3DAppCulled(clone, overlap);

@@ -1186,6 +1186,27 @@ namespace Pulsar::VehicleSync
         }
     }
 
+    // The seat the local player sits in, and the one it left last with when (game
+    // thread, every tick). The seated state machine keeps the partner's figure out
+    // of both: the get-up animation runs for a while after the handle changed.
+    static RE::TESObjectREFR* s_ownSeat = nullptr;
+    static RE::TESObjectREFR* s_ownPrevSeat = nullptr;
+    static uint64_t s_ownPrevSeatLeftMs = 0;
+
+    static void TrackOwnSeat(RE::TESObjectREFR* a_seat)
+    {
+        if (a_seat == s_ownSeat) return;
+        s_ownPrevSeat = s_ownSeat;
+        s_ownPrevSeatLeftMs = GetTickCount64();
+        s_ownSeat = a_seat;
+    }
+
+    static bool IsOwnSeat(RE::TESObjectREFR* a_furn)
+    {
+        if (a_furn == s_ownSeat) return true;
+        return a_furn == s_ownPrevSeat && GetTickCount64() - s_ownPrevSeatLeftMs < 3000;
+    }
+
     // Client: send the seat the local player sits in, so the host seats the client's
     // figure there too (owner's report 2026-10-31: the host saw the friend standing
     // next to the pilot seat while the friend sat in a passenger chair).
@@ -1208,6 +1229,10 @@ namespace Pulsar::VehicleSync
 
     void OnGameThreadTick()
     {
+        if (auto* player = RE::PlayerCharacter::GetSingleton(); player && player->parentCell &&
+                                                                 Pulsar::Network::GetSingleton().IsConnected()) {
+            TrackOwnSeat(GetOccupiedFurniture(player));
+        }
         if (IsHostMode()) {
             RunHostTick();
         } else {
@@ -1934,15 +1959,16 @@ namespace Pulsar::VehicleSync
             auto* furn = byRef ? byRef
                                : FindNearestFurnToClone(a_clone, 10000.0f, hostBaseResolved,
                                                         hostPosX, hostPosY, hostPosZ);
-            // Never into the seat the local player sits in: two actors on one FURN get
-            // both stuck (see the BISECT note above).
-            auto* localPlayer = RE::PlayerCharacter::GetSingleton();
-            if (furn && localPlayer && furn == GetOccupiedFurniture(localPlayer)) {
+            // Never into the seat the local player sits in, or left less than 3 s ago
+            // (its get-up animation still runs): two actors on one FURN get both stuck
+            // (see the BISECT note above). The client snapped the host's figure into
+            // the pilot seat 0.2 s after leaving it, and the figure stayed invisible.
+            if (furn && IsOwnSeat(furn)) {
                 static uint64_t s_lastOwnSeat = 0;
                 uint64_t onow = GetTickCount64();
                 if (onow - s_lastOwnSeat > 3000) {
                     s_lastOwnSeat = onow;
-                    PLOG_INFO("[PULSAR] VehicleSync: match furn=0x{:08X} is the local player's seat - not seating the clone"sv,
+                    PLOG_INFO("[PULSAR] VehicleSync: match furn=0x{:08X} is (or just was) the local player's seat - not seating the clone"sv,
                               furn->formID);
                 }
                 st.matchedRefID = sentRef;
@@ -2032,6 +2058,29 @@ namespace Pulsar::VehicleSync
         // The host never moves its own furniture after the client's seat: the seat is
         // part of the host's world (a ship seat moves with the ship).
         if (st.seated && a_seated && st.furn && !IsHostMode()) {
+            // A seat already where the sender's is (a ship seat: same interior, same
+            // spot) is left alone. Re-placing it on every packet made the seated
+            // host's figure jitter on the client (owner's report 2026-10-31); only a
+            // moving vehicle (Moon Jumper) needs the drive below.
+            {
+                float tx = 0, ty = 0, tz = 0, trz = 0;
+                bool have = false;
+                {
+                    std::lock_guard lockH(s_hostFurnMutex);
+                    if (s_hostFurn.lastUpdateMs != 0) {
+                        tx = s_hostFurn.posX; ty = s_hostFurn.posY; tz = s_hostFurn.posZ;
+                        trz = s_hostFurn.rotZ;
+                        have = true;
+                    }
+                }
+                float cx = 0, cy = 0, cz = 0;
+                SafeReadRefPos(st.furn, cx, cy, cz);
+                const float ddx = cx - tx, ddy = cy - ty, ddz = cz - tz;
+                if (have && ddx * ddx + ddy * ddy + ddz * ddz < 0.01f &&
+                    std::fabs(SafeRefReadAngleZ(st.furn) - trz) < 0.01f) {
+                    return;
+                }
+            }
             float fx = a_x, fy = a_y, fz = a_z;
             float rx = 0.0f, ry = 0.0f, rz = 0.0f;
             bool haveRot = false;
