@@ -52,8 +52,9 @@ number here means the code for that milestone is in, not that the goal is met.
   and bridges its save; each bot lists everything in space around the ship and the
   launcher compares the lists (an empty host list is an ERROR, not a match). It
   measures the station/POI mismatch: the client's station cell lists 4096+ references
-  before the bridge and 57 after loading the host's save. Not fixed yet; whether the
-  station is missing on screen is not checked yet.
+  before the bridge and 57 after loading the host's save. A direct lookup of the host's
+  4096 station IDs (`CheckRefsFile`) confirms it: on the client 55 exist and none has 3D,
+  so the station is not drawn there. Not fixed yet.
 
 ## Unreleased - full co-op spec, phase 4: tests for what exists, aim, jetpack, no friendly fire
 

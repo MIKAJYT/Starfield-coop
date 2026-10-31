@@ -90,6 +90,7 @@ namespace Pulsar::TestBot
             float       doorRadius = 60.0f; // door: search radius for a load door (metres)
             float       lootRadius = 30.0f; // loot: search radius for the NPC to kill (metres)
             std::uint32_t sceneId = 0;          // scene: the scene the host starts; 0 = search running Akila scenes
+            std::string   checkRefsFile;        // space: reference IDs (hex, one per line) to look up in this game
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
@@ -225,6 +226,7 @@ namespace Pulsar::TestBot
                 else if (key == "doorradius")  s.doorRadius = std::stof(value);
                 else if (key == "lootradius")  s.lootRadius = std::stof(value);
                 else if (key == "sceneid")     s.sceneId = static_cast<std::uint32_t>(std::stoul(value, nullptr, 16));
+                else if (key == "checkrefsfile") s.checkRefsFile = value;
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
@@ -438,6 +440,34 @@ namespace Pulsar::TestBot
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             return n;
+        }
+
+        // Space: one reference's state in this game. Same raw layout as
+        // SafeListLooseItems: flags +0x20 (bit 11 disabled), parentCell +0xB0,
+        // loadedData +0xB8 with its 3D at +0x08.
+        struct RefStatus {
+            bool          exists = false;
+            std::uint32_t cell = 0;
+            bool          has3D = false;
+            bool          disabled = false;
+        };
+
+        RefStatus SafeRefStatus(std::uint32_t a_id) noexcept
+        {
+            RefStatus s{};
+            __try {
+                auto* f = RE::TESForm::LookupByID(a_id);
+                if (!f) return s;
+                auto* rb = reinterpret_cast<std::uint8_t*>(f);
+                if (*(rb + 0x2E) != static_cast<std::uint8_t>(RE::FormType::kREFR)) return s;
+                s.exists = true;
+                s.disabled = (*reinterpret_cast<std::uint32_t*>(rb + 0x20) & (1u << 11)) != 0;
+                auto* cell = *reinterpret_cast<std::uint8_t**>(rb + 0xB0);
+                s.cell = cell ? *reinterpret_cast<std::uint32_t*>(cell + 0x28) : 0;
+                const auto loaded = *reinterpret_cast<std::uintptr_t*>(rb + 0xB8);
+                s.has3D = loaded && *reinterpret_cast<std::uintptr_t*>(loaded + 0x08);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return s;
         }
 
         // References whose editor ID contains a_hint (lower case), Starfield.esm IDs,
@@ -1838,6 +1868,47 @@ namespace Pulsar::TestBot
                 }
             }
             j += fresh ? s_census : s_summary;
+
+            // The host's station references (CheckRefsFile, from a host census at The
+            // Eye), looked up here every 10 s: do they exist, sit in the ship's space
+            // cell, have 3D? Answers whether the station is really missing on the client
+            // or only absent from the cell's reference list.
+            static std::vector<std::uint32_t> s_checkIds;
+            static bool s_checkLoaded = false;
+            static std::string s_check;
+            if (!s_checkLoaded && !s_state.cfg.checkRefsFile.empty()) {
+                s_checkLoaded = true;
+                std::ifstream in(s_state.cfg.checkRefsFile);
+                std::string line;
+                while (std::getline(in, line)) {
+                    if (line.size() >= 8) s_checkIds.push_back(static_cast<std::uint32_t>(std::stoul(line.substr(0, 8), nullptr, 16)));
+                }
+                PLOG_INFO("[PULSAR] TestBot: space: {} references to check"sv, s_checkIds.size());
+            }
+            // The ship's cell through the SEH-guarded census (no references kept):
+            // GetSpaceship outside it crashed the game at the main menu (run
+            // 20261031-101354, access violation in Starfield.exe+0x2116846).
+            std::uint32_t shipCell = 0;
+            if (fresh && !s_checkIds.empty()) SafeSpaceCensus(player, shipCell, nullptr, 0);
+            if (fresh && shipCell) {
+                int exists = 0, inCell = 0, has3D = 0, has3DInCell = 0, disabled = 0;
+                std::uint32_t otherCell = 0;
+                for (const auto id : s_checkIds) {
+                    const RefStatus st = SafeRefStatus(id);
+                    if (!st.exists) continue;
+                    ++exists;
+                    if (st.disabled) ++disabled;
+                    if (st.has3D) ++has3D;
+                    if (st.cell == shipCell) { ++inCell; if (st.has3D) ++has3DInCell; }
+                    else if (!otherCell) otherCell = st.cell;
+                }
+                char c[260];
+                std::snprintf(c, sizeof(c),
+                              ",\"refCheck\":{\"n\":%zu,\"shipCell\":\"%08X\",\"exists\":%d,\"inCell\":%d,\"has3D\":%d,\"has3DInCell\":%d,\"disabled\":%d,\"otherCell\":\"%08X\"}",
+                              s_checkIds.size(), shipCell, exists, inCell, has3D, has3DInCell, disabled, otherCell);
+                s_check = c;
+            }
+            j += s_check;
         }
         if (s_state.cfg.scenario == "reward") {
             char c[200];
