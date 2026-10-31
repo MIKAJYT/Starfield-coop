@@ -16,6 +16,13 @@ The roadmap goals in the README (for example "0.7.0: a two-player campaign
 without major workarounds") are only met once verified in game. A version
 number here means the code for that milestone is in, not that the goal is met.
 
+## Unreleased - full co-op spec, phase 6: ships
+
+- **Ship hull: damage and repair** (`CoopShipHullSync`, default 1, new switch for the
+  existing mirror). *Bot-tested* (`hull`, from a save in the ship at The Eye): the host's
+  ship is hit (408 -> 244.8 of 948) and repaired; the client's hull follows each within
+  0.9 s. Twin with the switch off stays at 408.
+
 ## Unreleased - full co-op spec, phase 5: world and quests
 
 - **Scene sync, cutscenes** (`CoopSceneSync`, default 1). A scene the host's game starts

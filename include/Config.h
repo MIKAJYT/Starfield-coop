@@ -203,6 +203,11 @@ namespace Pulsar
         // twin). ini: CoopMissionBridge = 0
         bool        coopMissionBridge = true;
 
+        // Ship hull sync (owner's spec, ship damage and repair): the client sets its
+        // ship's hull to the host's (hits, repairs, destruction). 0 = the client keeps
+        // its own hull (bot twin). ini: CoopShipHullSync = 0
+        bool        coopShipHullSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

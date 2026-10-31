@@ -13,6 +13,7 @@
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
+#include "SpaceSync/ShipCombatSync.h"
 #include "SpaceSync/SpaceSync.h"
 #include "SpaceSync/FastTravelSync.h"
 #include "Coop/CoopMortality.h"
@@ -164,6 +165,10 @@ namespace Pulsar::TestBot
             std::uint64_t missionRefreshMs = 0;
             std::uint64_t missionLoadAtPick = 0;        // last save load (tick) when picking
             std::uint64_t spaceSinceMs = 0;             // space (host): first tick in space
+            std::uint64_t hullHitWallMs = 0;            // hull (host): the hit, then the repair
+            std::uint64_t hullHitMs = 0;
+            std::uint64_t hullRepairWallMs = 0;
+            float         hullBefore = -1.0f, hullAfterHit = -1.0f, hullAfterRepair = -1.0f;
             int           bridgesFired = 0;             // bridges (host): save bridges sent
             std::string   bridgesFiredAt;               //   their wall times, comma-separated
             std::uint64_t bridgeNextMs = 0;
@@ -1511,6 +1516,38 @@ namespace Pulsar::TestBot
             }
         }
 
+        // Hull (host): once settled, hit the ship for 40% of its hull, and 30 s later
+        // repair it back; the client's ship must follow both (ShipCombatSync).
+        if (isHost && s_state.cfg.scenario == "hull" && cloneVisible && me.valid &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
+            float cur = 0.0f, max = 0.0f;
+            if (!s_state.acted) {
+                char msg[200];
+                if (!Pulsar::ShipCombatSync::ReadHullForTest(cur, max) || max <= 0.0f) {
+                    std::snprintf(msg, sizeof(msg), "hull: no ship hull to read (cur %.1f, max %.1f)", cur, max);
+                } else {
+                    s_state.hullBefore = cur;
+                    const bool ok = Pulsar::ShipCombatSync::ModHullForTest(-0.4f * cur);
+                    Pulsar::ShipCombatSync::ReadHullForTest(s_state.hullAfterHit, max);
+                    s_state.hullHitWallMs = WallMs();
+                    s_state.hullHitMs = now;
+                    std::snprintf(msg, sizeof(msg), "hull: found=1 hit ok=%d, %.1f -> %.1f of %.1f", ok ? 1 : 0,
+                                  s_state.hullBefore, s_state.hullAfterHit, max);
+                }
+                s_state.actionInfo = msg;
+                s_state.acted = true;
+                s_state.actedAtWallMs = WallMs();
+                Trace(msg);
+                PLOG_INFO("[PULSAR] TestBot: {}"sv, s_state.actionInfo);
+            } else if (s_state.hullHitMs && !s_state.hullRepairWallMs && now - s_state.hullHitMs >= 30000 &&
+                       Pulsar::ShipCombatSync::ReadHullForTest(cur, max)) {
+                Pulsar::ShipCombatSync::ModHullForTest(s_state.hullBefore - cur);
+                Pulsar::ShipCombatSync::ReadHullForTest(s_state.hullAfterRepair, max);
+                s_state.hullRepairWallMs = WallMs();
+                PLOG_INFO("[PULSAR] TestBot: hull: repaired {:.1f} -> {:.1f}"sv, cur, s_state.hullAfterRepair);
+            }
+        }
+
         // Bridges: the host sends 6 save bridges, one every 45 s, while the game runs;
         // the client must load each. A save sent from the network thread without the
         // ENet lock went missing about 1 in 5 (runs 20261030-212343, 20261031-014412).
@@ -1714,7 +1751,7 @@ namespace Pulsar::TestBot
             s_state.cfg.scenario != "jetpack" && s_state.cfg.scenario != "pickup" &&
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
             s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" && s_state.cfg.scenario != "mission" &&
-            s_state.cfg.scenario != "bridges" &&
+            s_state.cfg.scenario != "bridges" && s_state.cfg.scenario != "hull" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -1856,6 +1893,17 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "quest") {
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "hull") {
+            float cur = -1.0f, max = -1.0f;
+            Pulsar::ShipCombatSync::ReadHullForTest(cur, max);
+            char c[260];
+            std::snprintf(c, sizeof(c),
+                          ",\"hull\":{\"cur\":%.1f,\"max\":%.1f,\"before\":%.1f,\"afterHit\":%.1f,\"afterRepair\":%.1f,\"hitAtWallMs\":%llu,\"repairAtWallMs\":%llu}",
+                          cur, max, s_state.hullBefore, s_state.hullAfterHit, s_state.hullAfterRepair,
+                          static_cast<unsigned long long>(s_state.hullHitWallMs),
+                          static_cast<unsigned long long>(s_state.hullRepairWallMs));
+            j += c;
         }
         if (s_state.cfg.scenario == "bridges") {
             j += ",\"bridges\":{\"fired\":" + std::to_string(s_state.bridgesFired) + ",\"firedAt\":\"" + s_state.bridgesFiredAt +

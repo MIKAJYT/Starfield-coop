@@ -20,6 +20,7 @@
 #include "PCH.h"
 #include "SpaceSync/ShipCombatSync.h"
 
+#include "Config.h"
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
 #include "Coop/CoopMortality.h"
@@ -367,6 +368,14 @@ void Tick()
     if (target < 0.0f) target = 0.0f;
     if (hostMax > 0.0f && target > hostMax) target = hostMax;
 
+    if (!Pulsar::GetConfig().coopShipHullSync) {
+        if ((now - g_lastLogMs.load(std::memory_order_relaxed)) >= 5000) {
+            g_lastLogMs.store(now, std::memory_order_relaxed);
+            PLOG_INFO("[PULSAR] ShipAV RX hostHull={:.1f}/{:.1f} - CoopShipHullSync = 0, not applied"sv, hostCur, hostMax);
+        }
+        return;
+    }
+
     float     localCur = -1.0f, applied = 0.0f;
     const int st = ApplyLocalHull(target, localCur, applied);
     if (st == 2) return;  // client not in a ship - nothing to mirror, no log
@@ -400,6 +409,20 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
     g_pendHullCur.store(d.hullCur, std::memory_order_relaxed);
     g_pendHullMax.store(d.hullMax, std::memory_order_relaxed);
     g_applyArmed.store(true, std::memory_order_release);
+}
+
+bool ReadHullForTest(float& a_cur, float& a_max)
+{
+    std::uint32_t ship = 0;
+    return ReadLocalHull(a_cur, a_max, ship);
+}
+
+bool ModHullForTest(float a_delta)
+{
+    float before = 0.0f, max = 0.0f;
+    if (!ReadHullForTest(before, max)) return false;
+    float localCur = 0.0f, applied = 0.0f;
+    return ApplyLocalHull(before + a_delta, localCur, applied) == 1;
 }
 
 void OnRemoteFire(const Pulsar::Network::ShipFireData& f)

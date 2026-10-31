@@ -393,6 +393,12 @@ namespace Pulsar
                 cfg.coopMissionBridge = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopMissionBridge = {}"sv, cfg.coopMissionBridge);
             }
+            else if (keyLower == "coopshiphullsync" || keyLower == "coop_ship_hull_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopShipHullSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopShipHullSync = {}"sv, cfg.coopShipHullSync);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

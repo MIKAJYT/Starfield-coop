@@ -79,12 +79,16 @@ param(
     # the host's save (CoopMissionBridge=1). -NoMissionBridge: twin.
     # bridges: the host sends 6 save bridges, one every 45 s; every save the host sent must
     # reach the client (a save sent without the ENet lock was lost about 1 in 5). No twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges")][string]$Scenario = "follow",
+    # hull: in space (start from a save in a ship), the host hits its ship for 40% and 30 s
+    # later repairs it; the client's hull must follow each within 5 s (CoopShipHullSync=1).
+    # -NoShipHullSync: twin.
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
     [switch]$NoSceneSync,
     [switch]$NoQuestStartSync,
     [switch]$NoMissionBridge,
+    [switch]$NoShipHullSync,
     [switch]$NoAutoReconnect,
     [switch]$NoSharedWorldItems,
     [switch]$NoFriendlyFireGuard,
@@ -997,6 +1001,47 @@ function Invoke-BridgesScore {
     return $r
 }
 
+# ---- hull scenario ------------------------------------------------------------
+# Both players start in the host's ship in space. The host hits its ship for 40% of
+# its hull, then repairs it 30 s later; each time the client's hull must reach the
+# host's value (within 1) within 5 s.
+function Invoke-HullScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["hull"] }); $clientList = @($ClientSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["hull"] })
+    if ($hostList.Count -eq 0 -or $clientList.Count -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no hull state from " + $(if ($hostList.Count -eq 0) { "host" } else { "client" })) }
+        return $r
+    }
+    $act = $hostList | Where-Object { $_.acted } | Select-Object -First 1
+    if (-not $act) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the host bot never hit its ship") }
+        return $r
+    }
+    if ($act.actionInfo -notmatch '^hull: found=1 hit ok=1') { $r.Result = "ERROR"; $r.Reasons.Add("host bot could not hit its ship: $($act.actionInfo)"); return $r }
+    $h = $hostList[-1].hull
+    $t1 = [long]$h.hitAtWallMs; $hit = [double]$h.afterHit
+    if ($hit -gt [double]$h.before - 1) { $r.Result = "ERROR"; $r.Reasons.Add("the hit did not lower the host's hull ($($h.before) -> $hit)"); return $r }
+    $m1 = @($clientList | Where-Object { [long]$_.wallMs -ge $t1 -and [long]$_.wallMs -le $t1 + 5000 -and [Math]::Abs([double]$_.hull.cur - $hit) -le 1 }) | Select-Object -First 1
+    $r.Details = "hull: $($act.actionInfo); client after the hit: " + $(if ($m1) { "$($m1.hull.cur) at +$([long]$m1.wallMs - $t1) ms" } else { "no match" })
+    if (-not $m1) {
+        $late = @($clientList | Where-Object { [long]$_.wallMs -ge $t1 + 8000 }) | Select-Object -First 1
+        if ($late -or $Final) { $r.Result = "FAIL"; $r.Reasons.Add("the client's hull did not follow the hit (client $($(if ($late) { $late.hull.cur } else { '?' })), host $hit)") }
+        return $r
+    }
+    $t2 = [long]$h.repairAtWallMs; $rep = [double]$h.afterRepair
+    if ($t2 -eq 0) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("the host bot never repaired its ship") }
+        return $r
+    }
+    $m2 = @($clientList | Where-Object { [long]$_.wallMs -ge $t2 -and [long]$_.wallMs -le $t2 + 5000 -and [Math]::Abs([double]$_.hull.cur - $rep) -le 1 }) | Select-Object -First 1
+    $r.Details += "; after the repair: " + $(if ($m2) { "$($m2.hull.cur) at +$([long]$m2.wallMs - $t2) ms" } else { "no match" })
+    if ($m2) { $r.Result = "PASS"; return $r }
+    $late2 = @($clientList | Where-Object { [long]$_.wallMs -ge $t2 + 8000 }) | Select-Object -First 1
+    if ($late2 -or $Final) { $r.Result = "FAIL"; $r.Reasons.Add("the client's hull did not follow the repair (client $($(if ($late2) { $late2.hull.cur } else { '?' })), host $rep)") }
+    return $r
+}
+
 # ---- takeoff scenario ---------------------------------------------------------
 # Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
 # sits in the pilot seat, opens the takeoff menu and asks for the launch. The
@@ -1301,6 +1346,23 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
+function New-HullRun([bool]$acts = $true, [bool]$hits = $true, [bool]$followsHit = $true, [bool]$repairs = $true, [bool]$followsRepair = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000; $hitAt = $t0 + 10000; $repAt = $hitAt + 30000
+    for ($i = 0; $i -lt 60; $i++) {
+        $t = $t0 + $i * 1000
+        $hostCur = if ($hits -and $t -ge $hitAt -and -not ($repairs -and $t -ge $repAt)) { 600 } else { 1000 }
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true ($acts -and $t -ge $hitAt) $(if ($acts) { $hitAt } else { 0 })
+        $hs | Add-Member actionInfo $(if ($acts) { "hull: found=1 hit ok=1, 1000.0 -> $(if ($hits) { '600.0' } else { '1000.0' }) of 1000.0" } else { "" })
+        $hs | Add-Member hull ([pscustomobject]@{ cur = $hostCur; max = 1000; before = $(if ($acts) { 1000 } else { -1 }); afterHit = $(if ($acts) { $(if ($hits) { 600 } else { 1000 }) } else { -1 }); afterRepair = $(if ($repairs -and $t -ge $repAt) { 1000 } else { -1 }); hitAtWallMs = $(if ($acts -and $t -ge $hitAt) { $hitAt } else { 0 }); repairAtWallMs = $(if ($repairs -and $t -ge $repAt) { $repAt } else { 0 }) })
+        $cCur = 1000
+        if ($followsHit -and $hits -and $t -ge $hitAt + 1000) { $cCur = 600 }
+        if ($cCur -eq 600 -and $repairs -and $followsRepair -and $t -ge $repAt + 1000) { $cCur = 1000 }
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member hull ([pscustomobject]@{ cur = $cCur; max = 1000; before = -1; afterHit = -1; afterRepair = -1; hitAtWallMs = 0; repairAtWallMs = 0 })
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}
 function New-BridgesRun([int]$fired = 6, [int]$lost = 0) {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000
     for ($i = 0; $i -lt 400; $i++) {
@@ -1539,12 +1601,19 @@ function Invoke-ScorerSelfTest {
         @{ Name = "mission: never acted";    Run = (New-MissionRun -acts $false);      Expect = "TIMEOUT"; Mission = $true },
         @{ Name = "bridges: all arrive";     Run = (New-BridgesRun);                   Expect = "PASS";    Bridges = $true },
         @{ Name = "bridges: one lost";       Run = (New-BridgesRun -lost 1);           Expect = "FAIL";    Bridges = $true },
-        @{ Name = "bridges: too few fired";  Run = (New-BridgesRun -fired 3);          Expect = "ERROR";   Bridges = $true }
+        @{ Name = "bridges: too few fired";  Run = (New-BridgesRun -fired 3);          Expect = "ERROR";   Bridges = $true },
+        @{ Name = "hull: follows both";      Run = (New-HullRun);                      Expect = "PASS";    Hull = $true },
+        @{ Name = "hull: hit not shown";     Run = (New-HullRun -followsHit $false);   Expect = "FAIL";    Hull = $true },
+        @{ Name = "hull: repair not shown";  Run = (New-HullRun -followsRepair $false); Expect = "FAIL";   Hull = $true },
+        @{ Name = "hull: hit did nothing";   Run = (New-HullRun -hits $false);         Expect = "ERROR";   Hull = $true },
+        @{ Name = "hull: never repaired";    Run = (New-HullRun -repairs $false);      Expect = "ERROR";   Hull = $true },
+        @{ Name = "hull: never hit";         Run = (New-HullRun -acts $false);         Expect = "TIMEOUT"; Hull = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
+             elseif ($case.ContainsKey("Hull")) { Invoke-HullScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Bridges")) { Invoke-BridgesScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Mission")) { Invoke-MissionScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Quest")) { Invoke-QuestScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
@@ -1657,7 +1726,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $sceneSyncValue = if ($NoSceneSync) { 0 } else { 1 }
     $questStartValue = if ($NoQuestStartSync) { 0 } else { 1 }
     $missionBridgeValue = if ($NoMissionBridge) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $hullSyncValue = if ($NoShipHullSync) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"
@@ -1868,6 +1938,7 @@ try {
                  elseif ($Scenario -eq "jetpack") { Invoke-JetpackScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "hull") { Invoke-HullScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "bridges") { Invoke-BridgesScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "mission") { Invoke-MissionScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "quest") { Invoke-QuestScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }

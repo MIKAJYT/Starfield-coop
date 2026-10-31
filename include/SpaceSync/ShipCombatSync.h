@@ -34,4 +34,9 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length);
 // thread (Tick) can spawn the visible bolt with the host's real aim.
 void OnRemoteFire(const Pulsar::Network::ShipFireData& a_fire);
 
+// Test bot (Debug/TestBot, scenario "hull"): the local ship's hull; change it by
+// a_delta (negative = a hit, positive = a repair) the way the client mirror does.
+bool ReadHullForTest(float& a_cur, float& a_max);
+bool ModHullForTest(float a_delta);
+
 }  // namespace Pulsar::ShipCombatSync
