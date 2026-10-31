@@ -78,8 +78,11 @@ Last updated 2026-10-30. Run IDs and details are in the working notes
 4. **Bot tests for everything that "exists"**, then jetpack and aim sync, friendly fire off.
    Done: friendly fire, world pickups, reconnect, aim (partly), separate inventories and
    skill trees, NPC damage both ways. Left: jetpack and head pitch proof (need a bot that can
-   fly and look, or a person). Seen once in 3 `separate` runs: a mid-session save from the
-   host never reached the client (sent, never received, other traffic fine); not reproduced.
+   fly and look, or a person). Lost save transfer, seen twice: a mid-session save from the
+   host never reached the client (host logs "SendSave: sent", the client never "received
+   save", no warning, other traffic fine). Both times it was a second save sent 35-100 s
+   after a previous one (`separate` twin 20261030-212343; `space` 20261031-014412, where
+   the client stayed in orbit while the host was at The Eye: the "stuck in space" report).
 5. **World and quests:** POI/station divergence, cutscenes, mission types.
    Done: scene sync (bot `scene`), quest start sync (bot `quest`), mission-board missions
    through the host's save (bot `mission`). Station/POI divergence: bot `space` reaches The
