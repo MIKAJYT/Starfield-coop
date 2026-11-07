@@ -10,6 +10,7 @@
 #include "Network/NetworkHost.h"
 #include "Papyrus/GameCalls.h"
 #include "SceneSync/SceneSync.h"
+#include "SpaceSync/SpaceClockSync.h"
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
@@ -2084,6 +2085,15 @@ namespace Pulsar::TestBot
                             s_seatId.store(ref ? ref->formID : 0);
                         });
                 }
+            }
+            // spaceLag/catchUps: SpaceClockSync on the client (lag NaN until measured).
+            {
+                const double lag = Pulsar::SpaceClockSync::LastLagForTest();
+                char l[96];
+                std::snprintf(l, sizeof(l), ",\"spaceLag\":%s,\"catchUps\":%d",
+                              std::isfinite(lag) ? std::to_string(lag).c_str() : "null",
+                              Pulsar::SpaceClockSync::CatchUpsForTest());
+                j += l;
             }
             // partnerSeatId: the seat the partner's figure sits in on this side.
             char c[96];

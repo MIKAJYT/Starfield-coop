@@ -178,8 +178,14 @@ the wrong place for `+0x9522D0`).
   once by the owner; no bot check yet).
 - The client's body is braked to speed 0 between updates (no pilot); if the movement looks
   stepped, also set its velocity (`[body+0x4D0]+0xB0`, vt[0x278]) from the host's.
-- The client's universe runs ~21 s behind after loading (finding 12); a one-time time warp
-  catches it up. Not built into the join yet.
+- ~~The client's universe runs ~21 s behind after loading~~: built as `SpaceClockSync`
+  (`CoopSpaceTimeSync`). The host sends its draw origin (`PKT_SPACE_CLOCK`, 2 Hz); the
+  client extrapolates it with the host's velocity, takes the lag along that velocity
+  (ignored if more than 20 km off the host's track), and adds lag x TimeScale x 0.96 to
+  every space object's dt once (hook on `+0x234A5D0`, 150 ms window, each object once).
+  Run 20261107-163044: 20.28 s -> 0.09 s in three catch-ups (one window caught no update
+  and was retried), then a slow fall-back of ~0.01 s/s topped up at 0.5 s; twin
+  20261107-163620 stays 22.0-22.5 s behind.
 - A bot check with a twin (`CoopShipBodyByOrigin = 0`).
 
 - Most promising: sync the orbit, not the position. Dump the host's and the client's

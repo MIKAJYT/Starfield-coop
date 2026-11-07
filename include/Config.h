@@ -233,6 +233,14 @@ namespace Pulsar
         // ini: CoopShipBodyByOrigin = 0
         bool        coopShipBodyByOrigin = true;
 
+        // Space clock catch-up (phase 6): a client's orbits (planets, stations, ships)
+        // run behind the host's by its save-load time (~21 s), because the engine
+        // advances them by each frame's dt. The client measures the lag from the
+        // host's draw origin (PKT_SPACE_CLOCK) and catches up once by adding that
+        // much time to every space object's next update (SpaceClockSync).
+        // 0 = no catch-up (bot twin). ini: CoopSpaceTimeSync = 0
+        bool        coopSpaceTimeSync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

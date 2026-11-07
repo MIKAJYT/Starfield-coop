@@ -40,6 +40,7 @@
 #include "QuestSync/QuestSync.h"
 #include "QuestSync/RewardShare.h"
 #include "SceneSync/SceneSync.h"
+#include "SpaceSync/SpaceClockSync.h"
 #include "Coop/TakeoffVote.h"
 #include "DialogSync/DialogSync.h"
 #include "SpawnSync/SpawnSync.h"
@@ -1612,6 +1613,11 @@ namespace Pulsar::Network
             return;
         }
 
+        // PKT_SPACE_CLOCK - the host's draw origin, for the client's space clock catch-up.
+        if (!m_isHost && a_packet->dataLength >= 1 + 3 * sizeof(double) && a_packet->data[0] == PKT_SPACE_CLOCK) {
+            Pulsar::SpaceClockSync::OnPacketReceived(a_packet->data, a_packet->dataLength);
+            return;
+        }
         // PKT_SCENE - the host started or ended a scene (SceneSync).
         if (a_packet->dataLength >= 6 && a_packet->data[0] == PKT_SCENE) {
             Pulsar::SceneSync::OnPacketReceived(a_packet->data, a_packet->dataLength);

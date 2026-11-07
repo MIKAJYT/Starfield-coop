@@ -26,6 +26,7 @@
 #include "DialogSync/DialogSync.h"
 #include "EventTrace/EventTrace.h"
 #include "SceneSync/SceneSync.h"
+#include "SpaceSync/SpaceClockSync.h"
 #include "VoiceBridge/VoiceBridge.h"
 #include "SpawnSync/SpawnSync.h"
 #include "CellDiag.h"
@@ -965,6 +966,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
         Pulsar::DialogSync::Init();
         Pulsar::EventTrace::Init();   // dev-only quest/script/spawn/dialogue trace
         Pulsar::SceneSync::Init();    // host scenes start on the clients too
+        Pulsar::SpaceClockSync::Init();  // client catches up the host's space orbits after loading
         Pulsar::Voice::VoiceBridge::Init();  // proximity voice loopback socket
         Pulsar::SpawnSync::Init();    // host-authoritative NPC spawn replication
         Pulsar::VehicleSync::Init();
@@ -1587,6 +1589,7 @@ static void OnSFSEMessage(SFSE::MessagingInterface::Message* a_msg)
                 PROF_CALL("DockSync::Tick", Pulsar::DockSync::Tick());
                 PROF_CALL("SpaceFlightProbe::Tick", Pulsar::SpaceFlightProbe::Tick());
                 PROF_CALL("FlightSync::Tick", Pulsar::FlightSync::Tick());
+                PROF_CALL("SpaceClockSync::Tick", Pulsar::SpaceClockSync::Tick());
                 PROF_CALL("ShipCombatSync::Tick", Pulsar::ShipCombatSync::Tick());   // ship-combat sync (slice1 read/log)
                 PROF_CALL("NPCShipProbe::Tick", Pulsar::NPCShipProbe::Tick());
                 PROF_CALL("CellContentSync::Tick", Pulsar::CellContentSync::Tick());

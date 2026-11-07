@@ -423,6 +423,12 @@ namespace Pulsar
                 cfg.coopShipBodyByOrigin = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopShipBodyByOrigin = {}"sv, cfg.coopShipBodyByOrigin);
             }
+            else if (keyLower == "coopspacetimesync" || keyLower == "coop_space_time_sync") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopSpaceTimeSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopSpaceTimeSync = {}"sv, cfg.coopSpaceTimeSync);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

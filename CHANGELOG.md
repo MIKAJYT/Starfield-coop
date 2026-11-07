@@ -18,6 +18,18 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **Space clock catch-up after joining** (`CoopSpaceTimeSync`, default 1, new
+  `SpaceClockSync`, packet `PKT_SPACE_CLOCK` 0xAB). The engine advances planets,
+  stations and ships by each frame's time, not from a clock, so a client's universe ran
+  ~21 s behind the host's after loading the host's save (its load time). The host sends
+  its draw origin twice a second; the client measures how far behind it is along the
+  host's motion and catches up by adding that time once to every space object's next
+  update (hook on the per-object space update, aiming 4 % short since an overshoot
+  cannot be undone). A slow fall-back of ~0.01 s per second is topped up whenever it
+  passes 0.5 s. *Checked in game*: 20.28 s behind after joining, 0.09 s after three
+  catch-ups, then 0.07-0.5 s (run 20261107-163044); twin with the switch off stays
+  22.0-22.5 s behind (run 20261107-163620). Measured from the logs, no bot scorer yet.
+
 - **Flying together: the passenger sees what the pilot sees** (`CoopShipBodyByOrigin`,
   default 1). The passenger's view out of the window did not follow the host's flight.
   Nearby objects are placed relative to the ship's physics body, and the existing flight
