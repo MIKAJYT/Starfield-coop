@@ -18,6 +18,17 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **Bot check for flying together** (`fly` scenario). From a save in the ship near The
+  Eye both bots report where The Eye is drawn relative to their ship (the passenger's
+  view out of the window); the launcher compares each client sample 40-100 s after
+  joining with the host's view at the same moment and passes under 30 m (median).
+  Twin `-NoShipBodyByOrigin` (the host's old ship-body search) fails at 2058 m.
+  **It found the passenger's view unreliable**: 3 of 8 runs passed (0.2 m median), 5
+  failed at 1.3-1.7 km. In a failing run the client's view of The Eye swings ~1.5 km to
+  and fro over about a minute while the host's drifts evenly: something on the client
+  fights the synced ship state. Not the clock catch-up (failures with it on and off) and
+  not only a bad ship-body pick (one failing run picked with a real match). Open.
+
 - **The partner's figure stands up sooner** (`CoopFastStandUp`, default 1;
   `CoopStandUpRespawnMs`, default 1000). When the partner leaves a seat, its figure is
   respawned standing; the pause before the spawn was 2 s, so after the host pressed E

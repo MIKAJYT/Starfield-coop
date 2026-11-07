@@ -90,7 +90,11 @@ param(
     # after it is in the world (70 s) it must have left that seat (a passenger seat or standing,
     # CoopLeaveHostSeat=1). -NoLeaveHostSeat: twin. In a passenger seat the host must show the
     # client's figure in that seat (CoopClientSeatSync=1). -NoClientSeatSync: twin.
-    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull", "dock", "seat")][string]$Scenario = "follow",
+    # fly: from a save in the ship near The Eye; both report where The Eye is drawn relative
+    # to their ship (what a passenger sees out of the window). 40-100 s after the client is
+    # in the world, the client's view must match the host's at the same moment (median
+    # under 30 m). -NoShipBodyByOrigin: twin (the host's old ship-body search).
+    [ValidateSet("follow", "door", "loot", "reward", "takeoff", "papyrus", "friendlyfire", "aim", "jetpack", "pickup", "reconnect", "separate", "damage", "space", "scene", "quest", "mission", "bridges", "hull", "dock", "seat", "fly")][string]$Scenario = "follow",
     [switch]$NoRestoreOwnCharacter,
     [switch]$NoNpcHealthSync,
     [switch]$NoSceneSync,
@@ -103,6 +107,7 @@ param(
     [switch]$NoSpaceTimeSync,
     [switch]$NoShipVelocitySync,
     [switch]$NoFastStandUp,
+    [switch]$NoShipBodyByOrigin,
     # Keep both games open this many seconds after the result (a person looks).
     [int]$HoldSec = 0,
     [switch]$NoAutoReconnect,
@@ -1147,6 +1152,62 @@ function Invoke-SeatScore {
     return $r
 }
 
+# ---- fly scenario -------------------------------------------------------------
+# From a save in the ship near The Eye. Both bots report where The Eye is drawn
+# relative to their ship (eyeDrawn): the passenger's view out of the window. Each
+# client sample 40-100 s after joining is compared with the host's view at the same
+# wall time (interpolated between the host's samples around it). PASS: median gap
+# under 30 m over at least 10 pairs. With CoopShipBodyByOrigin=0 the host sent an
+# empty ship state and the client's station sat ~2 km elsewhere.
+function Invoke-FlyScore {
+    param($HostSamples, $ClientSamples, [bool]$Final)
+    $r = @{ Result = "PENDING"; Reasons = New-Object System.Collections.Generic.List[string] }
+    $hostList = @($HostSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["eyeDrawn"] -and $_.eyeDrawn })
+    $clientList = @($ClientSamples | Sort-Object wallMs | Where-Object { $_.PSObject.Properties["eyeDrawn"] })
+    if ($clientList.Count -eq 0 -or $hostList.Count -lt 2) {
+        if ($Final) { $r.Result = "ERROR"; $r.Reasons.Add("no eyeDrawn from " + $(if ($hostList.Count -lt 2) { "the host (The Eye must be loaded: start from a save near it)" } else { "the client" })) }
+        return $r
+    }
+    $in = @($ClientSamples | Sort-Object wallMs | Where-Object { (-not $_.PSObject.Properties["inWorld"] -or $_.inWorld) -and $_.connected }) | Select-Object -First 1
+    if (-not $in) {
+        if ($Final) { $r.Result = "TIMEOUT"; $r.Reasons.Add("the client never got into the world") }
+        return $r
+    }
+    $t0 = [long]$in.wallMs
+    $gaps = New-Object System.Collections.Generic.List[double]
+    $noView = 0
+    foreach ($c in @($clientList | Where-Object { [long]$_.wallMs -ge $t0 + 40000 -and [long]$_.wallMs -le $t0 + 100000 })) {
+        if (-not $c.eyeDrawn) { $noView++; continue }
+        $t = [long]$c.wallMs
+        $a = @($hostList | Where-Object { [long]$_.wallMs -le $t }) | Select-Object -Last 1
+        $b = @($hostList | Where-Object { [long]$_.wallMs -ge $t }) | Select-Object -First 1
+        if (-not $a -or -not $b) { continue }
+        $span = [double]([long]$b.wallMs - [long]$a.wallMs)
+        $f = if ($span -gt 0) { ($t - [long]$a.wallMs) / $span } else { 0.0 }
+        if ($span -gt 3000) { continue }  # host samples too far apart to interpolate
+        $d2 = 0.0
+        for ($k = 0; $k -lt 3; $k++) {
+            $h = [double]$a.eyeDrawn[$k] + ([double]$b.eyeDrawn[$k] - [double]$a.eyeDrawn[$k]) * $f
+            $d2 += [Math]::Pow($h - [double]$c.eyeDrawn[$k], 2)
+        }
+        $gaps.Add([Math]::Sqrt($d2))
+    }
+    $lateEnough = @($clientList | Where-Object { [long]$_.wallMs -gt $t0 + 100000 }).Count -gt 0
+    if ($gaps.Count -lt 10) {
+        if ($Final -or $lateEnough) {
+            $r.Result = "ERROR"; $r.Reasons.Add("only $($gaps.Count) client/host view pairs 40-100 s after joining ($noView client samples without The Eye)")
+        }
+        return $r
+    }
+    $sorted = @($gaps | Sort-Object)
+    $median = $sorted[[int]($sorted.Count / 2)]
+    $r.Details = "fly: {0} pairs, gap between the host's and the client's view of The Eye: median {1:F1} m, max {2:F1} m" -f $sorted.Count, $median, $sorted[-1]
+    if (-not $lateEnough -and -not $Final) { return $r }
+    if ($median -lt 30) { $r.Result = "PASS" }
+    else { $r.Result = "FAIL"; $r.Reasons.Add(("the client sees The Eye {0:F0} m away from where the host sees it (median)" -f $median)) }
+    return $r
+}
+
 # ---- takeoff scenario ---------------------------------------------------------
 # Both players start aboard the landed ship (Save10, "Star Eagle"). The host bot
 # sits in the pilot seat, opens the takeoff menu and asks for the launch. The
@@ -1451,7 +1512,21 @@ function New-TakeoffRun([int]$readyAfter = 12000, [int]$spaceAfter = 16000, [boo
     $d = if ($boards) { @("[PULSAR] [TAKEOFF-VOTE] vote 1 passed - boarding: $how") } else { @() }
     return @{ H = $hostRun; C = $clientRun; D = $d }
 }
-function New-SeatRun([bool]$sits = $true, [bool]$stands = $true, [string]$movesTo = "", [string]$hostShows = "") {
+function New-FlyRun([double]$offset = 0.0, [bool]$hostView = $true) {
+    $hostRun = @(); $clientRun = @(); $t0 = 1000000
+    for ($i = 0; $i -lt 130; $i++) {
+        $t = $t0 + $i * 1000
+        # The Eye drifts 5 m/s away from the ship; the client's view is off by $offset.
+        $e = @((-600.0 - 4.2 * $i), (200.0 + 1.0 * $i), (400.0 + 2.7 * $i))
+        $hs = New-Sample "host" ($t + 50) @(0, 0, 0) @(1, 0, 0) $true
+        $hs | Add-Member eyeDrawn $(if ($hostView) { @(($e[0] - 4.2 * 0.05), ($e[1] + 0.05), ($e[2] + 2.7 * 0.05)) } else { $null })
+        $cs = New-Sample "client" $t @(1, 0, 0) @(0, 0, 0) $true
+        $cs | Add-Member connected $true
+        $cs | Add-Member eyeDrawn @(($e[0] + $offset), $e[1], $e[2])
+        $hostRun += $hs; $clientRun += $cs
+    }
+    return @{ H = $hostRun; C = $clientRun; D = @() }
+}function New-SeatRun([bool]$sits = $true, [bool]$stands = $true, [string]$movesTo = "", [string]$hostShows = "") {
     $hostRun = @(); $clientRun = @(); $t0 = 1000000
     for ($i = 0; $i -lt 100; $i++) {
         $t = $t0 + $i * 1000
@@ -1757,13 +1832,17 @@ function Invoke-ScorerSelfTest {
         @{ Name = "seat: never sat";         Run = (New-SeatRun -sits $false);         Expect = "ERROR";   Seat = $true },
         @{ Name = "seat: passenger seat";    Run = (New-SeatRun -stands $false -movesTo "03292AE0"); Expect = "PASS"; Seat = $true },
         @{ Name = "seat: host shows it";     Run = (New-SeatRun -stands $false -movesTo "03292AE0" -hostShows "03292AE0"); Expect = "PASS"; Seat = $true },
-        @{ Name = "seat: host shows none";   Run = (New-SeatRun -stands $false -movesTo "03292AE0" -hostShows "00000000"); Expect = "FAIL"; Seat = $true }
+        @{ Name = "seat: host shows none";   Run = (New-SeatRun -stands $false -movesTo "03292AE0" -hostShows "00000000"); Expect = "FAIL"; Seat = $true },
+        @{ Name = "fly: same view";          Run = (New-FlyRun);                       Expect = "PASS";    Fly = $true },
+        @{ Name = "fly: station 2 km off";   Run = (New-FlyRun -offset 2000);          Expect = "FAIL";    Fly = $true },
+        @{ Name = "fly: no host view";       Run = (New-FlyRun -hostView $false);      Expect = "ERROR";   Fly = $true }
     )
     $bad = 0
     foreach ($case in $cases) {
         $s = if ($case.ContainsKey("Door")) { Invoke-DoorScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Loot")) { Invoke-LootScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -ClientDecisions $case.Run.D -Final $true }
              elseif ($case.ContainsKey("Seat")) { Invoke-SeatScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
+             elseif ($case.ContainsKey("Fly")) { Invoke-FlyScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Dock")) { Invoke-DockScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Hull")) { Invoke-HullScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
              elseif ($case.ContainsKey("Bridges")) { Invoke-BridgesScore -HostSamples $case.Run.H -ClientSamples $case.Run.C -Final $true }
@@ -1885,7 +1964,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $spaceTimeValue = if ($NoSpaceTimeSync) { 0 } else { 1 }
     $shipVelocityValue = if ($NoShipVelocitySync) { 0 } else { 1 }
     $fastStandValue = if ($NoFastStandUp) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`nCoopLeaveHostSeat = $standUpValue`r`nCoopClientSeatSync = $clientSeatValue`r`nCoopSpaceTimeSync = $spaceTimeValue`r`nCoopShipVelocitySync = $shipVelocityValue`r`nCoopFastStandUp = $fastStandValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $bodyByOriginValue = if ($NoShipBodyByOrigin) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`nCoopLeaveHostSeat = $standUpValue`r`nCoopClientSeatSync = $clientSeatValue`r`nCoopSpaceTimeSync = $spaceTimeValue`r`nCoopShipVelocitySync = $shipVelocityValue`r`nCoopFastStandUp = $fastStandValue`r`nCoopShipBodyByOrigin = $bodyByOriginValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     # Test-only Papyrus helpers (scripts/Source/PulsarTest*.psc, compiled with the Creation
     # Kit's compiler into build/papyrus): into the test copies only, never the release.
@@ -2102,6 +2182,7 @@ try {
                  elseif ($Scenario -eq "aim") { Invoke-AimScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "friendlyfire") { Invoke-FriendlyFireScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "seat") { Invoke-SeatScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
+                 elseif ($Scenario -eq "fly") { Invoke-FlyScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "dock") { Invoke-DockScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "hull") { Invoke-HullScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }
                  elseif ($Scenario -eq "bridges") { Invoke-BridgesScore -HostSamples $hostSeen -ClientSamples $clientSeen -Final $final }

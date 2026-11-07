@@ -55,6 +55,35 @@ namespace Pulsar::TestBot
         // (written by the state report, read by the host's stand-up step).
         std::atomic<std::uint32_t> g_seatFurnId{ 0 };
 
+        // fly: The Eye (station REFR 0x00012894, instances/space-eye-ref.txt) as drawn
+        // here: its 3D root's local translate (NiAVObject +0x70), written every frame
+        // as (station position - draw origin), i.e. relative to the player's ship.
+        constexpr std::uint32_t kTheEyeRef = 0x00012894;
+
+        bool SafeReadTranslate(RE::NiAVObject* a_node, float (&a_out)[3]) noexcept
+        {
+            __try {
+                const auto* t = reinterpret_cast<const float*>(reinterpret_cast<const std::uint8_t*>(a_node) + 0x70);
+                for (int k = 0; k < 3; ++k) a_out[k] = t[k];
+                return true;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                return false;
+            }
+        }
+
+        bool SafeEyeDrawn(float (&a_out)[3])
+        {
+            auto* eye = RE::TESForm::LookupByID<RE::TESObjectREFR>(kTheEyeRef);
+            if (!eye) return false;
+            RE::NiAVObject* node = nullptr;
+            {
+                auto guard = eye->loadedData.LockRead();
+                const auto* d = *guard;
+                if (d && d->data3D) node = d->data3D.get();
+            }
+            return node && SafeReadTranslate(node, a_out);
+        }
+
         // Scenarios (tests/coopqa/Run-CoopQA.ps1 -Scenario):
         //   follow - the host moves itself; the client's clone must follow.
         //   door   - the host goes through the nearest load door; with
@@ -1950,7 +1979,7 @@ namespace Pulsar::TestBot
             s_state.cfg.scenario != "separate" && s_state.cfg.scenario != "damage" &&
             s_state.cfg.scenario != "scene" && s_state.cfg.scenario != "quest" && s_state.cfg.scenario != "mission" &&
             s_state.cfg.scenario != "bridges" && s_state.cfg.scenario != "hull" && s_state.cfg.scenario != "dock" &&
-            s_state.cfg.scenario != "seat" &&
+            s_state.cfg.scenario != "seat" && s_state.cfg.scenario != "fly" &&
             !s_state.acted && cloneVisible && me.valid &&
             now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs) {
             char msg[200];
@@ -2092,6 +2121,20 @@ namespace Pulsar::TestBot
         }
         if (s_state.cfg.scenario == "quest") {
             j += ",\"questStarts\":\"" + Pulsar::QuestSync::RecentStartsForTest() + "\"";
+        }
+        if (s_state.cfg.scenario == "fly") {
+            // Where The Eye is drawn relative to this ship (its node's local translate:
+            // the station is drawn relative to the draw origin, the player's ship). That
+            // is what a passenger sees out of the window; the launcher compares host and
+            // client. null when The Eye has no 3D here.
+            float e[3];
+            if (SafeEyeDrawn(e)) {
+                char c[96];
+                std::snprintf(c, sizeof(c), ",\"eyeDrawn\":[%.1f,%.1f,%.1f]", e[0], e[1], e[2]);
+                j += c;
+            } else {
+                j += ",\"eyeDrawn\":null";
+            }
         }
         if (s_state.cfg.scenario == "seat") {
             // Which seat, from Papyrus GetFurnitureUsing every 2 s (the raw seat handle

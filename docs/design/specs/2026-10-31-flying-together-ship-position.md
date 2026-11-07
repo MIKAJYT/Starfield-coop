@@ -180,6 +180,18 @@ the wrong place for `+0x9522D0`).
   the rotation). Position: median 0.3 m apart, 4.0 m at speed, at most 14.6 m at 98 m/s
   (about 0.15 s of travel: send interval plus the client's body standing still between
   updates).
+- **Open: the passenger's view is unreliable.** The bot `fly` scenario compares where
+  The Eye is drawn relative to the ship on both sides (node local translate). Runs
+  2026-11-07: with the clock catch-up on, 1 of 5 passed (195931); with it off, 2 of 3
+  (201421, 201858 passed; 202939 failed at 1658 m). The twin with the old body search
+  fails at 2058 m (202500). In a failing run the client's view of The Eye swings about
+  1.5 km to and fro with a period of roughly a minute while the host's drifts evenly at
+  ~4 m/s: something on the client fights the synced ship state (its own flight
+  physics, the ship's orbit refit, the velocity or prediction write?). Ruled out: the
+  clock catch-up alone, and the near objects being parented to the ship (their parent
+  was the same 2,560 km body in passing and failing runs). One failing run's client
+  re-acquired its ship body with d2 = 3.4e38 (no real match, a race in the M.1 V2 pick);
+  another failed with a real match, so that is not the whole story.
 - ~~Set the client body's velocity from the host's~~: built (`CoopShipVelocitySync`,
   `ShipTransformData.havokVelocity`), plus moving each applied position on by velocity x
   the update's age. Three owner flights sampled with `steer.ps1` (the last one comparing
