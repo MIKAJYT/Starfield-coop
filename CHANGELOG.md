@@ -18,6 +18,16 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **The passenger's ship moves on at the pilot's speed** (`CoopShipVelocitySync`,
+  default 1). The flight update now also carries the ship body's velocity
+  (`ShipTransformData.havokVelocity`, packet 116 -> 128 bytes; both players need this
+  version). The client's pilotless ship was braked to 0 between updates; now it keeps
+  the host's speed (430 m/s against the host's 428), and each update's position is
+  moved on by velocity x the update's age. *Checked in game* (owner flying the host,
+  both bodies sampled): heading identical throughout; the gap stays ~0.07 s of travel
+  (median; at most 0.15-0.21 s) with or without it, a few frames, which is the floor
+  between two games. *Watched by the owner*: smoother out of the window, so it stays on.
+
 - **Space clock catch-up after joining** (`CoopSpaceTimeSync`, default 1, new
   `SpaceClockSync`, packet `PKT_SPACE_CLOCK` 0xAB). The engine advances planets,
   stations and ships by each frame's time, not from a clock, so a client's universe ran

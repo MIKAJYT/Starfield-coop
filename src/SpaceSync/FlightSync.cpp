@@ -550,14 +550,15 @@ namespace {
     // here so MaybeSyncShipTransform can read it).
     static std::atomic<bool> g_outgoingHavokStateValid{ false };
     static float             g_outgoingHavokState[16]{};
+    static float             g_outgoingHavokVelocity[3]{};
     static std::mutex        g_outgoingHavokStateMutex;
 
     // V3 iter12 - PMO fire timestamp for active-pilot detection.
     // (Set in HookedPMOFire - defined later in this file.)
     static std::atomic<std::uint64_t> g_lastPMOFireMs{ 0 };
     // Forward decls - defined in iter8 hook section below.
-    static void PublishOutgoingHavokState(const float a_in[16]);
-    static bool ConsumeOutgoingHavokState(float a_out[16]);
+    static void PublishOutgoingHavokState(const float a_in[16], const float a_vel[3]);
+    static bool ConsumeOutgoingHavokState(float a_out[16], float a_vel[3]);
 
     // Track the last rotate row0 we OBSERVED on our local NiNode, to detect
     // whether physics is actively writing it (i.e. we are the active pilot).
@@ -676,7 +677,7 @@ namespace {
                 g_lastV3SendMs.store(now, std::memory_order_release);
                 // Pack havok state from the dedicated send buffer (filled by
                 // iter8 active_read in vt[8] hook).
-                ConsumeOutgoingHavokState(live.havokState);
+                ConsumeOutgoingHavokState(live.havokState, live.havokVelocity);
                 // L.3 V5 - stamp shipFormID so the receiver can resolve its
                 // local same-FormID ship REFR when its own GetSpaceship lookup
                 // fails (post-save-load on the passive side).
@@ -1313,18 +1314,48 @@ namespace {
     // anonymous namespace so MaybeSyncShipTransform can use it.
     // Helpers to publish/consume - kept in non-__try functions because
     // std::lock_guard introduces unwinding which conflicts with __try.
-    static void PublishOutgoingHavokState(const float a_in[16])
+    static void PublishOutgoingHavokState(const float a_in[16], const float a_vel[3])
     {
         std::lock_guard<std::mutex> lk(g_outgoingHavokStateMutex);
         std::memcpy(g_outgoingHavokState, a_in, sizeof(g_outgoingHavokState));
+        std::memcpy(g_outgoingHavokVelocity, a_vel, sizeof(g_outgoingHavokVelocity));
         g_outgoingHavokStateValid.store(true, std::memory_order_release);
     }
-    static bool ConsumeOutgoingHavokState(float a_out[16])
+    static bool ConsumeOutgoingHavokState(float a_out[16], float a_vel[3])
     {
         if (!g_outgoingHavokStateValid.load(std::memory_order_acquire)) return false;
         std::lock_guard<std::mutex> lk(g_outgoingHavokStateMutex);
         std::memcpy(a_out, g_outgoingHavokState, sizeof(g_outgoingHavokState));
+        std::memcpy(a_vel, g_outgoingHavokVelocity, sizeof(g_outgoingHavokVelocity));
         return true;
+    }
+
+    // Linear velocity of a ship body: [body+0x4D0]+0xB0, 3 floats (vt[0x270] reads,
+    // vt[0x278] writes the same 16 bytes; 5.08 m/s matched the host's drift, run
+    // 2026-11-07). Zero on failure.
+    static constexpr std::uintptr_t kHavokVelocityOffsetInData = 0xB0;
+    static void SafeReadHavokVelocity(void* a_havokBody, float a_out[3])
+    {
+        a_out[0] = a_out[1] = a_out[2] = 0.0f;
+        if (!a_havokBody) return;
+        __try {
+            auto data = *reinterpret_cast<std::uintptr_t*>(reinterpret_cast<std::uint8_t*>(a_havokBody) +
+                                                           kHavokBodyDataPtrOffset);
+            if (!data) return;
+            std::memcpy(a_out, reinterpret_cast<void*>(data + kHavokVelocityOffsetInData), 3 * sizeof(float));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            a_out[0] = a_out[1] = a_out[2] = 0.0f;
+        }
+    }
+    static void SafeWriteHavokVelocity(void* a_havokBody, const float a_in[3])
+    {
+        if (!a_havokBody) return;
+        __try {
+            auto data = *reinterpret_cast<std::uintptr_t*>(reinterpret_cast<std::uint8_t*>(a_havokBody) +
+                                                           kHavokBodyDataPtrOffset);
+            if (!data) return;
+            std::memcpy(reinterpret_cast<void*>(data + kHavokVelocityOffsetInData), a_in, 3 * sizeof(float));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     // === V3 iter13 - Active-pilot detection via per-body motion EMA ===
@@ -2212,7 +2243,9 @@ namespace {
             if (!SafeReadHavokState(a_param2, st)) return;
             // Store into the dedicated SEND buffer - separate from receive
             // buffer (g_pendingShipTransform.data) to avoid mixing concerns.
-            PublishOutgoingHavokState(st);
+            float vel[3];
+            SafeReadHavokVelocity(a_param2, vel);
+            PublishOutgoingHavokState(st, vel);
             std::uint64_t cnt = g_v3iter7SendCount.fetch_add(1) + 1;
             std::uint64_t lastLog = g_lastIter7LogMs.load(std::memory_order_acquire);
             if ((now - lastLog) >= 1000) {
@@ -2282,6 +2315,9 @@ namespace {
         }
 
         SafeWriteHavokState(a_param2, d.havokState);
+        if (Pulsar::GetConfig().coopShipVelocitySync) {
+            SafeWriteHavokVelocity(a_param2, d.havokVelocity);  // moves on between updates
+        }
         // Iter13 - mark apply timestamp so motion detection enters cooldown
         // and doesn't false-positive on host's deltas echoing through.
         g_iter13LastApplyMs.store(now, std::memory_order_release);
@@ -4948,7 +4984,9 @@ void Tick()
                 if (body) {
                     float st[16];
                     if (SafeReadHavokState(body, st)) {
-                        PublishOutgoingHavokState(st);
+                        float vel[3];
+                        SafeReadHavokVelocity(body, vel);
+                        PublishOutgoingHavokState(st, vel);
                     }
                 }
             }
@@ -5030,10 +5068,25 @@ void Tick()
                         // setter (writes cache AND commits to the live physics world) so
                         // the body physically rotates and carries the standing client.
                         const bool commitOn = Pulsar::GetConfig().coopSpaceBodyCommit;
+                        // Predict the host's position by the update's age (velocity
+                        // x age): the pipeline left the client 0.07-0.17 s of travel
+                        // behind at speed (2026-11-07), whether or not it also moved
+                        // on at the host's velocity in between.
+                        float st[16];
+                        std::memcpy(st, d.havokState, sizeof(st));
+                        if (Pulsar::GetConfig().coopShipVelocitySync) {
+                            const float ageS = static_cast<float>(nowV3 - recvAtV3) / 1000.0f;
+                            for (int k = 0; k < 3; ++k) st[12 + k] += d.havokVelocity[k] * ageS;
+                        }
                         if (commitOn) {
-                            SafeCommitHavokTransform(applyBody, d.havokState);
+                            SafeCommitHavokTransform(applyBody, st);
                         } else {
-                            SafeWriteHavokState(applyBody, d.havokState);
+                            SafeWriteHavokState(applyBody, st);
+                        }
+                        // The pilotless client ship is braked to 0 between updates;
+                        // the host's velocity lets it move on (CoopShipVelocitySync).
+                        if (Pulsar::GetConfig().coopShipVelocitySync) {
+                            SafeWriteHavokVelocity(applyBody, d.havokVelocity);
                         }
                         const std::uint64_t cnt =
                             g_iter13TickApplyCount.fetch_add(1) + 1;

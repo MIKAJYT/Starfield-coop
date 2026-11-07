@@ -241,6 +241,13 @@ namespace Pulsar
         // 0 = no catch-up (bot twin). ini: CoopSpaceTimeSync = 0
         bool        coopSpaceTimeSync = true;
 
+        // The pilot's ship velocity on the passenger's ship (phase 6): the client's
+        // pilotless ship is braked to 0 between flight-state updates and trailed the
+        // host by ~0.15 s of travel (14.6 m at 98 m/s). With the host's velocity in
+        // the update it moves on in between. 0 = position and rotation only (twin).
+        // ini: CoopShipVelocitySync = 0
+        bool        coopShipVelocitySync = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

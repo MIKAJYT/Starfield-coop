@@ -774,9 +774,13 @@ namespace Pulsar::Network
                                    // receiver locate its local same-FormID ship
                                    // via TESForm::LookupByID when player->GetSpaceship
                                    // returns null (typical after WorldSync save load).
+        float    havokVelocity[3]; // the body's linear velocity (havokBody[+0x4D0]+0xB0).
+                                   // The client's pilotless ship is braked to 0 between
+                                   // updates; with it, it moves on at the host's speed
+                                   // (14.6 m behind at 98 m/s without it, 2026-11-07).
     };
 #pragma pack(pop)
-    static_assert(sizeof(ShipTransformData) == 116, "ShipTransformData size");
+    static_assert(sizeof(ShipTransformData) == 128, "ShipTransformData size");
 
 #pragma pack(push, 1)
     // PKT_FAST_TRAVEL_SYNC payload - Phase L.7 V7.

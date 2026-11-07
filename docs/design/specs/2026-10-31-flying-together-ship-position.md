@@ -180,8 +180,14 @@ the wrong place for `+0x9522D0`).
   the rotation). Position: median 0.3 m apart, 4.0 m at speed, at most 14.6 m at 98 m/s
   (about 0.15 s of travel: send interval plus the client's body standing still between
   updates).
-- If the 0.15 s lag shows at speed, set the client body's velocity from the host's too
-  (`[body+0x4D0]+0xB0`), so it moves on between updates.
+- ~~Set the client body's velocity from the host's~~: built (`CoopShipVelocitySync`,
+  `ShipTransformData.havokVelocity`), plus moving each applied position on by velocity x
+  the update's age. Three owner flights sampled with `steer.ps1` (the last one comparing
+  the client with the midpoint of two host reads): gap in seconds of travel, median /
+  95 % / max: position only 0.067 / 0.154 / 0.154 s (98 m/s); + velocity 0.084 / 0.162 /
+  0.170 s (428 m/s); + prediction 0.068 / 0.151 / 0.209 s (427 m/s). No measurable gain:
+  the rest is a few frames (each side steps physics and hands on its state once per
+  frame). The owner found the view smoother with it, so it stays on.
 - The client's body is braked to speed 0 between updates (no pilot); if the movement looks
   stepped, also set its velocity (`[body+0x4D0]+0xB0`, vt[0x278]) from the host's.
 - ~~The client's universe runs ~21 s behind after loading~~: built as `SpaceClockSync`
