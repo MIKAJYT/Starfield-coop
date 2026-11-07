@@ -435,6 +435,18 @@ namespace Pulsar
                 cfg.coopShipVelocitySync = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopShipVelocitySync = {}"sv, cfg.coopShipVelocitySync);
             }
+            else if (keyLower == "coopfaststandup" || keyLower == "coop_fast_stand_up") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopFastStandUp = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopFastStandUp = {}"sv, cfg.coopFastStandUp);
+            }
+            else if (keyLower == "coopstanduprespawnms" || keyLower == "coop_stand_up_respawn_ms") {
+                try {
+                    cfg.coopStandUpRespawnMs = static_cast<std::uint32_t>(std::clamp(std::stoi(value), 0, 5000));
+                } catch (...) {}
+                PLOG_INFO("[PULSAR] Config: CoopStandUpRespawnMs = {}"sv, cfg.coopStandUpRespawnMs);
+            }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

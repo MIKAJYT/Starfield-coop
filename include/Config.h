@@ -248,6 +248,17 @@ namespace Pulsar
         // ini: CoopShipVelocitySync = 0
         bool        coopShipVelocitySync = true;
 
+        // Partner stands up quickly: when the partner leaves a seat, its figure here is
+        // respawned standing after CoopStandUpRespawnMs instead of 2 s (the respawn is
+        // what builds the whole figure; popping it out of the seat with MoveTo lost its
+        // look). 0 = the old 2 s pause (twin). ini: CoopFastStandUp = 0
+        bool        coopFastStandUp = true;
+        // The pause before that respawn. 300 ms left the figure floating in a falling
+        // pose after standing up by hand (the new figure came in before the old one
+        // was gone, owner's report 2026-11-07); 1000 ms stood normally (run
+        // 20261107-191941, owner watching). ini: CoopStandUpRespawnMs = 1000
+        std::uint32_t coopStandUpRespawnMs = 1000;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard

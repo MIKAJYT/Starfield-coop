@@ -1788,6 +1788,12 @@ namespace Pulsar::VehicleSync
         return 0;
     }
 
+    // Partner stood up: its figure here is respawned standing (a fresh spawn builds the
+    // whole figure). The pause before the spawn was 2 s, the figure gone for that long
+    // plus its 3D load (CoopFastStandUp shortens it). Popping it out of the seat with
+    // Papyrus MoveTo instead reloaded its 3D without the partner's look: only the
+    // backpack showed (owner's report 2026-11-07).
+
     void OnRemoteSeatedUpdate(RE::Actor* a_clone, bool a_seated,
                               float a_x, float a_y, float a_z)
     {
@@ -1883,8 +1889,13 @@ namespace Pulsar::VehicleSync
             // was likely a no-op or worse, manual handle-clear redundant).
             // Removed all three: the engine state clears via ForceRespawn
             // alone (clone removed → re-spawned fresh = identical effect).
-            PLOG_INFO("[PULSAR] VehicleSync: triggering ForceRespawn on clone unseat"sv);
-            Pulsar::RemotePlayer::GetRemotePlayerManager().RequestForceRespawn();
+            //
+            // CoopFastStandUp: a shorter pause before the spawn (CoopStandUpRespawnMs). With
+            // 2 s the partner's figure was gone that long after its handle cleared
+            // (0.74 s after pressing E), then loaded its 3D (run 20261107-182502).
+            const uint32_t respawnMs = Pulsar::GetConfig().coopFastStandUp ? Pulsar::GetConfig().coopStandUpRespawnMs : 2000;
+            PLOG_INFO("[PULSAR] VehicleSync: triggering ForceRespawn on clone unseat (in {} ms)"sv, respawnMs);
+            Pulsar::RemotePlayer::GetRemotePlayerManager().RequestForceRespawn(respawnMs);
             return;
         }
 

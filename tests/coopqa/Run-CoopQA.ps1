@@ -102,6 +102,7 @@ param(
     [switch]$NoClientSeatSync,
     [switch]$NoSpaceTimeSync,
     [switch]$NoShipVelocitySync,
+    [switch]$NoFastStandUp,
     # Keep both games open this many seconds after the result (a person looks).
     [int]$HoldSec = 0,
     [switch]$NoAutoReconnect,
@@ -1883,7 +1884,8 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $clientSeatValue = if ($NoClientSeatSync) { 0 } else { 1 }
     $spaceTimeValue = if ($NoSpaceTimeSync) { 0 } else { 1 }
     $shipVelocityValue = if ($NoShipVelocitySync) { 0 } else { 1 }
-    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`nCoopLeaveHostSeat = $standUpValue`r`nCoopClientSeatSync = $clientSeatValue`r`nCoopSpaceTimeSync = $spaceTimeValue`r`nCoopShipVelocitySync = $shipVelocityValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
+    $fastStandValue = if ($NoFastStandUp) { 0 } else { 1 }
+    Write-PrivateFile (Join-Path $plugins "PULSAR.ini") ("[PULSAR]`r`nMode = $mode`r`nHostIP = 127.0.0.1`r`nPort = $port`r`nPlayerName = QA-$role`r`nCoopDoorFollow = $doorFollowValue`r`nCoopInstancedEnemyLoot = $instancedLootValue`r`nCoopQuestRewards = $questRewardsValue`r`nCoopTakeoffVote = $takeoffVoteValue`r`nCoopFriendlyFireGuard = $ffGuardValue`r`nCoopAimSync = $aimSyncValue`r`nCoopJetpackSync = $jetpackSyncValue`r`nCoopSharedWorldItems = $sharedItemsValue`r`nAutoReconnect = $autoReconnectValue`r`nCoopRestoreOwnCharacter = $restoreOwnValue`r`nCoopNpcHealthSync = $npcHealthValue`r`nCoopSceneSync = $sceneSyncValue`r`nCoopQuestStartSync = $questStartValue`r`nCoopMissionBridge = $missionBridgeValue`r`nCoopShipHullSync = $hullSyncValue`r`nCoopDockSync = $dockSyncValue`r`nCoopLeaveHostSeat = $standUpValue`r`nCoopClientSeatSync = $clientSeatValue`r`nCoopSpaceTimeSync = $spaceTimeValue`r`nCoopShipVelocitySync = $shipVelocityValue`r`nCoopFastStandUp = $fastStandValue`r`n" + (($ExtraIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     Write-PrivateFile (Join-Path $plugins "PulsarTestBot.ini") ("; TEST SLOT ONLY`r`nEnabled = 1`r`nStateFile = $state`r`nScenario = $Scenario`r`nMoveAfterMs = 45000`r`nMoveMetres = $MoveMetres`r`n" + (($ExtraBotIni -split ";" | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() + "`r`n" }) -join ""))
     # Test-only Papyrus helpers (scripts/Source/PulsarTest*.psc, compiled with the Creation
     # Kit's compiler into build/papyrus): into the test copies only, never the release.

@@ -18,6 +18,16 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **The partner's figure stands up sooner** (`CoopFastStandUp`, default 1;
+  `CoopStandUpRespawnMs`, default 1000). When the partner leaves a seat, its figure is
+  respawned standing; the pause before the spawn was 2 s, so after the host pressed E
+  (its seat freed 0.74 s later) the figure was gone for 2 s plus its 3D load. Now 1 s.
+  Tried and dropped: popping the figure out of the seat with Papyrus `MoveTo` reloaded its
+  3D without the partner's look (only the backpack showed), and a 0.3 s pause left the
+  new figure floating in a falling pose. *Bot-tested*: the seat scenario can now make the
+  host stand up (`HostStandAfterMs`). *Watched by the owner* with 1 s: the figure stands
+  normally (run 20261107-191941). Twin switch `-NoFastStandUp` (old 2 s).
+
 - **The passenger's ship moves on at the pilot's speed** (`CoopShipVelocitySync`,
   default 1). The flight update now also carries the ship body's velocity
   (`ShipTransformData.havokVelocity`, packet 116 -> 128 bytes; both players need this

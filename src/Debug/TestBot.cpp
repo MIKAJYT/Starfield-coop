@@ -51,6 +51,10 @@ namespace Pulsar::TestBot
 {
     namespace
     {
+        // seat: the seat this player sits in, from Papyrus GetFurnitureUsing every 2 s
+        // (written by the state report, read by the host's stand-up step).
+        std::atomic<std::uint32_t> g_seatFurnId{ 0 };
+
         // Scenarios (tests/coopqa/Run-CoopQA.ps1 -Scenario):
         //   follow - the host moves itself; the client's clone must follow.
         //   door   - the host goes through the nearest load door; with
@@ -96,6 +100,7 @@ namespace Pulsar::TestBot
             std::uint32_t sceneId = 0;          // scene: the scene the host starts; 0 = search running Akila scenes
             std::string   checkRefsFile;        // space: reference IDs (hex, one per line) to look up in this game
             bool          manualDock = false;   // dock: a person docks the host's ship; the bot only waits
+            std::uint64_t hostStandAfterMs = 0; // seat: the host stands up this long after the partner shows (0 = never)
             std::uint64_t lootAfterDeathMs = 5000;    // loot: wait after the death before taking
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
@@ -176,6 +181,8 @@ namespace Pulsar::TestBot
             std::uint64_t dockSettledMs = 0;            // dock: when this side was settled (tick)
             bool          hatchUsed = false;            // dock: walked through the cockpit hatch
             std::uint64_t dockStandTryMs = 0;           // dock: last try to stand up from a seat (tick)
+            std::uint64_t seatStandTryMs = 0;           // seat: last host stand-up try (tick)
+            int           seatStandTries = 0;
             std::string   hatchInfo;
             std::uint64_t hullHitWallMs = 0;            // hull (host): the hit, then the repair
             std::uint64_t hullHitMs = 0;
@@ -245,6 +252,7 @@ namespace Pulsar::TestBot
                 else if (key == "sceneid")     s.sceneId = static_cast<std::uint32_t>(std::stoul(value, nullptr, 16));
                 else if (key == "checkrefsfile") s.checkRefsFile = value;
                 else if (key == "manualdock")  s.manualDock = (value == "1" || value == "true");
+                else if (key == "hoststandafterms") s.hostStandAfterMs = std::strtoull(value.c_str(), nullptr, 10);
                 else if (key == "lootafterdeathms") s.lootAfterDeathMs = std::stoull(value);
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
@@ -1585,6 +1593,22 @@ namespace Pulsar::TestBot
         // Once settled it keeps running: after the host walks into the station its
         // figure leaves the client's view (run 20261031-125357), and the client must
         // still walk through its own hatch.
+        // Seat: the host stands up from its seat, as the interact key does, so the time
+        // until the client's figure of the host stands too can be read off both logs
+        // ("TestBot: seat: host stands up" here, "unseated" and the respawn there).
+        if (s_state.cfg.scenario == "seat" && isHost && s_state.cfg.hostStandAfterMs && cloneVisible &&
+            now - s_state.cloneSeenSinceMs >= s_state.cfg.hostStandAfterMs && s_state.seatStandTries < 3 &&
+            now - s_state.seatStandTryMs >= 5000 && SnapShip(player).seated) {
+            s_state.seatStandTryMs = now;
+            ++s_state.seatStandTries;
+            // GetFurnitureUsing's answer (polled for the seat state): SeatOf's raw
+            // handle found no seat on the host (run 20261107-181848).
+            const std::uint32_t seatId = g_seatFurnId.load();
+            RE::TESObjectREFR* seat = seatId ? RE::TESForm::LookupByID<RE::TESObjectREFR>(seatId) : SeatOf(player);
+            const int r = seat ? SafeActivateAsPlayer(seat, player) : -1;
+            PLOG_INFO("[PULSAR] TestBot: seat: host stands up from seat {:08X} (try {}): activate={}"sv,
+                      seat ? seat->formID : 0u, s_state.seatStandTries, r);
+        }
         if (s_state.cfg.scenario == "dock" && me.valid &&
             (s_state.dockSettledMs || (cloneVisible && now - s_state.cloneSeenSinceMs >= s_state.cfg.moveAfterMs))) {
             RE::TESObjectREFR* ship = SafeShipOf(player);
@@ -2072,7 +2096,6 @@ namespace Pulsar::TestBot
         if (s_state.cfg.scenario == "seat") {
             // Which seat, from Papyrus GetFurnitureUsing every 2 s (the raw seat handle
             // does not resolve, run 20261031-142744).
-            static std::atomic<std::uint32_t> s_seatId{ 0 };
             static std::uint64_t s_seatPollMs = 0;
             if (::GetTickCount64() - s_seatPollMs >= 2000) {
                 s_seatPollMs = ::GetTickCount64();
@@ -2082,7 +2105,7 @@ namespace Pulsar::TestBot
                     Pulsar::GameCalls::CallMethodForResult(vm, obj, "GetFurnitureUsing", {},
                         [](const RE::BSScript::Variable& a_v) {
                             auto* ref = a_v.is<RE::BSScript::Object>() ? RE::BSScript::UnpackVariable<RE::TESObjectREFR>(a_v) : nullptr;
-                            s_seatId.store(ref ? ref->formID : 0);
+                            g_seatFurnId.store(ref ? ref->formID : 0);
                         });
                 }
             }
@@ -2098,7 +2121,7 @@ namespace Pulsar::TestBot
             // partnerSeatId: the seat the partner's figure sits in on this side.
             char c[96];
             std::snprintf(c, sizeof(c), ",\"seated\":%s,\"seatId\":\"%08X\",\"partnerSeatId\":\"%08X\"",
-                          SnapShip(player).seated ? "true" : "false", s_seatId.load(),
+                          SnapShip(player).seated ? "true" : "false", g_seatFurnId.load(),
                           Pulsar::VehicleSync::CloneSeatRefForTest());
             j += c;
         }
