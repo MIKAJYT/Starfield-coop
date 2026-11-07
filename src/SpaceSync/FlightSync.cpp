@@ -1609,6 +1609,44 @@ namespace {
         }
     }
 
+    // The local player's ship body, found by the engine's own draw origin instead of a
+    // guess (CoopShipBodyByOrigin, docs/design/specs/2026-10-31-flying-together-ship-
+    // position.md). The draw origin is the player ship's position in the star system
+    // (the ship is always drawn at 0); a Havok body's system position is its position
+    // (+0x4D0 -> +0x80, floats) plus the physics world's double origin and float shift.
+    // So the player's own body sits at origin - G - F in body coordinates, to within a
+    // metre. The old reference (ship->data.location, or the HOST's received body
+    // position) missed: the host's body had drifted 3.4 km from (0,0,0), so the host
+    // never found it and sent zeros; a client away from the host never found its own.
+    //   origin = [[Starfield+0x5FB08E8] + 0x90] + 0x110   (3 doubles; caller +0x18849BE)
+    //   G      = Starfield+0x5F60520                       (3 doubles)
+    //   F      = Starfield+0x5F60200                       (3 floats)
+    // RVAs for 1.16.244, from the delta writer at +0x232E142..0x232E16B.
+    static constexpr std::uintptr_t kRVA_SpaceDrawOriginOwner = 0x5FB08E8;
+    static constexpr std::uintptr_t kRVA_PhysicsWorldOrigin   = 0x5F60520;
+    static constexpr std::uintptr_t kRVA_PhysicsWorldShift    = 0x5F60200;
+
+    static bool SafeReadOwnShipBodyRef(float a_out[3])
+    {
+        __try {
+            const std::uintptr_t owner =
+                *reinterpret_cast<std::uintptr_t*>(REL::Offset{ kRVA_SpaceDrawOriginOwner }.address());
+            if (!owner) return false;
+            const auto* o = reinterpret_cast<const double*>(owner + 0x90 + 0x110);
+            const auto* g = reinterpret_cast<const double*>(REL::Offset{ kRVA_PhysicsWorldOrigin }.address());
+            const auto* f = reinterpret_cast<const float*>(REL::Offset{ kRVA_PhysicsWorldShift }.address());
+            if (o[0] == 0.0 && o[1] == 0.0 && o[2] == 0.0) return false;  // not in space yet
+            for (int k = 0; k < 3; ++k) {
+                const double v = o[k] - g[k] - static_cast<double>(f[k]);
+                if (!std::isfinite(v) || std::fabs(v) > 1.0e7) return false;  // not a body-frame value
+                a_out[k] = static_cast<float>(v);
+            }
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
     static bool Iter13SafeReadBodyPos(void* a_havokBody, float a_out[3])
     {
         if (!a_havokBody) return false;
@@ -2056,7 +2094,12 @@ namespace {
                     // flight transforms (parked), fall back to data.location (≈ body
                     // at rest). g_psPosValid stays true whenever we have a ship, so
                     // NPC body tracking (gated on it) is unaffected.
-                    if (g_pendingShipTransform.armed.load(std::memory_order_acquire)) {
+                    float ownRef[3];
+                    if (Pulsar::GetConfig().coopShipBodyByOrigin && SafeReadOwnShipBodyRef(ownRef)) {
+                        g_psPosX.store(ownRef[0], std::memory_order_relaxed);
+                        g_psPosY.store(ownRef[1], std::memory_order_relaxed);
+                        g_psPosZ.store(ownRef[2], std::memory_order_relaxed);
+                    } else if (g_pendingShipTransform.armed.load(std::memory_order_acquire)) {
                         const auto& d = g_pendingShipTransform.data;
                         g_psPosX.store(d.havokState[12], std::memory_order_relaxed);
                         g_psPosY.store(d.havokState[13], std::memory_order_relaxed);

@@ -18,6 +18,18 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **Flying together: the passenger sees what the pilot sees** (`CoopShipBodyByOrigin`,
+  default 1). The passenger's view out of the window did not follow the host's flight.
+  Nearby objects are placed relative to the ship's physics body, and the existing flight
+  sync (V3) already sends that body's state, but the host looked for its own body near
+  the ship's map position (0,0,0) while its body had drifted 3.4 km away, so it sent an
+  empty state. Each side now finds its own body by the engine's draw origin (the ship is
+  always drawn at 0). *Checked in game* (run 20261107-160008): the client applies the
+  host's body state 0-62 ms old, and The Eye relative to the ship matches on both sides
+  within one second of drift. *Watched by the owner* from the passenger seat while
+  flying toward the station. No bot twin yet; steering and thrust beyond the drift not
+  checked separately. Investigation: docs/design/specs/2026-10-31-flying-together-ship-position.md.
+
 - **Ship hull: damage and repair** (`CoopShipHullSync`, default 1, new switch for the
   existing mirror). *Bot-tested* (`hull`, from a save in the ship at The Eye): the host's
   ship is hit (408 -> 244.8 of 948) and repaired; the client's hull follows each within

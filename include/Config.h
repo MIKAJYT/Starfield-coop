@@ -225,6 +225,14 @@ namespace Pulsar
         // there. 0 = only the host's seat is sent (bot twin). ini: CoopClientSeatSync = 0
         bool        coopClientSeatSync = true;
 
+        // Flying together (phase 6): each side finds its own ship's physics body by the
+        // engine's draw origin (FlightSync SafeReadOwnShipBodyRef). Before, the host
+        // looked for it near the ship's map position and missed once the ship had
+        // drifted, so it sent an empty ship state and the partner's view out of the
+        // window never followed. 0 = the old position guess (bot twin).
+        // ini: CoopShipBodyByOrigin = 0
+        bool        coopShipBodyByOrigin = true;
+
         // Takeoff ready vote (owner's spec, phase 1): when the pilot launches the
         // ship with a partner connected, the launch waits until the partner is
         // ready (HotkeyTakeoffReady, default F3); the partner is then moved aboard
