@@ -25,7 +25,8 @@ number here means the code for that milestone is in, not that the goal is met.
   after a catch-up, takes the closest pairs first, and only pairs bodies within 500 m
   of each other moving at about the same speed. *Bot-tested:* `fly` passed 4 of 4
   (max 0.4 m apart), where it had passed 4 of 10 before. No twin: the failure only
-  showed up in some runs, depending on packet order.
+  showed up in some runs, depending on packet order. The owner flew the host with the
+  partner in the passenger seat: looked steady.
 - **Bot check for flying together** (`fly` scenario). From a save in the ship near The
   Eye both bots report where The Eye is drawn relative to their ship (the passenger's
   view out of the window); the launcher compares each client sample 40-100 s after
