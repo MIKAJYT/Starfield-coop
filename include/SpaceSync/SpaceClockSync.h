@@ -30,6 +30,15 @@ namespace Pulsar::SpaceClockSync
     // origin space objects are drawn relative to. False outside space.
     bool ReadDrawOrigin(double a_out[3]);
 
+    // Clients: true when this client's universe is known to run within a couple of
+    // seconds of the host's (or the clock sync is off), so positions of other ships
+    // can be compared with the host's. False while catching up, before the first
+    // measurement and when the last one is older than 3 s.
+    bool InStepWithHost();
+
+    // How many catch-ups have run (changes when the whole universe jumps in time).
+    int CatchUps();
+
     // Test bot: the last measured lag in seconds (positive: this client is behind
     // the host; NaN before the first measurement), and how many catch-ups ran.
     double LastLagForTest();

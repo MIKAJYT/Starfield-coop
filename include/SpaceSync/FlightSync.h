@@ -37,4 +37,9 @@ bool IsPostLoadUnseatInProgress();
 // bridge load frees the bodies they point at.
 void ResetBodyCache();
 
+// Test bot (fly): the selected own ship body, its position in the physics world
+// (floats, [body+0x4D0]+0x80) and the physics world origin G (doubles,
+// Starfield+0x5F60520). False when no body is selected or a read fails.
+bool ShipBodyStateForTest(std::uintptr_t& a_body, float (&a_pos)[3], double (&a_physOrigin)[3]);
+
 }  // namespace Pulsar::FlightSync

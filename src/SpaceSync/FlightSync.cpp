@@ -31,6 +31,7 @@
 #include "Network/PacketTypes.h"
 #include "Papyrus/GameCalls.h"
 #include "SpaceSync/ShipCombatSync.h"
+#include "SpaceSync/SpaceClockSync.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "WorldSync/WorldSync.h"
 #include "NASLog.h"
@@ -1398,6 +1399,14 @@ namespace {
     // Ships are large (50-100m); 200m^2 = 40000 covers any plausible body
     // origin within the ship volume.
     static constexpr float kPSMatchThreshSq = 40000.0f;
+    // With the draw-origin reference (CoopShipBodyByOrigin) the own body sits at the
+    // reference to within a metre, so 5 m: 200 m also took other bodies near the ship.
+    static constexpr float kPSMatchThreshSqByOrigin = 25.0f;
+    static std::atomic<bool> g_psRefFromOrigin{ false };
+    static float PSMatchThreshSq()
+    {
+        return g_psRefFromOrigin.load(std::memory_order_relaxed) ? kPSMatchThreshSqByOrigin : kPSMatchThreshSq;
+    }
     // near a station/POI several ship bodies cluster within the match
     // threshold. Pick the CLOSEST (min d2) per 200ms window instead of last-wins,
     // else g_playerBhkBody flickers onto an NPC/station body and the flight apply
@@ -1456,6 +1465,12 @@ namespace {
         float         prevState[16]     = {};
         std::uint64_t prevMs            = 0;
         bool          hasPrev           = false;
+        // The body's own speed (m/s, smoothed; -1 unknown), measured only while we
+        // do not drive it, and the host body it is paired with (0: none). A body
+        // the engine keeps still (a station) must never be paired with a moving
+        // ship: the drive drags it along and the pairing then holds itself.
+        float         ownSpeed          = -1.0f;
+        std::uint32_t pairedHandle      = 0;
     };
     static NpcLocalBody  g_npcLocalBodies[kNpcShipSlotCount];
     static std::mutex    g_npcLocalBodiesMtx;
@@ -1473,6 +1488,10 @@ namespace {
     // without false-matching unrelated ships (typical inter-ship spacing in
     // encounters is much larger than 5km).
     static constexpr float kNpcMatchRadiusSq = 25'000'000.0f;  // 5km^2
+    // A new pairing (clocks in step, so the same ship is close on both machines):
+    // within 500 m and with speeds within 15 m/s of each other.
+    static constexpr float kNpcNewPairRadiusSq = 250'000.0f;
+    static constexpr float kNpcPairSpeedTolMs  = 15.0f;
 
     struct Iter13Slot {
         void* body         = nullptr;
@@ -1793,9 +1812,20 @@ namespace {
         if (slotIdx < 0) slotIdx = oldestIdx;
         // If we evict an old slot for a NEW body, clear its pending state
         // (otherwise we'd write the previous body's host-pos to the new body).
-        if (g_npcLocalBodies[slotIdx].body != a_body) {
-            g_npcLocalBodies[slotIdx].hasPendingApply = false;
-            g_npcLocalBodies[slotIdx].pendingMs       = 0;
+        auto& slot = g_npcLocalBodies[slotIdx];
+        if (slot.body != a_body) {
+            slot.hasPendingApply = false;
+            slot.pendingMs       = 0;
+            slot.hasPrev         = false;
+            slot.ownSpeed        = -1.0f;
+            slot.pairedHandle    = 0;
+        } else if (!slot.hasPendingApply && a_now > slot.seenMs && a_now - slot.seenMs < 1000) {
+            const float dx = a_pos[0] - slot.pos[0];
+            const float dy = a_pos[1] - slot.pos[1];
+            const float dz = a_pos[2] - slot.pos[2];
+            const float v  = std::sqrt(dx * dx + dy * dy + dz * dz) * 1000.0f
+                           / static_cast<float>(a_now - slot.seenMs);
+            slot.ownSpeed = slot.ownSpeed < 0.0f ? v : slot.ownSpeed + 0.1f * (v - slot.ownSpeed);
         }
         g_npcLocalBodies[slotIdx].body   = a_body;
         g_npcLocalBodies[slotIdx].pos[0] = a_pos[0];
@@ -2095,7 +2125,12 @@ namespace {
                     if (!forceAcquire) {
                         miss = g_psStickyMiss.fetch_add(1, std::memory_order_acq_rel) + 1;
                     }
-                    if ((forceAcquire || miss >= kPSStickyReleaseWindows) && best != nullptr) {
+                    // Only a real match: the window's best could be stored by one thread
+                    // after another had reset its distance, and a body was taken with
+                    // d2 = 3.4e38, then got the host's ship state written into it; the
+                    // passenger's view of The Eye swung ~1.5 km (fly run 20261107-202939).
+                    if ((forceAcquire || miss >= kPSStickyReleaseWindows) && best != nullptr &&
+                        bestD2 < PSMatchThreshSq()) {
                         void* prev = g_playerBhkBody.exchange(best, std::memory_order_acq_rel);
                         g_psStickyMiss.store(0, std::memory_order_relaxed);
                         if (prev != best) {
@@ -2126,7 +2161,9 @@ namespace {
                     // at rest). g_psPosValid stays true whenever we have a ship, so
                     // NPC body tracking (gated on it) is unaffected.
                     float ownRef[3];
-                    if (Pulsar::GetConfig().coopShipBodyByOrigin && SafeReadOwnShipBodyRef(ownRef)) {
+                    const bool byOrigin = Pulsar::GetConfig().coopShipBodyByOrigin && SafeReadOwnShipBodyRef(ownRef);
+                    g_psRefFromOrigin.store(byOrigin, std::memory_order_relaxed);
+                    if (byOrigin) {
                         g_psPosX.store(ownRef[0], std::memory_order_relaxed);
                         g_psPosY.store(ownRef[1], std::memory_order_relaxed);
                         g_psPosZ.store(ownRef[2], std::memory_order_relaxed);
@@ -2161,7 +2198,7 @@ namespace {
             const float dy = bodyPos[1] - g_psPosY.load(std::memory_order_relaxed);
             const float dz = bodyPos[2] - g_psPosZ.load(std::memory_order_relaxed);
             const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 < kPSMatchThreshSq) {
+            if (d2 < PSMatchThreshSq()) {
                 isPlayerCandidate = true;
                 // v2 - if the currently-LOCKED body is the one matching now,
                 // flag it so the commit block keeps the lock (sticky). This is the
@@ -4834,30 +4871,95 @@ static void NpcBatchTickApply(std::uint64_t a_now)
 
     void* psBody = g_playerBhkBody.load(std::memory_order_acquire);
 
+    // Each host body's speed, from the batches it was in (by handle).
+    struct RemoteTrack {
+        std::uint32_t handle = 0;
+        float         pos[3] = { 0, 0, 0 };
+        std::uint64_t batchMs = 0;
+        float         speed = -1.0f;
+    };
+    static RemoteTrack s_tracks[kNpcShipSlotCount];
+    float remoteSpeed[Pulsar::Network::MAX_NPC_SHIPS_PER_BATCH];
+    for (std::size_t e = 0; e < entries.size() && e < std::size(remoteSpeed); ++e) {
+        const auto& re = entries[e];
+        RemoteTrack* t = nullptr;
+        for (auto& c : s_tracks) {
+            if (c.handle == re.handleHash) { t = &c; break; }
+        }
+        if (!t) {
+            t = &s_tracks[0];
+            for (auto& c : s_tracks) {
+                if (c.batchMs < t->batchMs) t = &c;
+            }
+            *t = RemoteTrack{};
+            t->handle = re.handleHash;
+        }
+        if (t->batchMs != 0 && batchAt > t->batchMs && batchAt - t->batchMs < 3000) {
+            const float dx = re.havokState[12] - t->pos[0];
+            const float dy = re.havokState[13] - t->pos[1];
+            const float dz = re.havokState[14] - t->pos[2];
+            t->speed = std::sqrt(dx * dx + dy * dy + dz * dz) * 1000.0f
+                     / static_cast<float>(batchAt - t->batchMs);
+        }
+        if (batchAt != t->batchMs) {
+            std::memcpy(t->pos, &re.havokState[12], sizeof(t->pos));
+            t->batchMs = batchAt;
+        }
+        remoteSpeed[e] = t->speed;
+    }
+
+    // Pair host bodies with ours only while this client's universe runs in step
+    // with the host's: before the clock catch-up everything is ~21 s behind, and a
+    // pairing by position made then is a guess the drive then makes true (run
+    // 20261107-213238: a body The Eye follows was paired with a passing ship and
+    // dragged along, so the passenger saw the station swing by over a kilometre).
+    // A catch-up moves every ship at once, so pairings start over after one.
+    static int s_catchUpsSeen = -1;
+    const int catchUps = Pulsar::SpaceClockSync::CatchUps();
+    const bool inStep = Pulsar::SpaceClockSync::InStepWithHost() && catchUps == s_catchUpsSeen;
+    s_catchUpsSeen = catchUps;
+
     // For each remote entry: match to local body, store pendingState in slot.
+    // Closest pairs first over all entries (packet order let an earlier entry take
+    // another's body), a new pairing only within kNpcNewPairRadiusSq and with
+    // matching speeds; a standing pairing keeps the wide radius.
     int matched = 0;
     int missed  = 0;
     bool localUsed[kNpcShipSlotCount] = { false };
     {
         std::lock_guard<std::mutex> lock(g_npcLocalBodiesMtx);
-        for (const auto& re : entries) {
-            const float rx = re.havokState[12];
-            const float ry = re.havokState[13];
-            const float rz = re.havokState[14];
-            int   bestIdx = -1;
-            float bestD2  = kNpcMatchRadiusSq;
-            for (int i = 0; i < kNpcShipSlotCount; ++i) {
-                if (localUsed[i]) continue;
-                if (!g_npcLocalBodies[i].body) continue;
-                if (g_npcLocalBodies[i].body == psBody) continue;
-                if ((a_now - g_npcLocalBodies[i].seenMs) > 5000) continue;
-                const float dx = g_npcLocalBodies[i].pos[0] - rx;
-                const float dy = g_npcLocalBodies[i].pos[1] - ry;
-                const float dz = g_npcLocalBodies[i].pos[2] - rz;
-                const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < bestD2) { bestD2 = d2; bestIdx = i; }
+        struct Pair { float d2; int e; int i; };
+        std::vector<Pair> pairs;
+        if (inStep) {
+            for (std::size_t e = 0; e < entries.size() && e < std::size(remoteSpeed); ++e) {
+                const auto& re = entries[e];
+                for (int i = 0; i < kNpcShipSlotCount; ++i) {
+                    const auto& lb = g_npcLocalBodies[i];
+                    if (!lb.body || lb.body == psBody) continue;
+                    if ((a_now - lb.seenMs) > 5000) continue;
+                    const float dx = lb.pos[0] - re.havokState[12];
+                    const float dy = lb.pos[1] - re.havokState[13];
+                    const float dz = lb.pos[2] - re.havokState[14];
+                    const float d2 = dx * dx + dy * dy + dz * dz;
+                    if (lb.hasPendingApply && lb.pairedHandle == re.handleHash) {
+                        if (d2 < kNpcMatchRadiusSq) pairs.push_back({ d2, static_cast<int>(e), i });
+                        continue;
+                    }
+                    if (d2 >= kNpcNewPairRadiusSq) continue;
+                    if (lb.ownSpeed < 0.0f || remoteSpeed[e] < 0.0f) continue;  // not measured yet
+                    if (std::fabs(lb.ownSpeed - remoteSpeed[e]) > kNpcPairSpeedTolMs) continue;
+                    pairs.push_back({ d2, static_cast<int>(e), i });
+                }
             }
-            if (bestIdx >= 0) {
+            std::sort(pairs.begin(), pairs.end(), [](const Pair& x, const Pair& y) { return x.d2 < y.d2; });
+        }
+        std::vector<bool> entryUsed(entries.size(), false);
+        for (const auto& p : pairs) {
+            if (entryUsed[p.e] || localUsed[p.i]) continue;
+            entryUsed[p.e] = true;
+            const auto& re = entries[p.e];
+            const int bestIdx = p.i;
+            {
                 auto& slot = g_npcLocalBodies[bestIdx];
                 // M.1 V2 iter2g - promote current target to prev BEFORE
                 // overwriting (snapshot history for interpolation).
@@ -4871,12 +4973,12 @@ static void NpcBatchTickApply(std::uint64_t a_now)
                             sizeof(re.havokState));
                 slot.pendingMs       = a_now;
                 slot.hasPendingApply = true;
+                slot.pairedHandle    = re.handleHash;
                 localUsed[bestIdx] = true;
                 ++matched;
-            } else {
-                ++missed;
             }
         }
+        missed = static_cast<int>(entries.size()) - matched;
 
         // Un-stick: any local that wasn't matched this pass - clear its
         // pending apply. Otherwise we'd keep writing stale remote-state to
@@ -4886,6 +4988,7 @@ static void NpcBatchTickApply(std::uint64_t a_now)
                 && g_npcLocalBodies[i].hasPendingApply) {
                 g_npcLocalBodies[i].hasPendingApply = false;
                 g_npcLocalBodies[i].hasPrev         = false;
+                g_npcLocalBodies[i].pairedHandle    = 0;
             }
         }
     }
@@ -4928,10 +5031,10 @@ static void NpcBatchTickApply(std::uint64_t a_now)
         }
 
         PLOG_INFO(
-            "[PULSAR] M.1 V2 NPC batch APPLY: total={} matched={} missed={} localBodies={} "
+            "[PULSAR] M.1 V2 NPC batch APPLY: total={} matched={} missed={} localBodies={} inStep={} "
             "remote0=({:.0f},{:.0f},{:.0f}) local0=({:.0f},{:.0f},{:.0f}) "
             "local1=({:.0f},{:.0f},{:.0f}) local2=({:.0f},{:.0f},{:.0f})"sv,
-            entries.size(), matched, missed, localCount,
+            entries.size(), matched, missed, localCount, inStep ? 1 : 0,
             entries.empty() ? 0.0f : entries[0].havokState[12],
             entries.empty() ? 0.0f : entries[0].havokState[13],
             entries.empty() ? 0.0f : entries[0].havokState[14],
@@ -5367,6 +5470,26 @@ void OnPacketReceived(const std::uint8_t* data, std::size_t length)
         }
         return;
     }
+}
+
+namespace {
+    bool SafeReadPhysOrigin(double (&a_out)[3])
+    {
+        __try {
+            const auto* g = reinterpret_cast<const double*>(REL::Offset{ kRVA_PhysicsWorldOrigin }.address());
+            for (int k = 0; k < 3; ++k) a_out[k] = g[k];
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+}
+
+bool ShipBodyStateForTest(std::uintptr_t& a_body, float (&a_pos)[3], double (&a_physOrigin)[3])
+{
+    void* body = g_playerBhkBody.load(std::memory_order_acquire);
+    a_body = reinterpret_cast<std::uintptr_t>(body);
+    return body && Iter13SafeReadBodyPos(body, a_pos) && SafeReadPhysOrigin(a_physOrigin);
 }
 
 }  // namespace Pulsar::FlightSync

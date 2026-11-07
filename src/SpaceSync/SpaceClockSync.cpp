@@ -78,6 +78,13 @@ namespace {
     std::atomic<double> g_lastLag{ std::numeric_limits<double>::quiet_NaN() };
     std::atomic<int>    g_catchUps{ 0 };
 
+    // InStepWithHost: when the last usable measurement was taken and whether it was
+    // within kInStepS (a still host frame counts as in step: nothing moves apart).
+    constexpr double           kInStepS       = 2.0;
+    constexpr std::uint64_t    kInStepFreshMs = 3000;
+    std::atomic<std::uint64_t> g_inStepAtMs{ 0 };
+    std::atomic<bool>          g_inStep{ false };
+
     bool SafeReadOrigin(double a_out[3]) noexcept
     {
         __try {
@@ -158,7 +165,11 @@ namespace {
             v[k] = (h2.origin[k] - h1.origin[k]) / gapS;
             v2 += v[k] * v[k];
         }
-        if (v2 < 1.0) return;  // the host's frame does not move: nothing to measure by
+        if (v2 < 1.0) {  // the host's frame does not move: nothing to measure by
+            g_inStep.store(true, std::memory_order_relaxed);
+            g_inStepAtMs.store(a_now, std::memory_order_release);
+            return;
+        }
         double along = 0;
         for (int k = 0; k < 3; ++k) {
             d[k] = h2.origin[k] + v[k] * sinceS - own[k];
@@ -179,6 +190,8 @@ namespace {
                       lag, side, std::sqrt(v2));
         }
         if (side > kMaxSideOffsetM) return;  // not on the host's track: some other place
+        g_inStep.store(std::fabs(lag) <= kInStepS, std::memory_order_relaxed);
+        g_inStepAtMs.store(a_now, std::memory_order_release);
         if (std::fabs(lag) <= kLagToleranceS) {
             s_episodeCatchUps = 0;  // in step: a later lag (a new load) may catch up again
             return;
@@ -246,6 +259,21 @@ void OnPacketReceived(const std::uint8_t* a_data, std::size_t a_len)
 bool ReadDrawOrigin(double a_out[3])
 {
     return SafeReadOrigin(a_out);
+}
+
+bool InStepWithHost()
+{
+    if (!Pulsar::GetConfig().coopSpaceTimeSync) return true;
+    const std::uint64_t now = ::GetTickCount64();
+    if (g_warpUntilMs.load(std::memory_order_acquire) != 0) return false;  // catching up
+    const std::uint64_t at = g_inStepAtMs.load(std::memory_order_acquire);
+    if (at == 0 || now - at > kInStepFreshMs) return false;
+    return g_inStep.load(std::memory_order_relaxed);
+}
+
+int CatchUps()
+{
+    return g_catchUps.load(std::memory_order_relaxed);
 }
 
 double LastLagForTest()

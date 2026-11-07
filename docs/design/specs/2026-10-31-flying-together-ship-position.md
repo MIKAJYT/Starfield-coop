@@ -192,6 +192,23 @@ the wrong place for `+0x9522D0`).
   was the same 2,560 km body in passing and failing runs). One failing run's client
   re-acquired its ship body with d2 = 3.4e38 (no real match, a race in the M.1 V2 pick);
   another failed with a real match, so that is not the whole story.
+  **Found (2026-11-07, runs 213238 failed / 213712 passed):** the ship was right in both
+  (client body within 1.5 m of the host's, same physics origin G). It was The Eye that
+  moved: in the client's physics frame the station travelled at ~65 m/s, slowed over
+  ~6 s and came back at the same speed, while on the host it stood still. That is an
+  NPC ship's flight. The M.1 V2 NPC sync pairs the host's other bodies with the
+  client's by position, greedily in packet order, and drives each paired body every
+  physics step. Its first pairing ran at 35:55.5, before the clock catch-up
+  (35:56.9), with the client's universe still 21 s behind. A body The Eye follows was
+  paired with a passing ship (its path is `local2` in the `NPC batch APPLY` lines, and
+  it matches The Eye's path), and the drive then kept it nearest to that ship, so the
+  pairing held. In 213712 the host's Eye entry came first and was paired with the
+  right body by luck. Fix: pair only while `SpaceClockSync::InStepWithHost()` (lag
+  measured within the last 3 s and at most 2 s), drop all pairings after a catch-up,
+  assign the closest pairs first across all entries, and start a new pairing only
+  within 500 m and when the two bodies' own speeds agree within 15 m/s. A standing
+  pairing keeps the 5 km radius. Tools: `instances/re-tools/eyesys.ps1` and
+  `flydiag.ps1`.
 - ~~Set the client body's velocity from the host's~~: built (`CoopShipVelocitySync`,
   `ShipTransformData.havokVelocity`), plus moving each applied position on by velocity x
   the update's age. Three owner flights sampled with `steer.ps1` (the last one comparing

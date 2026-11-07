@@ -15,6 +15,7 @@
 #include "QuestSync/RewardShare.h"
 #include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/DockSync.h"
+#include "SpaceSync/FlightSync.h"
 #include "SpaceSync/ShipCombatSync.h"
 #include "SpaceSync/SpaceSync.h"
 #include "SpaceSync/FastTravelSync.h"
@@ -2134,6 +2135,17 @@ namespace Pulsar::TestBot
                 j += c;
             } else {
                 j += ",\"eyeDrawn\":null";
+            }
+            // The selected own ship body, its physics-world position and the physics
+            // world origin G (diagnosing the client's view swinging, run 20261107-202939).
+            std::uintptr_t body = 0;
+            float bp[3];
+            double g[3];
+            if (Pulsar::FlightSync::ShipBodyStateForTest(body, bp, g)) {
+                char c[200];
+                std::snprintf(c, sizeof(c), ",\"shipBody\":\"%llX\",\"bodyPos\":[%.1f,%.1f,%.1f],\"physOrigin\":[%.1f,%.1f,%.1f]",
+                              static_cast<unsigned long long>(body), bp[0], bp[1], bp[2], g[0], g[1], g[2]);
+                j += c;
             }
         }
         if (s_state.cfg.scenario == "seat") {

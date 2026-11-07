@@ -18,6 +18,14 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **The passenger's view no longer swings.** Out of the passenger's window The Eye
+  sometimes drifted by up to 1.5 km and back. The NPC ship sync had paired a body The
+  Eye follows with a passing ship before the client's clock had caught up, and then
+  dragged the station along. Pairing now waits until the clocks agree, starts over
+  after a catch-up, takes the closest pairs first, and only pairs bodies within 500 m
+  of each other moving at about the same speed. *Bot-tested:* `fly` passed 4 of 4
+  (max 0.4 m apart), where it had passed 4 of 10 before. No twin: the failure only
+  showed up in some runs, depending on packet order.
 - **Bot check for flying together** (`fly` scenario). From a save in the ship near The
   Eye both bots report where The Eye is drawn relative to their ship (the passenger's
   view out of the window); the launcher compares each client sample 40-100 s after
