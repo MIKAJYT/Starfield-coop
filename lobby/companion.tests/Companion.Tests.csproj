@@ -9,6 +9,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="SharpCompress" Version="0.50.8" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\companion\Companion.csproj" />
@@ -16,5 +17,7 @@
   <ItemGroup>
     <!-- The launcher's join-code reader, compiled in here so it can be tested without the GUI. -->
     <Compile Include="..\pulsar\Services\JoinCodeText.cs" Link="Linked\JoinCodeText.cs" />
+    <!-- The setup's SFSE / Address Library installer (archives from the Downloads folder). -->
+    <Compile Include="..\pulsar\Services\DependencyInstaller.cs" Link="Linked\DependencyInstaller.cs" />
   </ItemGroup>
 </Project>

@@ -135,6 +135,7 @@ public partial class MainWindowViewModel : ObservableObject
         _timer.Start();
         // Auto-find the Starfield install so the user does not have to browse for it.
         TryAutoDetectGame();
+        SetupPage.AutoSetupOnStart();
         Log("Connecting...");
         // Auto-connect on launch: the user never presses a "start daemon" button.
         _ = AutoConnectAsync();

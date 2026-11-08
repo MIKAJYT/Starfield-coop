@@ -463,6 +463,13 @@ public sealed class DaemonBridge : IDisposable
             var c = Path.Combine(baseDir, rel);
             if (File.Exists(c)) return c;
         }
+        // One-file setup: the companion ships inside the exe (see EmbeddedPayload).
+        var embedded = EmbeddedPayload.Dir;
+        if (embedded != null)
+        {
+            var c = Path.Combine(embedded, "PulsarCompanion.exe");
+            if (File.Exists(c)) return c;
+        }
         var dir = baseDir;
         for (int i = 0; i < 8 && dir != null; i++)
         {

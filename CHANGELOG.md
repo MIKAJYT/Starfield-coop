@@ -18,6 +18,18 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **One-file setup for a friend** (`tools/package_single_exe.ps1` makes
+  `dist/PULSAR-Revived-Setup-<version>.exe`, ~127 MB). The tool carries the mod and its
+  background companion inside and unpacks them on first start. It then finds Starfield,
+  installs the mod and turns on the game settings without a click. SFSE and the Address
+  Library may not be shipped or downloaded for the player (SFSE: Nexus or Steam only, no
+  direct links; Nexus needs the player's login). So Setup opens their Nexus pages, and the
+  player clicks Download. Setup then picks the archives up from the Downloads folder,
+  checks they match the game version (SFSE's `sfse_1_16_244.dll`,
+  `versionlib-1-16-244-0.bin`) and installs them. *Tested:* 7 installer tests, among them
+  a copy of a real SFSE 0.2.21 `.7z`, wrong versions refused, nothing written outside the
+  game folder. *Not tested in game:* the first start of the exe itself, which writes
+  to the real Starfield and Documents folders.
 - **The passenger's view no longer swings.** Out of the passenger's window The Eye
   sometimes drifted by up to 1.5 km and back. The NPC ship sync had paired a body The
   Eye follows with a passing ship before the client's clock had caught up, and then

@@ -4,6 +4,8 @@ using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Pulsar.Services;
@@ -147,6 +149,9 @@ public partial class SetupViewModel : ViewModelBase
         }
         var res = ModInstaller.Install(src, GameData!);
         _shell.Log("Setup: install mod -> " + res.Message);
+        // SFSE / Address Library the player already downloaded from Nexus.
+        foreach (var r in DependencyInstaller.InstallFromDownloads(GameRoot!))
+            _shell.Log("Setup: " + r.Message);
         if (res.Ok)
         {
             FixAll();   // applies loose-files / alt-tab / force-load ini settings + re-checks (sets AllGood)
@@ -332,31 +337,35 @@ public partial class SetupViewModel : ViewModelBase
         var root = GameRoot!;
         var data = GameData!;
 
-        // 2) SFSE installed (report-only). Required, but we don't ship it (licence: only the
-        // SFSE plugin API header is MIT; the binary may not be re-hosted). Link the source.
-        var sfseExe = Path.Combine(root, "sfse_loader.exe");
-        ReportFile(Row(KSfse), sfseExe,
-            okDetail: "sfse_loader.exe found in game folder.",
-            failDetail: "SFSE not found - PULSAR needs it. Get it (matching your game version), then re-check.");
+        // 2) SFSE installed, for this game version. Required, but we may not ship or fetch it
+        // (its site: download from Nexus, do not link the files directly). The player
+        // downloads it from Nexus and the Downloads watcher installs it (DependencyInstaller).
+        var version = DependencyInstaller.GameVersion(root);
+        var versionText = version == null ? "your game version" : "game version " + version.Replace('_', '.');
+        bool hasSfse = DependencyInstaller.HasSfse(root, version);
         var sfseRow = Row(KSfse);
-        sfseRow.LinkUrl = "https://sfse.silverlock.org/";
-        sfseRow.LinkText = "Get SFSE";
+        sfseRow.Status = hasSfse ? CheckStatus.Ok : CheckStatus.Fail;
+        sfseRow.Detail = hasSfse
+            ? "SFSE found in the game folder (" + versionText + ")."
+            : "SFSE missing - PULSAR needs it. Click Download, log in to Nexus and download the main file for "
+              + versionText + ". Setup picks it up from your Downloads folder and installs it.";
+        sfseRow.CanFix = false;
+        sfseRow.LinkUrl = DependencyInstaller.SfsePage;
+        sfseRow.LinkText = "Download SFSE";
 
         // 2b) Address Library (versionlib-*.bin) - REQUIRED: PULSAR resolves engine
-        // addresses through it; without it the mod won't load. Report-only (we don't
-        // redistribute it via this check).
+        // addresses through it; without it the mod won't load. Same Downloads route as SFSE.
         var addrRow = Row(KAddrLib);
-        var pluginsDir = Path.Combine(data, "SFSE", "Plugins");
-        bool hasAddrLib = false;
-        try { hasAddrLib = Directory.Exists(pluginsDir) && Directory.EnumerateFiles(pluginsDir, "versionlib-*.bin").Any(); }
-        catch { hasAddrLib = false; }
+        bool hasAddrLib = DependencyInstaller.HasAddressLibrary(root, version);
         addrRow.Status = hasAddrLib ? CheckStatus.Ok : CheckStatus.Fail;
         addrRow.Detail = hasAddrLib
-            ? "Address Library (versionlib) found in Data\\SFSE\\Plugins."
-            : "Address Library MISSING - PULSAR can't load without it. Get the 'all-in-one' (versionlib-*.bin) for your game version, then re-check.";
+            ? "Address Library found in Data\\SFSE\\Plugins (" + versionText + ")."
+            : "Address Library missing - PULSAR can't load without it. Click Download and download the main file for "
+              + versionText + ". Setup picks it up from your Downloads folder and installs it.";
         addrRow.CanFix = false;
-        addrRow.LinkUrl = "https://www.nexusmods.com/starfield/mods/3256";
-        addrRow.LinkText = "Get Address Library";
+        addrRow.LinkUrl = DependencyInstaller.AddressLibraryPage;
+        addrRow.LinkText = "Download Address Library";
+        WatchDownloads(!hasSfse || !hasAddrLib);
 
         // 3) PULSAR mod DLL (report-only).
         var dll = Path.Combine(data, "SFSE", "Plugins", "PULSAR.dll");
@@ -447,6 +456,77 @@ public partial class SetupViewModel : ViewModelBase
         }
 
         FinishBanner();
+    }
+
+    // ── SFSE / Address Library from the Downloads folder ────────────────────────
+
+    private DispatcherTimer? _downloadsTimer;
+    private bool _scanning;
+
+    // While SFSE or the Address Library is missing, look in Downloads every 3 s and install
+    // what the player has downloaded from Nexus.
+    private void WatchDownloads(bool on)
+    {
+        if (!on) { _downloadsTimer?.Stop(); return; }
+        if (_downloadsTimer == null)
+        {
+            _downloadsTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _downloadsTimer.Tick += (_, _) => _ = ScanDownloadsAsync();
+        }
+        if (!_downloadsTimer.IsEnabled) _downloadsTimer.Start();
+    }
+
+    private async Task ScanDownloadsAsync()
+    {
+        var root = GameRoot;
+        if (_scanning || root == null || !StarfieldPathOk() || GameRunning()) return;
+        _scanning = true;
+        try
+        {
+            var results = await Task.Run(() => DependencyInstaller.InstallFromDownloads(root));
+            if (results.Count == 0) return;
+            foreach (var r in results) _shell.Log("Setup: " + r.Message);
+            InstallStatus = string.Join(" ", results.Select(r => r.Message));
+            RunChecks();
+        }
+        catch (Exception ex) { _shell.Log("Setup: Downloads scan failed - " + ex.Message); }
+        finally { _scanning = false; }
+    }
+
+    private static bool GameRunning() =>
+        System.Diagnostics.Process.GetProcessesByName("Starfield").Length > 0 ||
+        System.Diagnostics.Process.GetProcessesByName("sfse_loader").Length > 0;
+
+    // First start of the one-file setup: if the mod in the game differs from the one this exe
+    // carries (or is missing), install it and the settings without a click, and show Setup
+    // when anything is left for the player (SFSE / Address Library downloads).
+    public void AutoSetupOnStart()
+    {
+        RunChecks();
+        var src = ModInstaller.FindModDataDir();
+        var data = GameData;
+        if (src != null && data != null && StarfieldPathOk() && !GameRunning() && ModDiffers(src, data))
+        {
+            _shell.Log("Setup: installing the PULSAR mod carried by this tool");
+            InstallModCommand.Execute(null);
+        }
+        if (!AllGood) _shell.SelectedPage = this;
+    }
+
+    private static bool ModDiffers(string srcData, string gameData)
+    {
+        var a = Path.Combine(srcData, "SFSE", "Plugins", "PULSAR.dll");
+        var b = Path.Combine(gameData, "SFSE", "Plugins", "PULSAR.dll");
+        if (!File.Exists(a)) return false;   // dev checkout without a built DLL
+        if (!File.Exists(b)) return true;
+        try
+        {
+            using var fa = File.OpenRead(a);
+            using var fb = File.OpenRead(b);
+            return !System.Security.Cryptography.SHA256.HashData(fa)
+                .AsSpan().SequenceEqual(System.Security.Cryptography.SHA256.HashData(fb));
+        }
+        catch { return false; }
     }
 
     private static void ReportFile(SetupCheckViewModel row, string path, string okDetail, string failDetail)

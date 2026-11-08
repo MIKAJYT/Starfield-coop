@@ -21,7 +21,7 @@
                     BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                 <StackPanel Spacing="8">
                     <TextBlock Text="Install PULSAR into Starfield" FontWeight="SemiBold" />
-                    <TextBlock Text="Copies the co-op mod files into your game and turns on the required settings in one click. Close Starfield first."
+                    <TextBlock Text="Copies the co-op mod files into your game and turns on the required settings in one click (done for you on first start). Close Starfield first. SFSE and the Address Library come from Nexus Mods: click their Download buttons below, download the main file, and Setup installs it from your Downloads folder by itself."
                                FontSize="12" Opacity="0.75" TextWrapping="Wrap" />
                     <Button Content="Install mod" Classes="accent"
                             HorizontalAlignment="Left"

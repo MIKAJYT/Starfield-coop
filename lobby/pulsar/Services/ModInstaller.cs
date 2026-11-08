@@ -30,6 +30,14 @@ public static class ModInstaller
             catch { /* ignore malformed candidate */ }
         }
 
+        // One-file setup: the payload ships inside the exe (see EmbeddedPayload).
+        var embedded = EmbeddedPayload.Dir;
+        if (embedded != null)
+        {
+            var c = Path.Combine(embedded, "mod", "Data");
+            if (Directory.Exists(c) && HasModFiles(c)) return c;
+        }
+
         // Dev checkout: the tool runs from lobby/pulsar/bin/<cfg>/<tfm>/ and the payload is
         // the repository's data/ folder (no DLL there - see FindDevBuildDll).
         var repo = FindRepoRoot(exeDir);

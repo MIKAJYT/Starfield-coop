@@ -49,6 +49,14 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <!-- voice: microphone device enumeration for the VoiceChat tab -->
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- setup: reads the SFSE (.7z) and Address Library archives the player downloads -->
+    <PackageReference Include="SharpCompress" Version="0.50.8" />
+  </ItemGroup>
+
+  <!-- One-file setup: tools/package_single_exe.ps1 passes the mod payload + companion
+       as a zip; it is unpacked at run time by Services/EmbeddedPayload.cs. -->
+  <ItemGroup Condition="'$(PulsarPayloadZip)' != ''">
+    <EmbeddedResource Include="$(PulsarPayloadZip)" LogicalName="pulsar-payload.zip" />
   </ItemGroup>
 
 </Project>
