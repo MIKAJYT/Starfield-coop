@@ -1359,6 +1359,19 @@ namespace {
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
+    // The host's ship state moved on by its velocity for the update's age
+    // (CoopShipVelocitySync): the pipeline leaves the client 0.07-0.17 s of travel
+    // behind at speed (2026-11-07). Both write paths (the vt[8] passive apply and the
+    // Tick body apply) use it, so they write the same place: when only Tick predicted,
+    // the two disagreed by velocity x age every frame and the ship flipped between them.
+    static void PredictedShipState(const Pulsar::Network::ShipTransformData& a_d, std::uint64_t a_ageMs, float a_out[16])
+    {
+        std::memcpy(a_out, a_d.havokState, sizeof(a_d.havokState));
+        if (!Pulsar::GetConfig().coopShipVelocitySync) return;
+        const float ageS = static_cast<float>(a_ageMs) / 1000.0f;
+        for (int k = 0; k < 3; ++k) a_out[12 + k] += a_d.havokVelocity[k] * ageS;
+    }
+
     // === V3 iter13 - Active-pilot detection via per-body motion EMA ===
     //
     // For each unique havok-body pointer seen as `a_param2`, track row3
@@ -2351,7 +2364,9 @@ namespace {
             if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return;
         }
 
-        SafeWriteHavokState(a_param2, d.havokState);
+        float predicted[16];
+        PredictedShipState(d, now - recvAt, predicted);
+        SafeWriteHavokState(a_param2, predicted);
         if (Pulsar::GetConfig().coopShipVelocitySync) {
             SafeWriteHavokVelocity(a_param2, d.havokVelocity);  // moves on between updates
         }
@@ -5172,15 +5187,9 @@ void Tick()
                         // the body physically rotates and carries the standing client.
                         const bool commitOn = Pulsar::GetConfig().coopSpaceBodyCommit;
                         // Predict the host's position by the update's age (velocity
-                        // x age): the pipeline left the client 0.07-0.17 s of travel
-                        // behind at speed (2026-11-07), whether or not it also moved
-                        // on at the host's velocity in between.
+                        // x age), as the vt[8] apply does (PredictedShipState).
                         float st[16];
-                        std::memcpy(st, d.havokState, sizeof(st));
-                        if (Pulsar::GetConfig().coopShipVelocitySync) {
-                            const float ageS = static_cast<float>(nowV3 - recvAtV3) / 1000.0f;
-                            for (int k = 0; k < 3; ++k) st[12 + k] += d.havokVelocity[k] * ageS;
-                        }
+                        PredictedShipState(d, nowV3 - recvAtV3, st);
                         if (commitOn) {
                             SafeCommitHavokTransform(applyBody, st);
                         } else {

@@ -211,7 +211,6 @@ namespace {
     {
         RE::BSEventNotifyControl ProcessEvent(const SceneEventRaw& a_event, RE::BSTEventSource<SceneEventRaw>*) override
         {
-            if (s_logged.fetch_add(1) >= kMaxLogged) return RE::BSEventNotifyControl::kContinue;
             SceneEventRaw e{};
             if (!SafeCopyEvent(a_event, e)) return RE::BSEventNotifyControl::kContinue;
             {
@@ -221,13 +220,17 @@ namespace {
             }
             const auto id = static_cast<std::uint32_t>(e.q[0]);
             const auto type = static_cast<std::uint32_t>(e.q[0] >> 32);
+            if (type == kStarted || type == kEnded) SendScene(id, type == kStarted);
+            // The cap limits the log only: placed above the send, it ended the scene
+            // sync for the rest of the session after 400 scene events (a city makes
+            // them all the time).
+            if (s_logged.fetch_add(1) >= kMaxLogged) return RE::BSEventNotifyControl::kContinue;
             {
                 char nm[120];
                 SafeNameID(id, nm, sizeof(nm));
                 PLOG_INFO("[SCENE] {} event id={:08X} type={} {}"sv,
                           Pulsar::Network::GetSingleton().IsHost() ? "HOST" : "CLIENT", id, type, std::string(nm));
             }
-            if (type == kStarted || type == kEnded) SendScene(id, type == kStarted);
             char line[700];
             int len = _snprintf_s(line, sizeof(line), _TRUNCATE, "%s",
                                   Pulsar::Network::GetSingleton().IsHost() ? "HOST" : "CLIENT");

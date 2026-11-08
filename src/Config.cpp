@@ -22,6 +22,13 @@ namespace Pulsar
         return s.substr(start, end - start + 1);
     }
 
+    // "1", "true", "yes" or "on" (any case) is true; anything else false.
+    static bool ParseBool(const std::string& a_value)
+    {
+        std::string v = a_value;
+        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+        return v == "1" || v == "true" || v == "yes" || v == "on";
+    }
     int ParseVKey(const std::string& a_input)
     {
         std::string in = Trim(a_input);
@@ -191,9 +198,7 @@ namespace Pulsar
                 PLOG_INFO("[PULSAR] Config: BuddyBaseFormID = 0x{:08X}"sv, cfg.buddyBaseFormID);
             }
             else if (keyLower == "devhotkeys" || keyLower == "dev_hotkeys") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.devHotkeys = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.devHotkeys = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: DevHotkeys = {}"sv, cfg.devHotkeys);
             }
             else if (keyLower == "hotkeydevflashlightdump") {
@@ -206,39 +211,27 @@ namespace Pulsar
                 int vk = ParseVKey(value); if (vk > 0) cfg.hotkeyDevManualRevive = vk;
             }
             else if (keyLower == "npcdirectcontrol" || keyLower == "npc_directcontrol") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.npcDirectControl = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.npcDirectControl = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: NpcDirectControl = {}"sv, cfg.npcDirectControl);
             }
             else if (keyLower == "npcnoimc" || keyLower == "npc_noimc") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.npcNoImc = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.npcNoImc = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: NpcNoImc = {}"sv, cfg.npcNoImc);
             }
             else if (keyLower == "npccombatailive" || keyLower == "npc_combatailive") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.npcCombatAiLive = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.npcCombatAiLive = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: NpcCombatAiLive = {}"sv, cfg.npcCombatAiLive);
             }
             else if (keyLower == "dbauthoritative" || keyLower == "db_authoritative") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.dbAuthoritative = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.dbAuthoritative = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: DbAuthoritative = {}"sv, cfg.dbAuthoritative);
             }
             else if (keyLower == "synccloneweapons" || keyLower == "sync_clone_weapons") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.syncCloneWeapons = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.syncCloneWeapons = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: SyncCloneWeapons = {}"sv, cfg.syncCloneWeapons);
             }
             else if (keyLower == "coopgravityautofix" || keyLower == "coop_gravity_auto_fix") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopGravityAutoFix = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopGravityAutoFix = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopGravityAutoFix = {}"sv, cfg.coopGravityAutoFix);
             }
             else if (keyLower == "hotkeygravityfix" || keyLower == "hotkey_gravityfix") {
@@ -252,27 +245,19 @@ namespace Pulsar
                 }
             }
             else if (keyLower == "coopinstancedenemyloot" || keyLower == "coop_instanced_enemy_loot") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopInstancedEnemyLoot = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopInstancedEnemyLoot = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopInstancedEnemyLoot = {}"sv, cfg.coopInstancedEnemyLoot);
             }
             else if (keyLower == "cooptakeoffvote" || keyLower == "coop_takeoff_vote") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopTakeoffVote = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopTakeoffVote = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopTakeoffVote = {}"sv, cfg.coopTakeoffVote);
             }
             else if (keyLower == "cooptakeoffskipseated" || keyLower == "coop_takeoff_skip_seated") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopTakeoffSkipSeated = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopTakeoffSkipSeated = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopTakeoffSkipSeated = {}"sv, cfg.coopTakeoffSkipSeated);
             }
             else if (keyLower == "coopvotemessages" || keyLower == "coop_vote_messages") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopVoteMessages = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopVoteMessages = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopVoteMessages = {}"sv, cfg.coopVoteMessages);
             }
             else if (keyLower == "maxplayers" || keyLower == "max_players") {
@@ -281,15 +266,11 @@ namespace Pulsar
                 PLOG_INFO("[PULSAR] Config: MaxPlayers = {}"sv, cfg.maxPlayers);
             }
             else if (keyLower == "extraplayerfigures" || keyLower == "extra_player_figures") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.extraPlayerFigures = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.extraPlayerFigures = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: ExtraPlayerFigures = {}"sv, cfg.extraPlayerFigures);
             }
             else if (keyLower == "directsession" || keyLower == "direct_session") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.directSession = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.directSession = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: DirectSession = {}"sv, cfg.directSession);
             }
             else if (keyLower == "joincode" || keyLower == "join_code") {
@@ -305,15 +286,11 @@ namespace Pulsar
                 PLOG_INFO("[PULSAR] Config: StunServers = {}"sv, cfg.stunServers);
             }
             else if (keyLower == "useupnp" || keyLower == "use_upnp") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.useUpnp = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.useUpnp = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: UseUpnp = {}"sv, cfg.useUpnp);
             }
             else if (keyLower == "copycodetoclipboard" || keyLower == "copy_code_to_clipboard") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.copyCodeToClipboard = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.copyCodeToClipboard = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CopyCodeToClipboard = {}"sv, cfg.copyCodeToClipboard);
             }
             else if (keyLower == "hotkeypastereplycode" || keyLower == "hotkey_paste_reply_code") {
@@ -334,117 +311,79 @@ namespace Pulsar
                 }
             }
             else if (keyLower == "coopquestrewards" || keyLower == "coop_quest_rewards") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopQuestRewards = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopQuestRewards = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopQuestRewards = {}"sv, cfg.coopQuestRewards);
             }
             else if (keyLower == "coopfriendlyfireguard" || keyLower == "coop_friendly_fire_guard") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopFriendlyFireGuard = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopFriendlyFireGuard = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopFriendlyFireGuard = {}"sv, cfg.coopFriendlyFireGuard);
             }
             else if (keyLower == "coopaimsync" || keyLower == "coop_aim_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopAimSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopAimSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopAimSync = {}"sv, cfg.coopAimSync);
             }
             else if (keyLower == "coopjetpacksync" || keyLower == "coop_jetpack_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopJetpackSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopJetpackSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopJetpackSync = {}"sv, cfg.coopJetpackSync);
             }
             else if (keyLower == "coopsharedworlditems" || keyLower == "coop_shared_world_items") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopSharedWorldItems = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopSharedWorldItems = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopSharedWorldItems = {}"sv, cfg.coopSharedWorldItems);
             }
             else if (keyLower == "autoreconnect" || keyLower == "auto_reconnect") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.autoReconnect = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.autoReconnect = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: AutoReconnect = {}"sv, cfg.autoReconnect);
             }
             else if (keyLower == "cooprestoreowncharacter" || keyLower == "coop_restore_own_character") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopRestoreOwnCharacter = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopRestoreOwnCharacter = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopRestoreOwnCharacter = {}"sv, cfg.coopRestoreOwnCharacter);
             }
             else if (keyLower == "coopnpchealthsync" || keyLower == "coop_npc_health_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopNpcHealthSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopNpcHealthSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopNpcHealthSync = {}"sv, cfg.coopNpcHealthSync);
             }
             else if (keyLower == "coopscenesync" || keyLower == "coop_scene_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopSceneSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopSceneSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopSceneSync = {}"sv, cfg.coopSceneSync);
             }
             else if (keyLower == "coopqueststartsync" || keyLower == "coop_quest_start_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopQuestStartSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopQuestStartSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopQuestStartSync = {}"sv, cfg.coopQuestStartSync);
             }
             else if (keyLower == "coopmissionbridge" || keyLower == "coop_mission_bridge") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopMissionBridge = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopMissionBridge = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopMissionBridge = {}"sv, cfg.coopMissionBridge);
             }
             else if (keyLower == "coopshiphullsync" || keyLower == "coop_ship_hull_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopShipHullSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopShipHullSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopShipHullSync = {}"sv, cfg.coopShipHullSync);
             }
             else if (keyLower == "coopdocksync" || keyLower == "coop_dock_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopDockSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopDockSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopDockSync = {}"sv, cfg.coopDockSync);
             }
             else if (keyLower == "coopleavehostseat" || keyLower == "coop_leave_host_seat") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopLeaveHostSeat = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopLeaveHostSeat = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopLeaveHostSeat = {}"sv, cfg.coopLeaveHostSeat);
             }
             else if (keyLower == "coopclientseatsync" || keyLower == "coop_client_seat_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopClientSeatSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopClientSeatSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopClientSeatSync = {}"sv, cfg.coopClientSeatSync);
             }
             else if (keyLower == "coopshipbodybyorigin" || keyLower == "coop_ship_body_by_origin") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopShipBodyByOrigin = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopShipBodyByOrigin = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopShipBodyByOrigin = {}"sv, cfg.coopShipBodyByOrigin);
             }
             else if (keyLower == "coopspacetimesync" || keyLower == "coop_space_time_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopSpaceTimeSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopSpaceTimeSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopSpaceTimeSync = {}"sv, cfg.coopSpaceTimeSync);
             }
             else if (keyLower == "coopshipvelocitysync" || keyLower == "coop_ship_velocity_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopShipVelocitySync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopShipVelocitySync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopShipVelocitySync = {}"sv, cfg.coopShipVelocitySync);
             }
             else if (keyLower == "coopfaststandup" || keyLower == "coop_fast_stand_up") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopFastStandUp = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopFastStandUp = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopFastStandUp = {}"sv, cfg.coopFastStandUp);
             }
             else if (keyLower == "coopstanduprespawnms" || keyLower == "coop_stand_up_respawn_ms") {
@@ -454,15 +393,11 @@ namespace Pulsar
                 PLOG_INFO("[PULSAR] Config: CoopStandUpRespawnMs = {}"sv, cfg.coopStandUpRespawnMs);
             }
             else if (keyLower == "coopdoorfollow" || keyLower == "coop_door_follow") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopDoorFollow = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopDoorFollow = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopDoorFollow = {}"sv, cfg.coopDoorFollow);
             }
             else if (keyLower == "coopbridgerestoreretry" || keyLower == "coop_bridge_restore_retry") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopBridgeRestoreRetry = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopBridgeRestoreRetry = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopBridgeRestoreRetry = {}"sv, cfg.coopBridgeRestoreRetry);
             }
             else if (keyLower == "sharedvehicleride" || keyLower == "shared_vehicle_ride") {
@@ -472,78 +407,54 @@ namespace Pulsar
                           Pulsar::VehicleSync::RideModeName(mode));
             }
             else if (keyLower == "autoregroupinspace" || keyLower == "auto_regroup_in_space") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.autoRegroupInSpace = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.autoRegroupInSpace = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: AutoRegroupInSpace = {}"sv, cfg.autoRegroupInSpace);
             }
             else if (keyLower == "coopnomenupause" || keyLower == "coop_no_menu_pause") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopNoMenuPause = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopNoMenuPause = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopNoMenuPause = {}"sv, cfg.coopNoMenuPause);
             }
             else if (keyLower == "cooptimeweathersync" || keyLower == "coop_time_weather_sync") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopTimeWeatherSync = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopTimeWeatherSync = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopTimeWeatherSync = {}"sv, cfg.coopTimeWeatherSync);
             }
             else if (keyLower == "e2eencryption" || keyLower == "e2e_encryption") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.e2eEncryption = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.e2eEncryption = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: E2EEncryption = {}"sv, cfg.e2eEncryption);
             }
             else if (keyLower == "e2erelayauth" || keyLower == "e2e_relay_auth") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.e2eRelayAuth = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.e2eRelayAuth = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: E2ERelayAuth = {}"sv, cfg.e2eRelayAuth);
             }
             else if (keyLower == "coopplanetfasttravelfollow" || keyLower == "coop_planet_fasttravel_follow") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopPlanetFastTravelFollow = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopPlanetFastTravelFollow = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopPlanetFastTravelFollow = {}"sv, cfg.coopPlanetFastTravelFollow);
             }
             else if (keyLower == "cloneuseplayerstates" || keyLower == "clone_use_player_states") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.cloneUsePlayerStates = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.cloneUsePlayerStates = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CloneUsePlayerStates = {}"sv, cfg.cloneUsePlayerStates);
             }
             else if (keyLower == "cooptraitnpcsforpartner" ||
                      keyLower == "coop_trait_npcs_for_partner") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopTraitNpcsForPartner = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopTraitNpcsForPartner = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopTraitNpcsForPartner = {}"sv, cfg.coopTraitNpcsForPartner);
             }
             else if (keyLower == "cooppartnercountsasfollower" ||
                      keyLower == "coop_partner_counts_as_follower") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopPartnerCountsAsFollower = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopPartnerCountsAsFollower = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopPartnerCountsAsFollower = {}"sv,
                           cfg.coopPartnerCountsAsFollower);
             }
             else if (keyLower == "coopsharekillxp" || keyLower == "coop_share_kill_xp") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopShareKillXp = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopShareKillXp = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopShareKillXp = {}"sv, cfg.coopShareKillXp);
             }
             else if (keyLower == "cooptamecombatai" || keyLower == "coop_tame_combat_ai") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.coopTameCombatAI = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.coopTameCombatAI = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: CoopTameCombatAI = {}"sv, cfg.coopTameCombatAI);
             }
             else if (keyLower == "traceevents" || keyLower == "trace_events") {
-                std::string v = value;
-                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                cfg.traceEvents = (v == "1" || v == "true" || v == "yes" || v == "on");
+                cfg.traceEvents = ParseBool(value);
                 PLOG_INFO("[PULSAR] Config: TraceEvents = {}"sv, cfg.traceEvents);
             }
         }

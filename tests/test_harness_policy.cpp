@@ -147,3 +147,17 @@ TEST(HarnessPolicy, SettingsAreRead)
     CHECK(!s.renameMutexes);
     CHECK(s.hideOtherWindows);
 }
+
+TEST(HarnessPolicy, CommentMarksInsideAPathStay)
+{
+    // ';' and '#' are legal in Windows paths; only one at the line start or after a
+    // space begins a comment, so the redirect never lands in a cut-off folder.
+    const auto s = Parse(
+        "Enabled = 1\n"
+        "DocumentsDir = C:\\dev\\C#\\sf-a;x\\Documents\n"
+        "LocalAppDataDir = C:\\dev\\C#\\sf-a\\LocalAppData # trailing comment\n"
+        "# DocumentsDir = C:\\not-this-one\n");
+    CHECK(s.enabled);
+    CHECK_EQ(s.documentsDir, std::string("C:\\dev\\C#\\sf-a;x\\Documents"));
+    CHECK_EQ(s.localAppDataDir, std::string("C:\\dev\\C#\\sf-a\\LocalAppData"));
+}

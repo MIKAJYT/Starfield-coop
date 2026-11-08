@@ -66,6 +66,9 @@ namespace Pulsar::Network::Direct {
 
             // UPnP (host): 0 pending, 1 mapped, 2 failed or off.
             std::atomic<int>                   upnpState{ 2 };
+            // Bumped by every BeginHost and Stop: a UpnpMap thread whose session ended
+            // while it waited on the router takes its mapping down again.
+            std::atomic<std::uint32_t>         upnpSession{ 0 };
             JC::Endpoint                       upnpEp;          // guarded by mu
             std::uint16_t                      upnpExtPort = 0; // guarded by mu
             std::wstring                       upnpClient;      // LAN address the mapping points at
@@ -174,36 +177,65 @@ namespace Pulsar::Network::Direct {
             s.stunResolved.store(true, std::memory_order_release);
         }
 
+        constexpr const wchar_t* kUpnpDescription = L"PULSAR co-op";
+
+        // True if the router's mapping of a_ext is free, or ours: the same PC and our
+        // description (left by a crashed session). Another device's or program's mapping
+        // of that port is never removed.
+        bool UpnpPortUsable(IStaticPortMappingCollection* a_col, long a_ext, BSTR a_proto, const std::wstring& a_client)
+        {
+            IStaticPortMapping* existing = nullptr;
+            if (FAILED(a_col->get_Item(a_ext, a_proto, &existing)) || !existing) return true;   // free
+            BSTR who = nullptr, what = nullptr;
+            const bool ours = SUCCEEDED(existing->get_InternalClient(&who)) && who && a_client == who &&
+                              SUCCEEDED(existing->get_Description(&what)) && what && std::wstring(what) == kUpnpDescription;
+            if (who) ::SysFreeString(who);
+            if (what) ::SysFreeString(what);
+            existing->Release();
+            if (ours) a_col->Remove(a_ext, a_proto);
+            return ours;
+        }
+
         // Ask the router to forward UDP a_port to this PC (UPnP IGD, Windows' own client).
-        void UpnpMap(std::uint16_t a_port, std::wstring a_client)
+        void UpnpMap(std::uint16_t a_port, std::wstring a_client, std::uint32_t a_session)
         {
             if (a_client.empty()) { s.upnpState.store(2); PLOG_INFO("[PULSAR] [Direct] UPnP: no LAN address with a gateway"sv); return; }
             const HRESULT init = ::CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             IUPnPNAT* nat = nullptr;
             IStaticPortMappingCollection* col = nullptr;
             bool ok = false;
+            bool stale = false;
+            JC::Endpoint mapped{};
             if (SUCCEEDED(::CoCreateInstance(__uuidof(UPnPNAT), nullptr, CLSCTX_ALL, __uuidof(IUPnPNAT), reinterpret_cast<void**>(&nat))) && nat &&
                 SUCCEEDED(nat->get_StaticPortMappingCollection(&col)) && col) {
                 BSTR proto = ::SysAllocString(L"UDP");
                 BSTR client = ::SysAllocString(a_client.c_str());
-                BSTR desc = ::SysAllocString(L"PULSAR co-op");
-                for (std::uint16_t ext = a_port; ext < a_port + 4 && !ok; ++ext) {
-                    col->Remove(ext, proto);   // a stale mapping of ours from a crashed session
+                BSTR desc = ::SysAllocString(kUpnpDescription);
+                // int, not uint16: near 65535 a uint16 counter wrapped to 0 and never
+                // reached a_port + 4, so the loop never ended.
+                for (int ext = a_port; ext < static_cast<int>(a_port) + 4 && ext <= 0xFFFF && !ok; ++ext) {
+                    if (!UpnpPortUsable(col, ext, proto, a_client)) continue;
                     IStaticPortMapping* map = nullptr;
                     if (SUCCEEDED(col->Add(ext, proto, a_port, client, VARIANT_TRUE, desc, &map)) && map) {
                         BSTR extIp = nullptr;
                         if (SUCCEEDED(map->get_ExternalIPAddress(&extIp)) && extIp) {
                             in_addr ia{};
                             if (::InetPtonW(AF_INET, extIp, &ia) == 1 && UsableIpv4(ia.S_un.S_addr)) {
-                                std::lock_guard lk(s.mu);
-                                s.upnpEp = { JC::Via::kMapped, ia.S_un.S_addr, ext };
-                                s.upnpExtPort = ext;
+                                mapped = { JC::Via::kMapped, ia.S_un.S_addr, static_cast<std::uint16_t>(ext) };
                                 ok = true;
                             }
                             ::SysFreeString(extIp);
                         }
                         map->Release();
+                        if (!ok) col->Remove(ext, proto);   // no usable address: don't leave it open
                     }
+                }
+                // The session ended while the router answered (Stop, or a new session):
+                // a static mapping stays open until removed, so take it down now.
+                if (ok && s.upnpSession.load(std::memory_order_acquire) != a_session) {
+                    col->Remove(mapped.port, proto);
+                    ok = false;
+                    stale = true;
                 }
                 ::SysFreeString(proto);
                 ::SysFreeString(client);
@@ -212,6 +244,15 @@ namespace Pulsar::Network::Direct {
             if (col) col->Release();
             if (nat) nat->Release();
             if (SUCCEEDED(init)) ::CoUninitialize();
+            if (stale) {
+                PLOG_INFO("[PULSAR] [Direct] UPnP: the session ended while mapping - mapping {} removed again"sv, mapped.port);
+                return;   // the newer session's state is not ours to touch
+            }
+            if (ok) {
+                std::lock_guard lk(s.mu);
+                s.upnpEp = mapped;
+                s.upnpExtPort = mapped.port;
+            }
             s.upnpState.store(ok ? 1 : 2, std::memory_order_release);
             if (ok) {
                 std::lock_guard lk(s.mu);
@@ -378,7 +419,8 @@ namespace Pulsar::Network::Direct {
         RandomBytes(s.secret.data(), s.secret.size());
         if (s.cfg.useUpnp) {
             s.upnpState.store(0);
-            std::thread(UpnpMap, s.port, s.upnpClient).detach();
+            const std::uint32_t session = s.upnpSession.fetch_add(1, std::memory_order_acq_rel) + 1;
+            std::thread(UpnpMap, s.port, s.upnpClient, session).detach();
         } else {
             s.upnpState.store(2);
         }
@@ -579,6 +621,7 @@ namespace Pulsar::Network::Direct {
             s.replyTargets.clear();
         }
         s.role = Role::kNone;
+        s.upnpSession.fetch_add(1, std::memory_order_acq_rel);   // a UpnpMap still running undoes its mapping
         if (ext) {
             UpnpUnmap(ext);
             PLOG_INFO("[PULSAR] [Direct] UPnP mapping {} removed"sv, ext);

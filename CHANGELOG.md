@@ -18,6 +18,30 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **Code review of the whole co-op branch: 15 fixes.**
+  - Scene sync stopped for good after 400 scene events: the log cap sat before the send.
+  - A refused or half-connected peer counted as "player 255 left" and despawned the first
+    partner's figure.
+  - A join save for a player who left in the meantime went to every player (all
+    reloaded); two players joining together got one save between them. Saves now go to
+    each joining player only.
+  - The 90 s re-bridge debounce also skipped a *different* player taking a freed slot;
+    it now applies to the same player only.
+  - The passenger ship's two write paths disagreed (only one predicted by velocity x
+    age), so the ship could flip between two places each frame.
+  - UPnP: removed other devices' port forwards on the same port; left a permanent
+    forward if the session stopped while mapping; looped forever for ports near 65535.
+  - Partner figures shared aim timers and the forced-animation flag (2-4 players); loops
+    over player IDs created empty extra figures.
+  - The launcher's Copy buttons could crash it when another program held the clipboard.
+  - SpaceSync.cpp had been re-encoded (37 garbled characters in comments and logs).
+  - Test tooling: a test-script copy could write through a hard link into the owner's
+    game; the harness cut folder paths at a `#`.
+  - Config: 48 copies of the yes/no parser replaced by one helper.
+  *Tested:* 172 unit tests (one new), 26 launcher tests, launcher self-test (139 cases);
+  hardened release build passes its leak check. *Bot-tested* after the fixes: `seat`,
+  `fly` (median 0.2 m) and `reconnect` pass. The UPnP changes are not run (no router test
+  approved).
 - **No takeoff vote when the crew is already seated.** The pilot's launch waited for the
   passenger to press F3 even when they sat in the ship (owner, first session with a
   friend). Now, when every partner's figure sits in a seat in the pilot's ship, the ship

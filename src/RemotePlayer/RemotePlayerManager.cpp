@@ -77,6 +77,14 @@ namespace Pulsar::RemotePlayer
         return f;
     }
 
+    RemotePlayerManager* FindRemotePlayerFigure(uint8_t a_playerId)
+    {
+        if (a_playerId >= 4) return nullptr;
+        if (a_playerId == FirstPartner()) return &g_remotePlayerManager;
+        auto& f = g_extraFigures[a_playerId];
+        return f.IsExtra() ? &f : nullptr;
+    }
+
     int CountFiguresSeatedIn(RE::TESObjectCELL* a_cell)
     {
         if (!a_cell) return 0;
@@ -273,6 +281,19 @@ namespace Pulsar::RemotePlayer
     // NOTE: Skyrim Together uses thread_local, but Starfield dispatches actions on
     // different threads than the caller. Using atomic instead.
     std::atomic<bool> g_forceAnimation{false};
+
+    // g_forceAnimation is one flag for every figure (the hook cannot tell whose action
+    // it is): clear it only when no OTHER figure still has its forced window open. With
+    // 2-4 players one figure's window ending closed another's mid-jump or mid-draw.
+    static void ClearForceAnimationUnlessOthers(const RemotePlayerManager* a_self)
+    {
+        const uint64_t now = GetTickCount64();
+        auto busy = [&](const RemotePlayerManager& f) { return &f != a_self && f.ForceAnimUntil() > now; };
+        if (busy(g_remotePlayerManager)) return;
+        for (const auto& f : g_extraFigures)
+            if (f.IsExtra() && busy(f)) return;
+        g_forceAnimation = false;
+    }
 
     // Pitch bone overlay state (Phase 0: sinus test, later: network pitch)
     static BoneSync::BoneCache s_clonePitchBoneCache;
@@ -1916,7 +1937,7 @@ namespace Pulsar::RemotePlayer
                 }
                 SafeCallPerformAction(s_origPerformAction, actionData);
                 if (isRelease) {
-                    g_forceAnimation = false;
+                    ClearForceAnimationUnlessOthers(this);
                 }
 
                 PLOG_INFO("[PULSAR] Clone ACTION: 0x{:08X} '{}'"sv, fireFormID,
@@ -1940,8 +1961,8 @@ namespace Pulsar::RemotePlayer
         {
             uint64_t now = GetTickCount64();
             if (m_forceAnimUntil > 0 && now >= m_forceAnimUntil) {
-                g_forceAnimation = false;
                 m_forceAnimUntil = 0;
+                ClearForceAnimationUnlessOthers(this);
             }
         }
 
@@ -3271,24 +3292,23 @@ namespace Pulsar::RemotePlayer
                         // Sighted (iSyncSighted=1): weapon aims, follows pitch for shooting
                         // Sighted for 8s after last shot, then back to Ready
                         {
-                            // Use atomics - DoSetPosition runs on BSTaskPool threads concurrently.
-                            // Non-atomic check+set causes every thread to fire ActionSightedRelease.
-                            static std::atomic<uint64_t> s_lastShotTime{ 0 };
-                            // Aiming has its own short grace (bridges a flickering
-                            // flag). It used to refresh the shot timer, so the figure
-                            // held the sights 8 s after the partner lowered the
-                            // weapon (bot aim run 20261030-092819).
-                            static std::atomic<uint64_t> s_lastAimTime{ 0 };
-                            static std::atomic<bool> s_inSighted{ false };
+                            // m_lastShotTime / m_lastAimTime / m_inSighted are atomics -
+                            // DoSetPosition runs on BSTaskPool threads concurrently, and a
+                            // non-atomic check+set made every thread fire ActionSightedRelease.
+                            // Per figure: as statics, one partner's aim held or released the
+                            // sights of every other figure (2-4 players). Aiming has its own
+                            // short grace (bridges a flickering flag); it used to refresh the
+                            // shot timer, so the figure held the sights 8 s after the partner
+                            // lowered the weapon (bot aim run 20261030-092819).
 
                             // Host RMB-aim trigger - 2026-04-25: any tick where host
                             // has iSyncSighted=1 and weapon is drawn, keep sighted
                             // timer fresh + fire ActionSighted once if not yet in.
                             bool hostSightedTick = UnpackAnimFlags(m_targetPosData.animFlags).hostSighted;
                             if (hostSightedTick && m_weaponDrawn && Pulsar::GetConfig().coopAimSync) {
-                                s_lastAimTime.store(GetTickCount64());
+                                m_lastAimTime.store(GetTickCount64());
                                 bool wasNotSighted = false;
-                                if (s_inSighted.compare_exchange_strong(wasNotSighted, true) &&
+                                if (m_inSighted.compare_exchange_strong(wasNotSighted, true) &&
                                     m_remoteActor && s_origPerformAction) {
                                     auto* sightedForm = RE::TESForm::LookupByID(0x00004A57);
                                     if (sightedForm) {
@@ -3310,10 +3330,10 @@ namespace Pulsar::RemotePlayer
                             uint32_t lastAction = m_lastFireAction.load();
                             if (lastAction == 0x00004A5C || lastAction == 0x00004A5A ||
                                 lastAction == 0x00004A57) {  // FireAuto, FireSingle, Sighted
-                                s_lastShotTime.store(GetTickCount64());
+                                m_lastShotTime.store(GetTickCount64());
                                 // Fire ActionSighted on clone - CAS ensures only one thread does it
                                 bool wasNotSighted = false;
-                                if (s_inSighted.compare_exchange_strong(wasNotSighted, true) &&
+                                if (m_inSighted.compare_exchange_strong(wasNotSighted, true) &&
                                     m_remoteActor && s_origPerformAction) {
                                     auto* sightedForm = RE::TESForm::LookupByID(0x00004A57);
                                     if (sightedForm) {
@@ -3338,12 +3358,12 @@ namespace Pulsar::RemotePlayer
                             bool hostSighted = Pulsar::GetConfig().coopAimSync &&
                                                UnpackAnimFlags(m_targetPosData.animFlags).hostSighted;
                             bool wantSighted = m_weaponDrawn &&
-                                (hostSighted || (aimNow - s_lastAimTime.load() < 500) ||
-                                 (aimNow - s_lastShotTime.load() < 8000));
+                                (hostSighted || (aimNow - m_lastAimTime.load() < 500) ||
+                                 (aimNow - m_lastShotTime.load() < 8000));
 
                             // Transition sighted → ready: CAS ensures exactly one thread fires release
                             bool wasSighted = true;
-                            if (!wantSighted && s_inSighted.compare_exchange_strong(wasSighted, false)) {
+                            if (!wantSighted && m_inSighted.compare_exchange_strong(wasSighted, false)) {
                                 auto* releaseForm = RE::TESForm::LookupByID(0x00004A58);
                                 if (releaseForm && m_remoteActor && s_origPerformAction) {
                                     static REL::Relocation<void*> s_bgaVr{ REL::ID(393260) };

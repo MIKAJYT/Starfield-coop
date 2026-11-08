@@ -61,25 +61,32 @@ public partial class PlayView : UserControl
         }
     }
 
-    private async void OnCopyJoinCode(object? sender, RoutedEventArgs e)
+    private void OnCopyJoinCode(object? sender, RoutedEventArgs e)
     {
-        if (DataContext is not PlayViewModel vm || string.IsNullOrEmpty(vm.MyJoinCode)) return;
-        var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-        if (clipboard != null)
-        {
-            await clipboard.SetTextAsync(vm.MyJoinCode);
-            vm.Shell.Log("Join code copied.");
-        }
+        if (DataContext is PlayViewModel vm && !string.IsNullOrEmpty(vm.MyJoinCode))
+            CopyToClipboard(vm, vm.MyJoinCode, "Join code");
     }
 
-    private async void OnCopyReplyCode(object? sender, RoutedEventArgs e)
+    private void OnCopyReplyCode(object? sender, RoutedEventArgs e)
     {
-        if (DataContext is not PlayViewModel vm || string.IsNullOrEmpty(vm.MyReplyCode)) return;
+        if (DataContext is PlayViewModel vm && !string.IsNullOrEmpty(vm.MyReplyCode))
+            CopyToClipboard(vm, vm.MyReplyCode, "Reply code");
+    }
+
+    // An event handler is async void: an exception escaping it ends the whole tool, and
+    // the clipboard throws while another program holds it open. Say so instead.
+    private async void CopyToClipboard(PlayViewModel vm, string text, string what)
+    {
         var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-        if (clipboard != null)
+        if (clipboard == null) return;
+        try
         {
-            await clipboard.SetTextAsync(vm.MyReplyCode);
-            vm.Shell.Log("Reply code copied.");
+            await clipboard.SetTextAsync(text);
+            vm.Shell.Log(what + " copied.");
+        }
+        catch (Exception ex)
+        {
+            vm.Shell.Log(what + " not copied (the clipboard is busy, try again): " + ex.Message);
         }
     }
 

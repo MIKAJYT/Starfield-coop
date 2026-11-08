@@ -110,6 +110,7 @@ namespace Pulsar::Network
             bool                   decryptedAny = false;
             int                    decryptFailures = 0;
             uint64_t               lastAutoBridgeMs = 0; // see the handshake debounce (L.7 D1)
+            std::string            lastBridgeName;       // ... and whom that bridge was for
         };
         static constexpr size_t kSlots = 3;
         PeerSlot  m_slots[kSlots];
@@ -143,7 +144,11 @@ namespace Pulsar::Network
 
         std::atomic<uint8_t> m_localPlayerId{ 0xFF };
         std::atomic<uint8_t> m_playerCount{ 1 };
-        uint8_t              m_saveTarget = 0xFF;   // host: the player the next save goes to (0xFF = every client)
+        // Host: who the next save goes to - bit N: player N (a joining one), kSaveToAll:
+        // every client, 0: nobody asked (SendSaveToClient called directly: every client).
+        // Written from the game thread and the network thread.
+        static constexpr uint8_t kSaveToAll = 0x80;
+        std::atomic<uint8_t> m_saveTargets{ 0 };
 
         ENetHost* m_host = nullptr;
         ENetPeer* m_peer = nullptr;

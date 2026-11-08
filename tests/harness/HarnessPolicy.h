@@ -199,8 +199,16 @@ namespace Pulsar::TestHarness {
         Settings s;
         std::string line;
         while (std::getline(a_in, line)) {
-            const auto semi = line.find_first_of(";#");
-            if (semi != std::string::npos) line.resize(semi);
+            // A comment starts at ';' or '#' at the start of the line or after a space.
+            // Inside a value it is part of it: "C:\C#\slot" must not become "C:\C",
+            // which would send the redirect somewhere else.
+            for (std::size_t i = 0; i < line.size(); ++i) {
+                if ((line[i] == ';' || line[i] == '#') &&
+                    (i == 0 || std::isspace(static_cast<unsigned char>(line[i - 1])))) {
+                    line.resize(i);
+                    break;
+                }
+            }
             const auto eq = line.find('=');
             if (eq == std::string::npos) continue;
             const auto key   = Lower(Trim(line.substr(0, eq)));

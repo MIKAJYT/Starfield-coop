@@ -110,6 +110,8 @@ namespace Pulsar::RemotePlayer
         void SetExtra(uint8_t a_playerId);
         bool IsExtra() const { return m_extra; }
         uint8_t PlayerId() const { return m_playerId; }
+        // End of this figure's forced-animation window (0 = none); see g_forceAnimation.
+        uint64_t ForceAnimUntil() const { return m_forceAnimUntil; }
         // True if spawn is already in-flight (pending, delayed, or done) - prevents re-triggering
         bool IsSpawnPending() const { return m_spawned || m_delayedSpawnAt > 0 || m_pendingForceRespawn.load() || m_pendingSpawn.load(); }
         bool IsGlobsResolved() const { return m_globsResolved; }
@@ -178,6 +180,10 @@ namespace Pulsar::RemotePlayer
         bool     m_boostActive = false;       // jetpack: the figure's boostpack was started
         uint64_t m_landReassertUntil = 0;     // jump landing watchdog window
         uint64_t m_lastLandReassertMs = 0;
+        // Weapon aim pose (DoSetPosition, runs on several task threads at once).
+        std::atomic<uint64_t> m_lastShotTime{ 0 };
+        std::atomic<uint64_t> m_lastAimTime{ 0 };
+        std::atomic<bool>     m_inSighted{ false };
         void FindLookMarker();
 
         // Bone sync (thread-safe pending buffer)
@@ -296,6 +302,9 @@ namespace Pulsar::RemotePlayer
     // above), which player is the first partner, every figure's actor, and the game-
     // thread tick of the extra figures.
     RemotePlayerManager& GetRemotePlayerFigure(uint8_t a_playerId);
+    // The same, but never makes an extra figure for a player without one (nullptr):
+    // for loops over every possible player ID.
+    RemotePlayerManager* FindRemotePlayerFigure(uint8_t a_playerId);
     void    SetFirstPartner(uint8_t a_playerId);
     uint8_t FirstPartner();
     bool    IsFigureActor(RE::Actor* a_actor);

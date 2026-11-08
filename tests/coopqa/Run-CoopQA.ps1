@@ -1962,6 +1962,16 @@ function Write-PrivateFile([string]$path, [string]$content) {
     New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
     [IO.File]::WriteAllText($path, $content, (New-Object System.Text.UTF8Encoding $false))
 }
+# Copy-Item -Force writes INTO an existing file, so through a hard link into the owner's
+# game folder too; delete first, as Write-PrivateFile does.
+function Copy-PrivateFile([string]$from, [string]$path) {
+    if (Test-Path -LiteralPath $path) {
+        if (@(fsutil hardlink list $path).Count -ne 1) { throw "refusing to write $path : it has more than one hard link" }
+        Remove-Item -LiteralPath $path
+    }
+    New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+    Copy-Item -LiteralPath $from -Destination $path
+}
 function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     $root = Join-Path $Instances $slot
     $plugins = Join-Path $root "game\Data\SFSE\Plugins"
@@ -2004,7 +2014,7 @@ function Initialize-Slot([string]$slot, [string]$role, [int]$port) {
     # Test-only Papyrus helpers (scripts/Source/PulsarTest*.psc, compiled with the Creation
     # Kit's compiler into build/papyrus): into the test copies only, never the release.
     foreach ($pex in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "..\..\build\papyrus") -Filter 'PulsarTest*.pex' -ErrorAction SilentlyContinue) {
-        Copy-Item -LiteralPath $pex.FullName -Destination (Join-Path $plugins "..\..\Scripts\$($pex.Name)") -Force
+        Copy-PrivateFile $pex.FullName ([IO.Path]::GetFullPath((Join-Path $plugins "..\..\Scripts\$($pex.Name)")))
     }
     $custom = "[Archive]`r`nbInvalidateOlderFiles=1`r`nsResourceDataDirsFinal=`r`n`r`n" +
         "[General]`r`nbPauseOnLostFocus=0`r`nbAlwaysActive=1`r`nsStartingConsoleCommand=load PulsarQA_Start`r`n"

@@ -1,4 +1,4 @@
-﻿#include "PCH.h"
+#include "PCH.h"
 #include "SpaceSync/SpaceSync.h"
 #include "SpaceSync/TakeoffProbe.h"
 #include "SpaceSync/DockSync.h"
@@ -99,7 +99,7 @@ namespace {
     static std::atomic<std::uint64_t> g_lastSendTick[kKindCount]{};
 
     // L.2 V1 Step A - debug hotkey to externally fire TakeoffMenu_Launch event.
-    // Test: in cockpit, press F8 â†’ does the engine launch into space?
+    // Test: in cockpit, press F8 → does the engine launch into space?
     // If yes, the BSTEventSource SendEvent path is viable for receiver-trigger.
     // If no, we need direct FUN_14213b6f0(ship) call instead.
     static bool g_lastF8Down = false;
@@ -120,7 +120,7 @@ namespace {
     // L.6 V1/V2/V2.1/V2.2 (2026-05-02) - all the dock-state / hatch-transit
     // sync attempts have been removed. They were MoveTo-shortcut approaches;
     // user wants a real visual-dock sync (Schiff visuell am Dock + Hatch
-    // natÃ¼rlich aktivierbar). V3 plan: engine-state memory-diff like L.5
+    // natürlich aktivierbar). V3 plan: engine-state memory-diff like L.5
     // cruise. See memory/project_l6_dock_sync.md.
     //
     // What's KEPT for V3 prep:
@@ -184,13 +184,13 @@ namespace {
     }
 
     // Which kinds trigger an auto-follow MoveTo?
-    //   TakeOff, Landing, GravJump, Dock          â†’ yes (real state changes)
-    //   TakeoffMenu_Launch                        â†’ yes (early signal - gives
+    //   TakeOff, Landing, GravJump, Dock          → yes (real state changes)
+    //   TakeoffMenu_Launch                        → yes (early signal - gives
     //                                                client time to follow during
     //                                                host's takeoff cutscene)
-    //   RampDown                                  â†’ no (redundant w/ Landing,
+    //   RampDown                                  → no (redundant w/ Landing,
     //                                                fires basically same instant)
-    //   FarTravel                                 â†’ no (didn't fire in V1 test
+    //   FarTravel                                 → no (didn't fire in V1 test
     // unreliable)
     static bool ShouldFollow(std::uint8_t k)
     {
@@ -215,7 +215,7 @@ namespace {
     // before we emit any space events. During this window the engine fires
     // queued/stale events from save-load (verified 2026-04-28 host-crash:
     // client's GravJump from save-load init triggered host follow during
-    // freshly-spawned clone window â†’ NULL+0x90 deref in MoveTo dispatch).
+    // freshly-spawned clone window → NULL+0x90 deref in MoveTo dispatch).
     constexpr std::uint64_t kStartupQuietMs = 10000;
     static std::atomic<std::uint64_t> g_initTick{ 0 };
 
@@ -308,7 +308,7 @@ namespace {
     //   FUN_1421249a0 @ RVA 0x21219B0
     //   vt[0xAC] call @ func+0xB0 (FF 90 60 05 00 00)
     //   test r14,r14 @ func+0xDE (4D 85 F6)
-    //   JZ rel32 +0xD8 @ func+0xE1 (0F 84 D8 00 00 00)  â† THE PATCH TARGET
+    //   JZ rel32 +0xD8 @ func+0xE1 (0F 84 D8 00 00 00)  ← THE PATCH TARGET
     //
     // We dynamically NOP the JCC during our trigger window so engine takes
     // success-path (full takeoff state mutations: FUN_140ba1520, FUN_140518590,
@@ -421,8 +421,8 @@ namespace {
     //           client (engine creates its own valid menu instance + registers
     //           its sinks on the TakeoffMenu_Launch event source).
     //   Step 2 (~500ms later): FUN_141679470 (fire-helper) - fires
-    //           TakeoffMenu_Launch event â†’ engine's now-registered sink
-    //           processes with valid state â†’ cutscene + cell transition.
+    //           TakeoffMenu_Launch event → engine's now-registered sink
+    //           processes with valid state → cutscene + cell transition.
     using LaunchImmediateFn = void(__fastcall*)(void* pMenuPtr);
     constexpr std::uintptr_t kRVA_LaunchImmediate = 0x16757D0;
 
@@ -435,7 +435,7 @@ namespace {
 
     // L.2 V1 force-pilot-cell hack: temporarily set parentCell.cellExtra+0x68
     // from 0x05 (passenger) to 0x01 (pilot) so engine's strict-mode
-    // GetPlayerSpaceship returns ship â†’ takeoff validation passes â†’ cutscene
+    // GetPlayerSpaceship returns ship → takeoff validation passes → cutscene
     // runs to completion. Restore byte after takeoff.
     static std::atomic<std::uintptr_t> g_savedCellExtraPtr{ 0 };
     static std::atomic<std::uint8_t>   g_savedSeatTypeByte{ 0 };
@@ -490,7 +490,7 @@ namespace {
         if (wrote) {
             g_savedCellExtraPtr.store(cellExtra, std::memory_order_release);
             g_savedSeatTypeByte.store(origByte, std::memory_order_release);
-            PLOG_INFO("[PULSAR] L.2 V1 - force-pilot: byte 0x{:02X} â†’ 0x01"sv, origByte);
+            PLOG_INFO("[PULSAR] L.2 V1 - force-pilot: byte 0x{:02X} → 0x01"sv, origByte);
             NASLOG("L.2 V1: force-pilot byte 0x%02X->0x01", origByte);
         }
         return wrote;
@@ -646,7 +646,7 @@ namespace {
             //
             // GravJump path is handled by PFT poll. Dock excluded
             // (handled by L.6 DockSync). Surface POI fast-travel doesn't
-            // fire ship sinks â†’ naturally skipped.
+            // fire ship sinks → naturally skipped.
             bool spuriousTransition = false;
             if constexpr (Kind == kKind_TakeOff || Kind == kKind_Landing) {
                 if (Pulsar::Network::GetSingleton().IsHost()) {
@@ -676,8 +676,8 @@ namespace {
 
     // L.3 V1 - Spaceship position/rotation sync. Whoever's piloting (host
     // OR client) broadcasts ship REFR position+rotation while flying. Other
-    // side writes to their local same-FormID ship â†’ engine moves cockpit
-    // cell with ship â†’ passenger sees correct space scene from cockpit.
+    // side writes to their local same-FormID ship → engine moves cockpit
+    // cell with ship → passenger sees correct space scene from cockpit.
     //
     // Throttle: 30 Hz (33ms). Match VehicleSync cadence.
     static std::atomic<std::uint64_t> g_lastShipPosSendTick{ 0 };
@@ -686,7 +686,7 @@ namespace {
     static bool IsLikelyPilot()
     {
         // Heuristic: if I'm in space (player.IsInSpace) AND I have a ship
-        // (GetSpaceship returns non-null) â†’ broadcast as if pilot. Engine's
+        // (GetSpaceship returns non-null) → broadcast as if pilot. Engine's
         // pilot validation prevents non-pilots from CONTROLLING but doesn't
         // affect our broadcast. Receiver's local ship REFR position will
         // overwrite engine's last-known - minor risk of pilot-vs-pilot
@@ -880,15 +880,15 @@ namespace {
         // Update tracker FIRST so we don't loop on transient states.
         g_lastHostShipCellID.store(curShipCell, std::memory_order_release);
 
-        // We only care about transitions that USE space (FF-proc â†’ static).
-        // Initial state (lastCell=0) â†’ static-cell isn't a transition; skip.
+        // We only care about transitions that USE space (FF-proc → static).
+        // Initial state (lastCell=0) → static-cell isn't a transition; skip.
         if (lastCell == 0) return;
 
         bool lastWasProc = (lastCell & 0xFF000000u) == 0xFF000000u;
         // Transition rule: was-proc-planet, now-static-space (or any non-proc).
         if (!(lastWasProc && !curIsProc)) {
-            // Other transitions: static-space â†’ static-space (FarTravel) or
-            // static-space â†’ proc-planet (landing) - also broadcast.
+            // Other transitions: static-space → static-space (FarTravel) or
+            // static-space → proc-planet (landing) - also broadcast.
             // We resync on ANY change that crosses the proc boundary in either direction.
             bool crossesBoundary = (lastWasProc != curIsProc);
             if (!crossesBoundary) return;
@@ -904,7 +904,7 @@ namespace {
         }
         g_lastResyncTick.store(now, std::memory_order_release);
 
-        PLOG_INFO("[PULSAR] L.2 V1 Plan B: HOST shipCell flip 0x{:08X} â†’ 0x{:08X} â†’ quicksave-resync"sv,
+        PLOG_INFO("[PULSAR] L.2 V1 Plan B: HOST shipCell flip 0x{:08X} → 0x{:08X} → quicksave-resync"sv,
                   lastCell, curShipCell);
         NASLOG("L.2 V1 Plan B: shipCell 0x%08X -> 0x%08X, triggering quicksave-resync",
                lastCell, curShipCell);
@@ -916,11 +916,11 @@ namespace {
     // (2026-06-24) - AUTO co-location into space on host takeoff.
     // The manual F8 host-bridge co-locates the client into the host's space
     // position fine (verified spacecoop-v6), but nothing fired it automatically:
-    // the TakeOff event sink broadcasts too early (inSpace not yet flipped â†’ the
+    // the TakeOff event sink broadcasts too early (inSpace not yet flipped → the
     // L.7 V15 "spurious - inSpace unchanged" skip drops it) and the receiver-apply
     // is passive; the old poll detector (HostTryTakeoffResync, #if 0 above) keyed
     // on ship->parentCell which stays in the cockpit interior across takeoff.
-    // The reliable signal is the HOST's own IsInSpace edge (falseâ†’true), polled on
+    // The reliable signal is the HOST's own IsInSpace edge (false→true), polled on
     // the game thread. On that rising edge, after a settle delay (so the quicksave
     // reflects the in-space position and the takeoff churn is over), auto-fire the
     // proven host save-bridge = an automatic F8. Re-arms when the host leaves space.
@@ -930,9 +930,9 @@ namespace {
 
     // was the host PILOTING (seated in the ship) when it entered space?
     // This is the takeoff-vs-dock-hatch discriminator. At TAKEOFF the host is
-    // seated in the pilot seat when IsInSpace flips falseâ†’true (verified log
-    // 22:09:38 "entered space" â†’ next pilotDiag seated=1). At a DOCKING HATCH
-    // transit the host walks shipâ†’station ON FOOT, so the station-entry rising
+    // seated in the pilot seat when IsInSpace flips false→true (verified log
+    // 22:09:38 "entered space" → next pilotDiag seated=1). At a DOCKING HATCH
+    // transit the host walks ship→station ON FOOT, so the station-entry rising
     // edge has seated=0. Captured at the rising edge; re-checked at fire time.
     static std::atomic<bool>          g_hostEnteredSpaceSeated{ false };
 
@@ -977,13 +977,13 @@ namespace {
         if (inSpace && !was) {
             // rising edge - host just entered space; arm the bridge after settle.
             // capture whether the host was piloting (seated) at the edge.
-            // Seated = takeoff (client must follow â†’ bridge). On foot = walked
-            // through a dock hatch into the station (client already there â†’ skip).
+            // Seated = takeoff (client must follow → bridge). On foot = walked
+            // through a dock hatch into the station (client already there → skip).
             const bool seatedAtEdge = HostSeatedInShip();
             g_hostEnteredSpaceSeated.store(seatedAtEdge, std::memory_order_release);
             g_hostAutoBridgeDueTick.store(::GetTickCount64() + kHostAutoBridgeSettleMs,
                                           std::memory_order_release);
-            PLOG_INFO("[PULSAR] SpaceSync: HOST entered space â†’ auto-bridge armed (+{}ms) seatedAtEdge={} [/]"sv,
+            PLOG_INFO("[PULSAR] SpaceSync: HOST entered space → auto-bridge armed (+{}ms) seatedAtEdge={} [/]"sv,
                       kHostAutoBridgeSettleMs, seatedAtEdge ? 1 : 0);
             NASLOG("SpaceSync: host entered space, auto-bridge armed (seatedAtEdge=%d)",
                    seatedAtEdge ? 1 : 0);
@@ -1009,12 +1009,12 @@ namespace {
         // players sit in the same cockpit cell (0x06100136), but those are
         // SEPARATE instances (host in space, client on the ground) so the client
         // still needs the bridge (verified 2026-06-25 22:09 "auto-bridge SKIP ...
-        // cell 0x06100136" â†’ client did not follow). The correct signal is HOW the
+        // cell 0x06100136" → client did not follow). The correct signal is HOW the
         // host entered space:
-        // seated/piloting  â†’ TAKEOFF, client must follow â†’ fire the bridge
-        // on foot          â†’ walked through a DOCK HATCH into the station, the
+        // seated/piloting  → TAKEOFF, client must follow → fire the bridge
+        // on foot          → walked through a DOCK HATCH into the station, the
         //                         client walked through their own hatch too and is
-        //                         already co-located â†’ firing = redundant double-load
+        //                         already co-located → firing = redundant double-load
         // Bias toward firing (never re-break takeoff): only skip when the host is
         // confidently on foot BOTH at the rising edge AND now at fire time.
         const bool seatedAtEdge = g_hostEnteredSpaceSeated.load(std::memory_order_acquire);
@@ -1022,7 +1022,7 @@ namespace {
         g_hostAutoBridgeDueTick.store(0, std::memory_order_release);
         if (!seatedAtEdge && !seatedNow) {
             PLOG_INFO("[PULSAR] SpaceSync: HOST auto-bridge SKIP - entered space ON FOOT "
-                      "(dock-hatch transit, not takeoff) â†’ no double-load []"sv);
+                      "(dock-hatch transit, not takeoff) → no double-load []"sv);
             NASLOG("SpaceSync: host auto-bridge SKIP (on-foot hatch transit, not takeoff)");
             return;
         }
@@ -1168,7 +1168,7 @@ void OnShipPosReceived(const std::uint8_t* data, std::size_t length)
 //
 // L.3 V1 crash analysis 2026-04-29 (88992e3e dump): engine called
 // FUN_140B38840(ship) which reads ship+0x98 (objectReference NiPointer),
-// then formType byte of pointed-to base. NULL-deref crash â†’ ship's
+// then formType byte of pointed-to base. NULL-deref crash → ship's
 // objectReference pointer was either uninitialized post-load OR our writes
 // to wrong offsets corrupted it. Fix:
 //   (a) write angle to +0x80 (NOT +0x98 which is objectReference)
@@ -1350,7 +1350,7 @@ void TickFollowApply()
 
     // L.2 V1 Step A v2 - F8 hotkey: call engine's TakeoffMenu_Launch fire-
     // helper FUN_141679470 directly. Sets up proper lambda dispatcher
-    // internally â†’ Notify works correctly.
+    // internally → Notify works correctly.
     // Dev hotkeys only: F8 is also the regroup key (HotkeyManualBridge), and this fires
     // the launch as a received one, past the takeoff vote's hold. With the takeoff menu
     // open (the pilot waiting for the vote) that took off without the partner.
@@ -1369,7 +1369,7 @@ void TickFollowApply()
 
     // L.2 V1 Step 2 drain - if step1 fired the UI prompt, step2 fires the
     // Launch event after kStep2DelayMs so the engine's now-registered sink
-    // can process it with valid state â†’ cutscene + cell transition.
+    // can process it with valid state → cutscene + cell transition.
     {
         std::uint64_t due = g_step2DueTick.load(std::memory_order_acquire);
         if (due != 0 && ::GetTickCount64() >= due) {

@@ -683,6 +683,7 @@ namespace Pulsar::Network
                     "of combat."sv);
                 NASLOG("Quicksave timeout - bridge aborted (no fresh save, host in combat?)");
                 m_quicksavePending = false;
+                m_saveTargets.store(0, std::memory_order_release);   // the next save asks afresh
             } else if (now - m_quicksaveLastPoll >= 300) {
                 m_quicksaveLastPoll = now;
 
@@ -1060,9 +1061,10 @@ namespace Pulsar::Network
         // Send as one big reliable packet - ENet fragments automatically. Encrypted :
         // the save (= character data) is the most sensitive payload, so it goes through
         // the same E2E path; the relay only ever forwards ciphertext fragments.
-        // 2-4 players: a save for one joining player goes to that player only.
-        const uint8_t target = m_saveTarget;
-        m_saveTarget = Routing::kNoPlayer;
+        // 2-4 players: a save for joining players goes to those players only. If they
+        // left before it was ready it goes to nobody: sending it to everyone made every
+        // player already in the world reload.
+        const uint8_t targets = m_saveTargets.exchange(0, std::memory_order_acq_rel);
         {
             // Update() polls for the fresh quicksave and calls this OUTSIDE its locked
             // enet_host_service block, while the game thread sends through Send()
@@ -1071,11 +1073,22 @@ namespace Pulsar::Network
             // save went missing without a trace (runs 20261030-212343, 20261031-014412:
             // host "sent", client never "received save").
             std::lock_guard lock(m_enetMutex);
-            if (PeerSlot* one = (target != Routing::kNoPlayer) ? SlotById(target) : nullptr) {
-                g_traffic.CountSent(buf.data(), buf.size());
-                EncSendSlot(*one, 1, buf.data(), buf.size(), true);   // channel 1 for large data
-            } else {
+            if (targets == 0 || (targets & kSaveToAll)) {
                 EncSend(1, buf.data(), buf.size(), true);  // channel 1 for large data
+            } else {
+                int sent = 0;
+                for (uint8_t id = 1; id < Routing::kMaxPlayers; ++id) {
+                    if (!(targets & (1u << id))) continue;
+                    if (PeerSlot* one = SlotById(id)) {
+                        g_traffic.CountSent(buf.data(), buf.size());
+                        EncSendSlot(*one, 1, buf.data(), buf.size(), true);   // channel 1 for large data
+                        ++sent;
+                    }
+                }
+                if (sent == 0) {
+                    PLOG_WARN("[PULSAR] SendSave: the players it was for left before it was ready - not sent"sv);
+                    return;
+                }
             }
         }
 
@@ -1103,7 +1116,9 @@ namespace Pulsar::Network
     void NetworkHost::BeginHostQuicksaveTransfer(uint8_t a_target)
     {
         if (!m_peer || !m_isHost) return;
-        m_saveTarget = a_target;
+        // Several joins while one save is on its way: each joining player gets it.
+        m_saveTargets.fetch_or(a_target < Routing::kMaxPlayers ? static_cast<uint8_t>(1u << a_target) : kSaveToAll,
+                               std::memory_order_acq_rel);
 
         // Snapshot the newest save BEFORE triggering quicksave so we can detect a fresh one
         std::string preSave = SaveScanner::GetMostRecentSavePath();
@@ -2033,8 +2048,10 @@ namespace Pulsar::Network
                 // bridged in the last 90s; a genuine rejoin can press F8.
                 if (m_isHost) {
                     const uint64_t nowMs = GetTickCount64();
+                    // The same player only: a slot freed by one player can go to another
+                    // within the 90 s, and the newcomer needs its save.
                     if (slot.lastAutoBridgeMs != 0 &&
-                        nowMs - slot.lastAutoBridgeMs < 90000) {
+                        nowMs - slot.lastAutoBridgeMs < 90000 && slot.lastBridgeName == hs.playerName) {
                         PLOG_INFO(
                             "[PULSAR] [L.7 D1] handshake re-bridge SKIPPED "
                             "({}ms since last auto-bridge < 90s) - client likely "
@@ -2046,6 +2063,7 @@ namespace Pulsar::Network
                         Pulsar::QuestSync::ReplayMissedStagesToPeer();
                     } else {
                         slot.lastAutoBridgeMs = nowMs;
+                        slot.lastBridgeName = hs.playerName;
                         Pulsar::QuestSync::ForgetMissedStages();   // the save carries them
                         // Only the joining player loads it; the others play on.
                         BeginHostQuicksaveTransfer(slot.id);   // fresh save of current pos (was: stale SendSaveToClient)
@@ -2187,6 +2205,15 @@ namespace Pulsar::Network
         // another player is still connected, the session goes on: only a leaving first
         // partner tears down its figure below, and the next player becomes the first.
         PeerSlot* slot = SlotOf(a_peer);
+        // A peer that never got a player slot (refused as the session was full, or a
+        // half-open connection that timed out) is nobody's departure. It used to count
+        // as "player 255 left": GetRemotePlayerFigure(255) is the first partner's figure,
+        // which was despawned. Our own connecting peer (m_peer, no slot until it
+        // connects) still goes on below, so a failed connect retries.
+        if (!slot && a_peer != m_peer) {
+            PLOG_INFO("[PULSAR] a peer without a player slot disconnected (refused or never connected) - ignored"sv);
+            return;
+        }
         const uint8_t leftId = slot ? slot->id : Routing::kNoPlayer;
         const bool wasPrimary = (m_peer == a_peer);
         if (slot) FreeSlot(*slot);
@@ -2218,6 +2245,7 @@ namespace Pulsar::Network
 
         // Abort any in-flight quicksave transfer
         m_quicksavePending = false;
+        m_saveTargets.store(0, std::memory_order_release);
         m_quicksaveCandidate.clear();
 
         // Clear NPC-sync tracking so no stale state carries over to reconnect
@@ -2241,8 +2269,8 @@ namespace Pulsar::Network
         auto& remoteMgr = RemotePlayer::GetRemotePlayerManager();
         remoteMgr.RequestDespawn();
         for (uint8_t id = 0; id < Routing::kMaxPlayers; ++id) {
-            auto& fig = RemotePlayer::GetRemotePlayerFigure(id);
-            if (fig.IsExtra()) fig.RequestDespawn();
+            auto* fig = RemotePlayer::FindRemotePlayerFigure(id);   // never makes one
+            if (fig && fig->IsExtra()) fig->RequestDespawn();
         }
 
         if (m_isHost) {

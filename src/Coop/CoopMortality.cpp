@@ -112,6 +112,13 @@ namespace Pulsar::Coop::Mortality
         for (auto& c : g_combatOf) c.store(false, std::memory_order_relaxed);
     }
 
+    // Player a_id's figure here, or null. Never makes one: GetRemotePlayerFigure turns
+    // an unused ID into an extra figure, and these loops ask for every ID.
+    static RE::Actor* FigureActorOf(std::uint8_t a_id)
+    {
+        auto* fig = Pulsar::RemotePlayer::FindRemotePlayerFigure(a_id);
+        return fig ? fig->GetRemoteActor() : nullptr;
+    }
     static std::uint8_t SenderId()
     {
         const auto s = Pulsar::Network::NetworkHost::CurrentSender();
@@ -1113,7 +1120,7 @@ namespace Pulsar::Coop::Mortality
         s_lastMs = now;
         for (std::uint8_t id = 0; id < 4; ++id) {
             if (id == LocalId() || g_downedOf[id].load(std::memory_order_relaxed)) continue;
-            RE::Actor* fig = Pulsar::RemotePlayer::GetRemotePlayerFigure(id).GetRemoteActor();
+            RE::Actor* fig = FigureActorOf(id);
             if (!fig) continue;
             float cur = 0.0f, max = 0.0f;
             bool dead = false;
@@ -1131,7 +1138,7 @@ namespace Pulsar::Coop::Mortality
     float FigureHealthForTest(std::uint8_t a_id)
     {
         auto* av = HealthAV();
-        RE::Actor* fig = a_id < 4 ? Pulsar::RemotePlayer::GetRemotePlayerFigure(a_id).GetRemoteActor() : nullptr;
+        RE::Actor* fig = FigureActorOf(a_id);
         float cur = -1.0f;
         bool dead = false;
         std::uint32_t bits = 0, flags = 0;
@@ -1474,7 +1481,7 @@ namespace Pulsar::Coop::Mortality
                 bool           inRange  = false;
                 for (std::uint8_t id = 0; id < 4 && !inRange; ++id) {
                     if (id == LocalId() || !g_downedOf[id].load(std::memory_order_relaxed)) continue;
-                    RE::Actor* fig = Pulsar::RemotePlayer::GetRemotePlayerFigure(id).GetRemoteActor();
+                    RE::Actor* fig = FigureActorOf(id);
                     if (SafeNearActor(player, fig, kReviveRadius, clonePtr, distSq)) { inRange = true; target = id; }
                 }
 
@@ -1648,7 +1655,7 @@ namespace Pulsar::Coop::Mortality
         std::uint8_t target = 0xFF;
         for (std::uint8_t id = 0; id < 4 && target == 0xFF; ++id) {
             if (id == LocalId() || !g_downedOf[id].load(std::memory_order_relaxed)) continue;
-            if (reinterpret_cast<RE::Actor*>(a_self) == Pulsar::RemotePlayer::GetRemotePlayerFigure(id).GetRemoteActor()) target = id;
+            if (reinterpret_cast<RE::Actor*>(a_self) == FigureActorOf(id)) target = id;
         }
         const bool isClone = target != 0xFF;
         PLOG_INFO("[REVIVE-DIAG] wayA activate self=0x{:X} isClone={}"sv,
