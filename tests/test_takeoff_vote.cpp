@@ -16,6 +16,23 @@ TEST(TakeoffVote, SoloLaunchPasses)
     CHECK(!v.Open());
 }
 
+TEST(TakeoffVote, CrewSeatedAboardNeedsNoVote)
+{
+    TakeoffVotePolicy v;
+    CHECK(v.LaunchRequested(1000, 1, 1) == Request::kPass);    // passenger in its seat
+    CHECK(!v.Open());
+    CHECK(v.LaunchRequested(1000, 3, 3) == Request::kPass);    // all three seated
+    CHECK(!v.Open());
+}
+
+TEST(TakeoffVote, CrewPartlySeatedStillVotes)
+{
+    TakeoffVotePolicy v;
+    CHECK(v.LaunchRequested(1000, 3, 2) == Request::kHoldAndAsk);   // one is not aboard
+    CHECK(v.Open());
+    CHECK(v.LaunchRequested(2000, 3, 3) == Request::kHold);         // an open vote stays open
+}
+
 TEST(TakeoffVote, LaunchWaitsForTheCrew)
 {
     TakeoffVotePolicy v;

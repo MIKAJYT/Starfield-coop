@@ -135,6 +135,7 @@ namespace Pulsar::TestBot
             int         rewardCredits = 500;          // reward: credits given as the quest reward
             std::string notifyTest;                   // message check: on-screen text sent 3 times, +0/+6/+12 s after the act
             bool        takeoffPartnerOutside = false;  // takeoff: the client leaves the ship first, so the vote must move it aboard
+            bool        takeoffPartnerSeated = false;   // takeoff: the client sits in a passenger seat and never answers a vote
             bool        takeoffF8DuringVote = false;    // takeoff: the pilot "presses" F8 (regroup key) while the vote waits
             bool        takeoffMenuOnly = false;        // takeoff experiment: open the takeoff menu, never fire the launch
         };
@@ -151,6 +152,7 @@ namespace Pulsar::TestBot
             std::uint64_t cloneSeenSinceMs = 0;
             std::uint64_t firstCloneSeenMs = 0;   // first tick the clone was visible (never reset)
             bool          partnerExited = false; // takeoff, client: tried the ship hatch
+            bool          partnerSat = false;    // takeoff, client: tried a passenger seat
             std::string   partnerExitInfo;
             bool          acted = false;
             std::uint64_t actedAtWallMs = 0;
@@ -287,6 +289,7 @@ namespace Pulsar::TestBot
                 else if (key == "rewardcredits") s.rewardCredits = std::stoi(value);
                 else if (key == "notifytest") s.notifyTest = value;
                 else if (key == "takeoffpartneroutside") s.takeoffPartnerOutside = (value == "1" || value == "true");
+                else if (key == "takeoffpartnerseated") s.takeoffPartnerSeated = (value == "1" || value == "true");
                 else if (key == "takeofff8duringvote") s.takeoffF8DuringVote = (value == "1" || value == "true");
                 else if (key == "takeoffmenuonly") s.takeoffMenuOnly = (value == "1" || value == "true");
             }
@@ -1408,7 +1411,7 @@ namespace Pulsar::TestBot
 
         // Takeoff, client: answer the pilot's request 10 s after it arrives, so
         // the test can tell a held launch from one that did not wait.
-        if (!isHost && TakeoffLike() && !s_state.voteReadyWallMs) {
+        if (!isHost && TakeoffLike() && !s_state.cfg.takeoffPartnerSeated && !s_state.voteReadyWallMs) {
             if (!s_state.voteSeenAtMs && Pulsar::Coop::TakeoffVote::PendingRequestForTest()) {
                 s_state.voteSeenAtMs = now;
                 s_state.voteSeenWallMs = WallMs();
@@ -1442,6 +1445,29 @@ namespace Pulsar::TestBot
                 result = SafeActivateAsPlayer(doors[tried], player);
             std::snprintf(msg, sizeof(msg), "left the ship: %d load doors, tried %d, activate=%d, from cell %08X",
                           found, tried, result, me.cellID);
+            s_state.partnerExitInfo = msg;
+            Trace(msg);
+            PLOG_INFO("[PULSAR] TestBot: takeoff {}"sv, s_state.partnerExitInfo);
+        }
+
+        // Takeoff, client (TakeoffPartnerSeated): sit in a passenger seat 10 s after the
+        // partner shows up, so the pilot's launch finds the crew seated aboard.
+        if (!isHost && TakeoffLike() && s_state.cfg.takeoffPartnerSeated && !s_state.partnerSat &&
+            cloneVisible && me.valid && now - s_state.cloneSeenSinceMs >= 10000) {
+            s_state.partnerSat = true;
+            DoorSeen seen[64];
+            const int n = CollectFurniture(player->parentCell, me.x, me.y, me.z, 25.0f, seen, 64);
+            RE::TESObjectREFR* seat = nullptr;
+            float bestD = 1e9f;
+            for (int i = 0; i < n; ++i) {
+                const char* name = seen[i].ref->GetDisplayFullName();
+                if (!name || !*name || std::strstr(name, "ilot")) continue;   // a named seat, not the pilot's
+                if (seen[i].dist < bestD) { seat = seen[i].ref; bestD = seen[i].dist; }
+            }
+            char msg[160];
+            const int r = seat ? SafeActivateAsPlayer(seat, player) : 0;
+            std::snprintf(msg, sizeof(msg), "sat down: seat %08X %.1f m away, activate=%d",
+                          seat ? seat->formID : 0u, seat ? bestD : 0.0f, r);
             s_state.partnerExitInfo = msg;
             Trace(msg);
             PLOG_INFO("[PULSAR] TestBot: takeoff {}"sv, s_state.partnerExitInfo);

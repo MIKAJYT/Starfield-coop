@@ -5,6 +5,7 @@
 #include "Coop/TakeoffVotePolicy.h"
 #include "Network/NetworkHost.h"
 #include "Network/PacketTypes.h"
+#include "RemotePlayer/RemotePlayerManager.h"
 #include "SpaceSync/SpaceSync.h"
 #include "UI/HudMessage.h"
 
@@ -71,14 +72,27 @@ bool HoldLaunch()
 {
     auto& net = Pulsar::Network::GetSingleton();
     if (!Pulsar::GetConfig().coopTakeoffVote || !net.IsConnected()) return false;
+    // Partners already sitting in this ship (pilot's cell = the ship's interior).
+    int seated = 0;
+    if (Pulsar::GetConfig().coopTakeoffSkipSeated) {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        seated = player ? Pulsar::RemotePlayer::CountFiguresSeatedIn(player->parentCell) : 0;
+    }
+    const int crew = static_cast<int>(net.PlayerCount()) - 1;
     TakeoffVotePolicy::Request r;
     std::uint32_t id;
+    bool wasOpen;
     {
         std::lock_guard lk(s_mutex);
-        r = s_pilot.LaunchRequested(GetTickCount64(), static_cast<int>(net.PlayerCount()) - 1);
+        wasOpen = s_pilot.Open();
+        r = s_pilot.LaunchRequested(GetTickCount64(), crew, seated);
         id = s_pilot.Id();
     }
-    if (r == TakeoffVotePolicy::Request::kPass) return false;
+    if (r == TakeoffVotePolicy::Request::kPass) {
+        if (!wasOpen && crew > 0)
+            PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] crew seated aboard ({}/{}) - launching without a vote"sv, seated, crew);
+        return false;
+    }
     if (r == TakeoffVotePolicy::Request::kHoldAndAsk) {
         Send(kRequest, id);
         PLOG_INFO("[PULSAR] [TAKEOFF-VOTE] launch held, vote {} asks the crew (0/{} ready)"sv, id, net.PlayerCount() - 1);

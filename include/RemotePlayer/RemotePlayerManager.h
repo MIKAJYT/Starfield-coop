@@ -8,7 +8,7 @@
 #include "Animation/BoneSync.h"
 #include "Network/PacketTypes.h"
 
-namespace RE { class TESGlobal; class Actor; class TESObjectREFR; }
+namespace RE { class TESGlobal; class Actor; class TESObjectREFR; class TESObjectCELL; }
 namespace Pulsar::Network { struct BoneData; }
 
 namespace Pulsar::RemotePlayer
@@ -299,5 +299,7 @@ namespace Pulsar::RemotePlayer
     void    SetFirstPartner(uint8_t a_playerId);
     uint8_t FirstPartner();
     bool    IsFigureActor(RE::Actor* a_actor);
+    // Partner figures sitting in a seat in this cell (the takeoff vote: crew already aboard).
+    int     CountFiguresSeatedIn(RE::TESObjectCELL* a_cell);
     void    ProcessExtraFigures();
 }

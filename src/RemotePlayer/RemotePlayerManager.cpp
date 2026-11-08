@@ -77,6 +77,18 @@ namespace Pulsar::RemotePlayer
         return f;
     }
 
+    int CountFiguresSeatedIn(RE::TESObjectCELL* a_cell)
+    {
+        if (!a_cell) return 0;
+        auto seatedHere = [a_cell](RE::Actor* a) {
+            return a && Pulsar::VehicleSync::IsCloneSeated(a) && a->parentCell == a_cell;
+        };
+        int n = seatedHere(g_remotePlayerManager.GetRemoteActor()) ? 1 : 0;
+        for (auto& f : g_extraFigures)
+            if (f.IsExtra() && seatedHere(f.GetRemoteActor())) ++n;
+        return n;
+    }
+
     bool IsFigureActor(RE::Actor* a_actor)
     {
         if (!a_actor) return false;

@@ -18,6 +18,17 @@ number here means the code for that milestone is in, not that the goal is met.
 
 ## Unreleased - full co-op spec, phase 6: ships
 
+- **No takeoff vote when the crew is already seated.** The pilot's launch waited for the
+  passenger to press F3 even when they sat in the ship (owner, first session with a
+  friend). Now, when every partner's figure sits in a seat in the pilot's ship, the ship
+  takes off at once; otherwise the vote runs as before. Setting:
+  `CoopTakeoffSkipSeated` (default `1`; `0` always asks). *Tested:* 2 new vote tests.
+  *Bot-tested* (`takeoff -PartnerSeated`: the client sits in a passenger seat and never
+  answers): 2 of 2 passed, in space 18 s and 29 s after the launch with no request,
+  client along. A third run's sit-down did not take in the game; the vote then held,
+  as it should for a crew member who is not seated. Twin `CoopTakeoffSkipSeated = 0`
+  failed (never took off). The plain vote run still passes (client answered F3 after
+  10 s, in space at +46 s).
 - **One-file setup for a friend** (`tools/package_single_exe.ps1` makes
   `dist/PULSAR-Revived-Setup-<version>.exe`, ~127 MB). The tool carries the mod and its
   background companion inside and unpacks them on first start. It then finds Starfield,

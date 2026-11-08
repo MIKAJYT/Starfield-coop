@@ -267,6 +267,9 @@ namespace Pulsar
         // ini: CoopTakeoffVote = 0, HotkeyTakeoffReady = F3
         bool        coopTakeoffVote    = true;
         int         hotkeyTakeoffReady = 0x72;  // VK_F3
+        // No vote when every partner already sits in a seat in the pilot's ship (nobody
+        // can be left behind). ini: CoopTakeoffSkipSeated = 0 always asks.
+        bool        coopTakeoffSkipSeated = true;
         // On-screen vote messages (the engine's DebugNotification). The first
         // version went through Papyrus Debug.Notification, which faulted inside
         // the engine's dispatch and ended the game (runs 20261028-204918 to

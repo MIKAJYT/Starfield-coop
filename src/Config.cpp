@@ -263,6 +263,12 @@ namespace Pulsar
                 cfg.coopTakeoffVote = (v == "1" || v == "true" || v == "yes" || v == "on");
                 PLOG_INFO("[PULSAR] Config: CoopTakeoffVote = {}"sv, cfg.coopTakeoffVote);
             }
+            else if (keyLower == "cooptakeoffskipseated" || keyLower == "coop_takeoff_skip_seated") {
+                std::string v = value;
+                std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+                cfg.coopTakeoffSkipSeated = (v == "1" || v == "true" || v == "yes" || v == "on");
+                PLOG_INFO("[PULSAR] Config: CoopTakeoffSkipSeated = {}"sv, cfg.coopTakeoffSkipSeated);
+            }
             else if (keyLower == "coopvotemessages" || keyLower == "coop_vote_messages") {
                 std::string v = value;
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);

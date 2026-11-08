@@ -28,11 +28,15 @@ namespace Pulsar::Coop {
         enum class Answer { kNone, kSendGo };
         enum class Step { kNone, kLaunch, kTimedOut };
 
-        Request LaunchRequested(std::uint64_t a_nowMs, int a_crew)
+        // a_seatedAboard: crew members already sitting in a seat in the pilot's ship. When
+        // that is all of them nobody can be left behind, so the launch goes through
+        // without asking (owner 2026-11-08: the passenger had to press F3 though seated).
+        Request LaunchRequested(std::uint64_t a_nowMs, int a_crew, int a_seatedAboard = 0)
         {
             if (m_state == State::kBoarding) return Request::kHold;
             if (m_state == State::kWaiting) return Request::kHold;
             if (a_crew <= 0) return Request::kPass;
+            if (a_seatedAboard >= a_crew) return Request::kPass;
             m_state = State::kWaiting;
             ++m_id;
             m_crew = a_crew;
