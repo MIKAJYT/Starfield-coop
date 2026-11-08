@@ -54,7 +54,7 @@
                 <Border Grid.Row="2" Margin="16,12,16,16"
                         Classes="StatusPill"
                         Classes.Connected="{Binding IsConnected}"
-                        Classes.Disconnected="{Binding !IsConnected}"
+                        Classes.Disconnected="{Binding ShowDisconnected}"
                         HorizontalAlignment="Stretch">
                     <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
                         <Ellipse Width="9" Height="9" Fill="White" VerticalAlignment="Center" />

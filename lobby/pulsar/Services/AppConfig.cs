@@ -144,6 +144,14 @@ public sealed class AppConfig
         catch { /* best-effort */ }
     }
 
+    // Is there a lobby server to connect the companion to? Online mode needs an endpoint (this
+    // fork compiles none in; see OfficialEndpoint) - without one, ResolveStdbUri falls back to
+    // the local stack, which isn't running, and the companion quits a second after starting.
+    // Join codes ("Play with friends, no server") need no lobby at all.
+    [JsonIgnore]
+    public bool HasLobbyServer =>
+        DbMode == DbMode.Local || !string.IsNullOrWhiteSpace(OfficialStdbUri);
+
     // Resolve the STDB URI for the active DB mode, defaulting the scheme to wss://.
     public string ResolveStdbUri()
     {

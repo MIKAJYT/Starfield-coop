@@ -28,7 +28,17 @@ public partial class MainWindowViewModel : ObservableObject
     public DaemonBridge Bridge => _bridge;
 
     // ── shared session state (bound across pages) ───────────────────────────────
-    [ObservableProperty] private bool _isConnected;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowDisconnected))]
+    private bool _isConnected;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowDisconnected))]
+    private bool _hasLobbyServer = true;
+
+    // Red status pill: a lobby server exists but we are not connected to it. Without a
+    // lobby server the pill stays neutral - nothing is wrong, join codes need none.
+    public bool ShowDisconnected => !IsConnected && HasLobbyServer;
     [ObservableProperty] private bool _nameClaimed;
     [ObservableProperty] private bool _isHosting;
     [ObservableProperty] private string _connectionStatus = "Disconnected";
@@ -366,6 +376,13 @@ public partial class MainWindowViewModel : ObservableObject
             return;
         }
 
+        if (!_config.HasLobbyServer)
+        {
+            Log("No lobby server set up - play with join codes (Play with friends, no server).");
+            UpdateState();
+            return;
+        }
+
         if (_startingDaemon) return;
         _startingDaemon = true;
         try
@@ -693,9 +710,12 @@ public partial class MainWindowViewModel : ObservableObject
     {
         bool c = _bridge.IsConnected;
         IsConnected = c;
-        ConnectionStatus = c ? "Connected" : "Disconnected";
+        HasLobbyServer = _config.HasLobbyServer;
+        ConnectionStatus = c ? "Connected" : HasLobbyServer ? "Disconnected" : "No lobby server";
         if (NameClaimed)
             NameStatus = $"You are '{_config.PlayerName?.Trim()}'";
+        else if (!HasLobbyServer)
+            NameStatus = "Use a join code below to play with friends.";
         else
             NameStatus = c ? "claiming your name…" : "not claimed";
 

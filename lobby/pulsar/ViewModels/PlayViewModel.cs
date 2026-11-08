@@ -125,7 +125,9 @@ public partial class PlayViewModel : ViewModelBase
     public bool CanHost => _shell.IsConnected && _shell.NameClaimed;
     public bool CanJoin => _shell.IsConnected && _shell.NameClaimed && !_shell.IsHosting;
     public bool CanJoinSelected => CanJoin && SelectedLobby != null;
-    public bool IsOffline => !_shell.IsConnected;
+    // Reconnect only helps when there is a lobby server to reach.
+    public bool IsOffline => !_shell.IsConnected && _shell.HasLobbyServer;
+    public bool HasLobby => _shell.HasLobbyServer;
 
     [RelayCommand]
     private void HostToggle()
@@ -219,6 +221,7 @@ public partial class PlayViewModel : ViewModelBase
         OnPropertyChanged(nameof(CanJoin));
         OnPropertyChanged(nameof(CanJoinSelected));
         OnPropertyChanged(nameof(IsOffline));
+        OnPropertyChanged(nameof(HasLobby));
         OnPropertyChanged(nameof(CanDirect));
     }
 }
